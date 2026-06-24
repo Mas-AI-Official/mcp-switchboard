@@ -92,8 +92,38 @@ export interface VaultConfig {
   backend: "encrypted-file" | "env";
 }
 
+/** Dashboard-editable presentation/integration settings (the Composio "Settings" pages). */
+export interface SettingsConfig {
+  /** `/settings/general` — naming shown across the dashboard. Cosmetic; no effect on routing. */
+  general?: {
+    organization_name?: string;
+    project_name?: string;
+  };
+  /** `/settings/auth-screen` — branding for the OAuth consent/callback landing page. */
+  auth_screen?: {
+    title?: string;
+    subtitle?: string;
+    logo_url?: string;
+    /** Hex accent color, e.g. `#2dd4bf`. */
+    accent_color?: string;
+    support_url?: string;
+  };
+  /** `/settings/webhook` — optional outbound notifications when a tool call is decided. */
+  webhook?: {
+    enabled?: boolean;
+    /** HTTPS endpoint to POST audit events to. */
+    url?: string;
+    /** Which audit decisions to deliver. Empty/omitted = all. */
+    events?: ("allow" | "deny" | "approval_required")[];
+    /** `${vault:..}` reference to an HMAC-SHA256 signing secret (sent as `X-Switchboard-Signature`). */
+    secret_ref?: string;
+  };
+}
+
 export interface SwitchboardConfig {
   gateway: GatewayConfig;
   vault: VaultConfig;
   servers: ServerConfig[];
+  /** Dashboard-editable settings. Optional so pre-existing configs remain valid. */
+  settings?: SettingsConfig;
 }

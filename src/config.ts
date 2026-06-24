@@ -79,11 +79,44 @@ const vault = z
   .strict()
   .default({ backend: "encrypted-file" });
 
+const settings = z
+  .object({
+    general: z
+      .object({
+        organization_name: z.string().optional(),
+        project_name: z.string().optional(),
+      })
+      .strict()
+      .optional(),
+    auth_screen: z
+      .object({
+        title: z.string().optional(),
+        subtitle: z.string().optional(),
+        logo_url: z.string().optional(),
+        accent_color: z.string().optional(),
+        support_url: z.string().optional(),
+      })
+      .strict()
+      .optional(),
+    webhook: z
+      .object({
+        enabled: z.boolean().optional(),
+        url: z.string().optional(),
+        events: z.array(z.enum(["allow", "deny", "approval_required"])).optional(),
+        secret_ref: z.string().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict()
+  .optional();
+
 const configSchema = z
   .object({
     gateway,
     vault,
     servers: z.array(serverConfig).default([]),
+    settings,
   })
   .strict();
 

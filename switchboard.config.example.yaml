@@ -33,6 +33,30 @@ vault:
   # env            -> read secrets from the process environment only (CI / containers)
   backend: encrypted-file
 
+# Dashboard-managed presentation + integrations. Every field here is optional and is
+# round-tripped by the Settings pages in the web dashboard — hand-edit or click, either works.
+settings:
+  general:
+    organization_name: Local      # shown in the dashboard header; cosmetic only
+    project_name: default
+
+  # Branding for the OAuth callback page users land on after connecting a provider.
+  auth_screen:
+    title: Connected
+    subtitle: You can close this tab and return to your agent.
+    logo_url: ""                  # absolute https URL, or leave blank for the default mark
+    accent_color: "#2dd4bf"
+    support_url: ""
+
+  # Forward policy decisions to an external URL. When `secret_ref` names a vault secret,
+  # each delivery carries an HMAC-SHA256 `x-switchboard-signature` header so the receiver
+  # can verify it came from you. Without a secret, payloads are sent unsigned.
+  webhook:
+    enabled: false
+    url: ""                       # e.g. https://example.com/hooks/switchboard
+    events: [deny, approval_required]   # any of: allow | deny | approval_required
+    secret_ref: ""                # vault key name, e.g. webhook_secret (set via `switchboard vault set`)
+
 servers:
   # --- mount an existing MCP server from npm ---
   - id: github

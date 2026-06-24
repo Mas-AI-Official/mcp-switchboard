@@ -14,5 +14,15 @@ export { evaluate, inferScope, type PolicyDecision } from "./policy.js";
 export { approve, setStdioActive } from "./approval.js";
 export { audit, recentAudit, type AuditEntry } from "./audit.js";
 export { startDashboard, type DashboardHandle } from "./dashboard.js";
-export { dashboardHtml } from "./console.js";
+export {
+  loadCatalog,
+  writeCatalog,
+  ingestCatalog,
+  ingestCatalogVerbose,
+  queryCatalog,
+  defaultCatalogPath,
+  type Toolkit,
+  type ToolkitMount,
+  type CatalogSnapshot,
+} from "./catalog.js";
 export type * from "./types.js";

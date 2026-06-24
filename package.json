@@ -42,6 +42,8 @@
   },
   "files": [
     "dist",
+    "public",
+    "data",
     "switchboard.config.example.yaml",
     "README.md",
     "LICENSE"

@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Switchboard</title>
+    <meta name="description" content="Local-first MCP aggregator — one governed endpoint for every tool." />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230d1117'/%3E%3Cpath d='M9 11h14M9 16h14M9 21h14' stroke='%232dd4bf' stroke-width='2.5' stroke-linecap='round'/%3E%3Ccircle cx='12' cy='11' r='2.4' fill='%230d1117' stroke='%232dd4bf' stroke-width='2'/%3E%3Ccircle cx='20' cy='16' r='2.4' fill='%230d1117' stroke='%232dd4bf' stroke-width='2'/%3E%3Ccircle cx='13' cy='21' r='2.4' fill='%230d1117' stroke='%232dd4bf' stroke-width='2'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <div id="app" class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 32 32" width="26" height="26">
+              <rect width="32" height="32" rx="7" fill="#0d1117" />
+              <path d="M9 11h14M9 16h14M9 21h14" stroke="#2dd4bf" stroke-width="2.5" stroke-linecap="round" />
+              <circle cx="12" cy="11" r="2.4" fill="#0d1117" stroke="#2dd4bf" stroke-width="2" />
+              <circle cx="20" cy="16" r="2.4" fill="#0d1117" stroke="#2dd4bf" stroke-width="2" />
+              <circle cx="13" cy="21" r="2.4" fill="#0d1117" stroke="#2dd4bf" stroke-width="2" />
+            </svg>
+          </span>
+          <span class="brand-name">Switchboard</span>
+        </div>
+
+        <nav class="nav" id="nav">
+          <a class="nav-item" href="#/catalog" data-match="#/catalog">
+            <span class="nav-ico">▦</span> Toolkits
+          </a>
+          <a class="nav-item" href="#/accounts" data-match="#/accounts">
+            <span class="nav-ico">⛓</span> Connected Accounts
+          </a>
+          <a class="nav-item" href="#/servers" data-match="#/servers">
+            <span class="nav-ico">⊟</span> Servers
+          </a>
+          <a class="nav-item" href="#/logs" data-match="#/logs">
+            <span class="nav-ico">≡</span> Logs
+          </a>
+          <a class="nav-item" href="#/usage" data-match="#/usage">
+            <span class="nav-ico">◔</span> Usage
+          </a>
+          <div class="nav-group-label">Settings</div>
+          <a class="nav-item nav-sub" href="#/settings/general" data-match="#/settings/general">General</a>
+          <a class="nav-item nav-sub" href="#/settings/usage" data-match="#/settings/usage">Usage &amp; billing</a>
+          <a class="nav-item nav-sub" href="#/settings/auth-screen" data-match="#/settings/auth-screen">Auth screen</a>
+          <a class="nav-item nav-sub" href="#/settings/webhook" data-match="#/settings/webhook">Webhook</a>
+          <a class="nav-item nav-sub" href="#/settings/api-keys" data-match="#/settings/api-keys">API keys</a>
+        </nav>
+
+        <div class="sidebar-foot">
+          <div class="endpoint-card" id="endpoint-card">
+            <div class="endpoint-label">MCP endpoint</div>
+            <code class="endpoint-url" id="endpoint-url">loading…</code>
+            <button class="btn btn-ghost btn-sm" id="copy-endpoint" type="button">Copy</button>
+          </div>
+          <div class="org-line" id="org-line"></div>
+        </div>
+      </aside>
+
+      <main class="main" id="view" role="main" aria-live="polite">
+        <div class="loading">Loading…</div>
+      </main>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="assertive"></div>
+    <div id="modal-root"></div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

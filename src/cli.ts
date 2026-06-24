@@ -9,6 +9,8 @@
  *   switchboard doctor               check the environment + config
  *   switchboard catalog              list OAuth providers + connection status
  *   switchboard connect <provider>   authorize a provider via local loopback OAuth
+ *   switchboard toolkits sync        rebuild the integration catalog from open indexes
+ *   switchboard toolkits stats       print catalog counts
  *   switchboard vault set <name>     store a secret (value read from stdin)
  *   switchboard vault list|rm <name> manage secrets
  *
@@ -23,11 +25,16 @@ import { Command } from "commander";
 import { loadConfig, writeConfig, starterConfig } from "./config.js";
 import { createGateway } from "./gateway.js";
 import { startDashboard } from "./dashboard.js";
-import { dashboardHtml } from "./console.js";
 import { Vault, HOME_DIR } from "./vault.js";
 import { OAuthStore } from "./oauth.js";
 import { ApiKeyStore } from "./apikeys.js";
 import { inferScope, evaluate } from "./policy.js";
+import {
+  ingestCatalogVerbose,
+  loadCatalog,
+  writeCatalog,
+  defaultCatalogPath,
+} from "./catalog.js";
 import { log, out } from "./logger.js";
 
 const DEFAULT_CONFIG = "switchboard.config.yaml";
@@ -69,7 +76,7 @@ program
     const wantsHttp = cfg.gateway.transport.includes("http");
     const wantsStdio = cfg.gateway.transport.includes("stdio");
 
-    if (wantsHttp) await startDashboard(gateway, cfg, dashboardHtml(), path);
+    if (wantsHttp) await startDashboard(gateway, cfg, path);
 
     if (wantsStdio) {
       await gateway.serveStdio(); // resolves once connected; process stays alive on the transport
@@ -89,7 +96,7 @@ program
     const path = configPath();
     const cfg = loadConfig(path);
     const gateway = await createGateway(cfg);
-    const handle = await startDashboard(gateway, cfg, dashboardHtml(), path);
+    const handle = await startDashboard(gateway, cfg, path);
     out(`Open ${handle.url}`);
   });
 
@@ -169,6 +176,42 @@ program
     }
     out(`\nStore client credentials first: \`switchboard vault set oauth_<provider>_client_id\` (and _client_secret).`);
     out(`Then connect: \`switchboard connect <provider>\`.`);
+  });
+
+const toolkitsCmd = program
+  .command("toolkits")
+  .description("manage the browsable integration catalog (the dashboard's toolkit grid)");
+
+toolkitsCmd
+  .command("sync")
+  .description("rebuild data/catalog.json from the open MCP Registry + APIs.guru indexes")
+  .action(async () => {
+    out("Syncing catalog from the MCP Registry and APIs.guru…");
+    const { snapshot, errors } = await ingestCatalogVerbose();
+    snapshot.generated_at = new Date().toISOString();
+    const path = defaultCatalogPath();
+    writeCatalog(snapshot, path);
+    log.ok(
+      `wrote ${snapshot.counts.total} toolkits (${snapshot.counts.mcp_registry} MCP, ${snapshot.counts.apis_guru} OpenAPI) to ${path}`,
+    );
+    for (const e of errors) log.warn(`partial: ${e.source} failed — ${e.message}`);
+  });
+
+toolkitsCmd
+  .command("stats")
+  .description("print counts from the on-disk catalog snapshot")
+  .action(() => {
+    const c = loadCatalog();
+    if (c.counts.total === 0) {
+      out("catalog is empty — run `switchboard toolkits sync`");
+      return;
+    }
+    out(`\nCatalog (${c.generated_at || "unstamped"}):`);
+    out(`  total:        ${c.counts.total}`);
+    out(`  MCP servers:  ${c.counts.mcp_registry}`);
+    out(`  OpenAPI:      ${c.counts.apis_guru}`);
+    out(`\n  ${c.categories.length} categories:`);
+    for (const cat of c.categories) out(`    ${cat.name.padEnd(22)} ${cat.count}`);
   });
 
 program
