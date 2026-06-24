@@ -1,0 +1,71 @@
+{
+  "name": "switchboard-mcp",
+  "version": "0.1.0",
+  "description": "Local-first governed MCP aggregator — connect every MCP server to your agent through one endpoint, with on/off toggles, read/write/full scopes, an encrypted local credential vault, and an audit log. A free, self-hosted alternative to hosted tool routers.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "MAS-AI Technologies",
+  "homepage": "https://github.com/Masoud-Masoori/switchboard#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Masoud-Masoori/switchboard.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Masoud-Masoori/switchboard/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "aggregator",
+    "gateway",
+    "proxy",
+    "ai",
+    "agents",
+    "claude",
+    "cursor",
+    "llm-tools",
+    "governance",
+    "local-first",
+    "self-hosted",
+    "composio-alternative"
+  ],
+  "bin": {
+    "switchboard": "dist/cli.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "switchboard.config.example.yaml",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18.18.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/cli.js",
+    "serve": "node dist/cli.js serve",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "commander": "15.0.0",
+    "express": "5.2.1",
+    "yaml": "2.9.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/express": "5.0.5",
+    "@types/node": "22.10.5",
+    "typescript": "5.7.3"
+  }
+}

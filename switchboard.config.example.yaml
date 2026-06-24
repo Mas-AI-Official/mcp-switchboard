@@ -1,0 +1,77 @@
+# switchboard.config.example.yaml
+# One governed MCP endpoint for every app your agents touch.
+#
+# Copy this to `switchboard.config.yaml` (or run `switchboard init`), edit it,
+# store secrets with `switchboard vault set <name>`, then `switchboard serve`.
+# The dashboard reads and writes this file; you can also hand-edit it.
+
+gateway:
+  # How agents connect TO Switchboard. Run both at once if you like.
+  #   stdio -> for `claude mcp add` / Cursor / local MCP clients
+  #   http  -> Streamable HTTP endpoint at /mcp + the web dashboard
+  transport: [stdio, http]
+  http:
+    host: 127.0.0.1        # local-first: bound to loopback, not the network
+    port: 8088
+  # How upstream tools are presented to agents:
+  #   namespaced -> serverId__toolName (collision-free, the safe default)
+  #   flat       -> bare toolName (first server to claim a name wins)
+  #   search     -> expose just two meta-tools (find_tools + call_tool) so the
+  #                 context window stays flat no matter how many servers you mount
+  tool_exposure: namespaced
+  default_policy: read     # read | write | full  (least privilege by default)
+
+vault:
+  # encrypted-file -> AES-256-GCM blob in ~/.switchboard (portable, zero native deps)
+  # env            -> read secrets from the process environment only (CI / containers)
+  backend: encrypted-file
+
+servers:
+  # --- mount an existing MCP server from npm ---
+  - id: github
+    source: npx
+    package: "@modelcontextprotocol/server-github"
+    enabled: true
+    policy: write                       # this app may read + write, but not "full"
+    credentials:
+      GITHUB_TOKEN: ${vault:github_pat}  # resolved from the local vault at mount time
+    tools:                              # per-tool overrides (optional)
+      delete_repo:  { enabled: false }  # hard-block the destructive one
+      create_issue: { policy: write }
+      get_repo:     { policy: read }
+
+  # --- a read-only server ---
+  - id: notion
+    source: npx
+    package: "@notionhq/notion-mcp-server"
+    enabled: true
+    policy: read
+    credentials:
+      NOTION_TOKEN: ${vault:notion}
+
+  # --- a remote (hosted) MCP server, toggled OFF until you wire its auth ---
+  - id: slack
+    source: remote
+    url: https://example-slack-mcp.invalid/mcp
+    enabled: false
+    auth: oauth
+
+  # --- the bundled test server: real, no credentials, great for a first run ---
+  - id: everything
+    source: npx
+    package: "@modelcontextprotocol/server-everything"
+    enabled: true
+    policy: read
+    approval:
+      require_for: [write, full]        # human approval gate on mutating calls
+
+  # --- app2mcp: generate an MCP server from your own OpenAPI spec (roadmap, Phase 4) ---
+  # Left disabled because the generator is not implemented yet; mounting it will fail closed.
+  - id: internal-api
+    source: app2mcp
+    openapi: ./specs/internal.yaml
+    base_url: https://api.internal.example.com
+    enabled: false
+    policy: read
+    approval:
+      require_for: [write, full]

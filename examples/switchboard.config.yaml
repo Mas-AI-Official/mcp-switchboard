@@ -1,0 +1,46 @@
+# examples/switchboard.config.yaml
+# A "many servers" setup that uses `search` tool-exposure mode.
+#
+# When you mount a dozen MCP servers, exposing every tool can mean thousands of
+# tokens of schemas in the agent's context — and tool-selection accuracy drops
+# sharply past ~30-50 tools. `search` mode fixes this: Switchboard exposes just
+# two meta-tools — `find_tools` (keyword search across everything) and
+# `call_tool` (invoke a discovered tool by name) — so the surface stays flat
+# no matter how many servers you mount.
+
+gateway:
+  transport: [stdio, http]
+  http:
+    host: 127.0.0.1
+    port: 8088
+  tool_exposure: search          # <- the point of this example
+  default_policy: read
+
+vault:
+  backend: encrypted-file
+
+servers:
+  - id: github
+    source: npx
+    package: "@modelcontextprotocol/server-github"
+    enabled: true
+    policy: write
+    credentials:
+      GITHUB_TOKEN: ${vault:github_pat}
+    tools:
+      delete_repo: { enabled: false }
+
+  - id: filesystem
+    source: npx
+    package: "@modelcontextprotocol/server-filesystem"
+    args: ["."]                  # serve the current directory
+    enabled: true
+    policy: read
+
+  - id: everything
+    source: npx
+    package: "@modelcontextprotocol/server-everything"
+    enabled: true
+    policy: write
+    approval:
+      require_for: [full]        # gate only the most privileged calls

@@ -1,0 +1,28 @@
+# --- dependencies & build output ---
+node_modules/
+dist/
+*.tsbuildinfo
+
+# --- secrets & local state (NEVER commit these) ---
+# The vault and audit log live in ~/.switchboard by default, but ignore any
+# stray copies and the live config a user fills with real server settings.
+switchboard.config.yaml
+.switchboard/
+vault.json
+vault.key
+*.key
+audit.log
+.env
+.env.*
+
+# --- editor / OS noise ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
+npm-debug.log*
+
+# Keep the committed examples (these are templates, not real config):
+!switchboard.config.example.yaml
+!examples/switchboard.config.yaml
