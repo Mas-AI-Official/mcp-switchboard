@@ -63,7 +63,8 @@
     "verify:httptool": "node scripts/verify-httptool.mjs",
     "verify:auth": "node scripts/verify-auth.mjs",
     "verify:council": "node scripts/verify-council.mjs",
-    "verify": "npm run build && npm run verify:oauth && npm run verify:webhook && npm run verify:triggers && npm run verify:modifiers && npm run verify:httptool && npm run verify:auth && npm run verify:council",
+    "verify:catalog": "node scripts/verify-catalog.mjs",
+    "verify": "npm run build && npm run verify:oauth && npm run verify:webhook && npm run verify:triggers && npm run verify:modifiers && npm run verify:httptool && npm run verify:auth && npm run verify:council && npm run verify:catalog",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {

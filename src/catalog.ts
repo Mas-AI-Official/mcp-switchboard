@@ -36,8 +36,16 @@ export interface Toolkit {
   name: string;
   /** One-line description (trimmed to a single sentence/line). */
   description: string;
-  /** Normalized, human-readable category used by the sidebar filter. */
+  /** Normalized, human-readable PRIMARY category used by the sidebar filter and headline grouping. */
   category: string;
+  /**
+   * All categories this toolkit belongs to (Composio-style multi-tag membership). A source like
+   * APIs.guru tags many entries with several categories; the filter matches ANY of them and the
+   * sidebar histogram counts membership in each, so a "Finance" filter also surfaces a toolkit
+   * whose PRIMARY category is "Payments" but which also carries "Finance". Omitted/empty means the
+   * entry belongs only to `category` (the common case for single-category MCP-registry entries).
+   */
+  categories?: string[];
   /** Free-text keywords folded into the search index. */
   tags: string[];
   /** Where this entry came from. */
@@ -248,11 +256,14 @@ async function ingestApisGuru(): Promise<Toolkit[]> {
     const info = ver.info ?? {};
     const cats = info["x-apisguru-categories"];
     const provider = info["x-providerName"];
+    // Full, prettified, de-duplicated category set (the sidebar filter + histogram match ANY of these).
+    const prettyCats = [...new Set((cats ?? []).map((c) => prettifyCategory(c)))];
     out.push({
       slug: `openapi:${key}`,
       name: info.title?.trim() || key,
       description: oneLine(info.description),
       category: prettifyCategory(cats?.[0]),
+      ...(prettyCats.length > 1 ? { categories: prettyCats } : {}),
       tags: [provider, ...(cats ?? [])].filter((t): t is string => Boolean(t)),
       origin: "apis-guru",
       source_license: "CC0-1.0 (APIs.guru)",
@@ -264,10 +275,26 @@ async function ingestApisGuru(): Promise<Toolkit[]> {
   return out;
 }
 
-/** Build the category histogram, sorted by descending count then name. */
-function tallyCategories(toolkits: Toolkit[]): { name: string; count: number }[] {
+/**
+ * The distinct set of categories a toolkit belongs to: its primary `category` unioned with any
+ * extra `categories`. This is the SINGLE source of truth for category membership — both the sidebar
+ * histogram (`tallyCategories`) and the filter (`queryCatalog`) route through it, so the count shown
+ * next to a category can never disagree with the number of results that category's filter returns.
+ */
+export function toolkitCategories(t: Toolkit): string[] {
+  return [...new Set([t.category, ...(t.categories ?? [])])];
+}
+
+/**
+ * Build the category histogram, counting MEMBERSHIP (a toolkit counts once toward each distinct
+ * category it belongs to), sorted by descending count then name. Consistent-by-construction with the
+ * `queryCatalog` filter via `toolkitCategories`.
+ */
+export function tallyCategories(toolkits: Toolkit[]): { name: string; count: number }[] {
   const counts = new Map<string, number>();
-  for (const t of toolkits) counts.set(t.category, (counts.get(t.category) ?? 0) + 1);
+  for (const t of toolkits) {
+    for (const c of toolkitCategories(t)) counts.set(c, (counts.get(c) ?? 0) + 1);
+  }
   return [...counts.entries()]
     .map(([name, count]) => ({ name, count }))
     .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
@@ -346,26 +373,52 @@ export function writeCatalog(snapshot: CatalogSnapshot, path: string = defaultCa
 }
 
 /**
- * In-memory query over a loaded catalog: free-text search + category filter + pagination.
- * Search matches name, description, category, and tags (case-insensitive, all terms must hit).
+ * In-memory query over a loaded catalog: free-text search + category filter + ordering + pagination.
+ * Search matches name, description, category, and tags (case-insensitive, all terms must hit). The
+ * category filter matches ANY of a toolkit's categories (primary + extras) via `toolkitCategories`,
+ * so it agrees with the sidebar histogram by construction.
+ *
+ * Ordering:
+ *   - `sortBy: "alpha"` (default) keeps the snapshot's name-sorted order.
+ *   - `sortBy: "mounted"` floats toolkits already mounted (`mountedSlugs`) to the top, preserving the
+ *     alphabetical order WITHIN the mounted and unmounted groups (a stable partition). This is what
+ *     the dashboard uses so the operator sees what they've already connected first.
  */
 export function queryCatalog(
   snapshot: CatalogSnapshot,
-  opts: { q?: string; category?: string; origin?: string; offset?: number; limit?: number },
+  opts: {
+    q?: string;
+    category?: string;
+    origin?: string;
+    offset?: number;
+    limit?: number;
+    sortBy?: "alpha" | "mounted";
+    mountedSlugs?: Set<string>;
+  },
 ): { total: number; items: Toolkit[] } {
   const terms = (opts.q ?? "").toLowerCase().split(/\s+/).filter(Boolean);
   const cat = opts.category && opts.category !== "All" ? opts.category : null;
   const origin = opts.origin && opts.origin !== "all" ? opts.origin : null;
 
   const filtered = snapshot.toolkits.filter((t) => {
-    if (cat && t.category !== cat) return false;
+    if (cat && !toolkitCategories(t).includes(cat)) return false;
     if (origin && t.origin !== origin) return false;
     if (terms.length === 0) return true;
     const hay = `${t.name} ${t.description} ${t.category} ${t.tags.join(" ")}`.toLowerCase();
     return terms.every((term) => hay.includes(term));
   });
 
+  // Stable mounted-first partition (the snapshot is already alpha-sorted, so each group stays alpha).
+  let ordered = filtered;
+  if (opts.sortBy === "mounted" && opts.mountedSlugs && opts.mountedSlugs.size > 0) {
+    const mounted = opts.mountedSlugs;
+    const front: Toolkit[] = [];
+    const back: Toolkit[] = [];
+    for (const t of filtered) (mounted.has(t.slug) ? front : back).push(t);
+    ordered = [...front, ...back];
+  }
+
   const offset = Math.max(0, opts.offset ?? 0);
   const limit = Math.min(200, Math.max(1, opts.limit ?? 60));
-  return { total: filtered.length, items: filtered.slice(offset, offset + limit) };
+  return { total: ordered.length, items: ordered.slice(offset, offset + limit) };
 }
