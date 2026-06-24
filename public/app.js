@@ -166,9 +166,11 @@ const catalogState = {
   q: "",
   category: "",
   origin: "",
+  sort: "mounted",
   offset: 0,
   limit: 60,
   total: 0,
+  totalPages: 0,
   catalogTotal: 0,
   items: [],
   categories: [],
@@ -195,6 +197,10 @@ async function renderCatalog() {
         <option value="mcp-registry">MCP servers</option>
         <option value="apis-guru">OpenAPI</option>
       </select>
+      <select id="tk-sort" class="select" style="width:auto" title="Order results">
+        <option value="mounted">Mounted first</option>
+        <option value="alpha">A → Z</option>
+      </select>
     </div>
     <div class="catalog-layout">
       <div class="cat-filter">
@@ -209,6 +215,7 @@ async function renderCatalog() {
     </div>`;
 
   $("#tk-origin").value = catalogState.origin;
+  $("#tk-sort").value = catalogState.sort;
 
   $("#tk-search").addEventListener(
     "input",
@@ -219,6 +226,10 @@ async function renderCatalog() {
   );
   $("#tk-origin").addEventListener("change", (e) => {
     catalogState.origin = e.target.value;
+    reloadCatalog();
+  });
+  $("#tk-sort").addEventListener("change", (e) => {
+    catalogState.sort = e.target.value;
     reloadCatalog();
   });
 
@@ -273,12 +284,14 @@ async function fetchCatalogPage(replace) {
     q: catalogState.q,
     category: catalogState.category,
     origin: catalogState.origin,
+    sort: catalogState.sort,
     offset: String(catalogState.offset),
     limit: String(catalogState.limit),
   });
   try {
     const data = await api(`/api/toolkits?${params}`);
     catalogState.total = data.total;
+    catalogState.totalPages = data.total_pages || 0;
     catalogState.catalogTotal = data.catalog_total;
     catalogState.items = replace ? data.items : catalogState.items.concat(data.items);
     renderCatalogGrid();
@@ -299,8 +312,11 @@ function toolkitCardHtml(tk) {
     .slice(0, 3)
     .map((t) => `<span class="tag">${esc(t)}</span>`)
     .join("");
+  const action = tk.mounted
+    ? `<span class="badge badge-ok" title="Already mounted as a server"><span class="dot"></span>Mounted</span>`
+    : `<button class="btn btn-sm btn-primary" data-add="${attr(tk.slug)}">Add</button>`;
   return `
-    <div class="tk-card" data-slug="${attr(tk.slug)}">
+    <div class="tk-card${tk.mounted ? " tk-mounted" : ""}" data-slug="${attr(tk.slug)}">
       <div class="tk-card-head">
         <div class="tk-logo">${logo}</div>
         <div style="min-width:0">
@@ -311,7 +327,7 @@ function toolkitCardHtml(tk) {
       <div class="tk-desc">${esc(tk.description || "No description provided.")}</div>
       <div class="tk-foot">
         <div class="tk-tags">${tags}</div>
-        <button class="btn btn-sm btn-primary" data-add="${attr(tk.slug)}">Add</button>
+        ${action}
       </div>
     </div>`;
 }
@@ -335,7 +351,8 @@ function renderCatalogGrid() {
     return;
   }
   grid.innerHTML = catalogState.items.map(toolkitCardHtml).join("");
-  meta.textContent = `Showing ${catalogState.items.length} of ${catalogState.total} matching · ${catalogState.catalogTotal} in catalog`;
+  const pageLabel = catalogState.totalPages > 1 ? ` · ${catalogState.totalPages} pages` : "";
+  meta.textContent = `Showing ${catalogState.items.length} of ${catalogState.total} matching${pageLabel} · ${catalogState.catalogTotal} in catalog`;
 
   // Card click → detail; Add button → quick add (stopPropagation).
   $$(".tk-card", grid).forEach((card) => {
@@ -417,6 +434,7 @@ async function addToolkit(slug, btn, onDone) {
     toast(`Added as server “${res.id}” (disabled). Configure it under Servers, then toggle it on.`, "ok");
     if (onDone) onDone();
     refreshSidebar();
+    if ($("#tk-grid")) reloadCatalog(); // flip the card to its Mounted state
   } catch (e) {
     toast(e.message, "error");
   } finally {
@@ -924,6 +942,96 @@ async function renderSettingsWebhook() {
   });
 }
 
+// ----- Settings: Council & local model (read-only status) -----
+// Surfaces the non-secret council summary from /api/settings. Read-only by design: the council's
+// cloud keys are vault/env references that must never be typed into a web form (zero custody), and
+// the whole feature is edited in config.yaml. This view answers "is the second-opinion / offline
+// local-model path wired, and how do I turn it on?" — the local provider is the zero-cloud option.
+async function renderSettingsCouncil() {
+  loadingView();
+  let s;
+  try { s = await loadSettings(); } catch (e) { view().innerHTML = pageHead("Council & local model") + errorBanner(e); return; }
+  const c = s.council || { enabled: false, providers: { anthropic: false, openai: false, local: false }, local: null, max_rounds: 3, token_budget: 2048, require_approval: false };
+  const p = c.providers || {};
+  const onOff = (yes) =>
+    yes
+      ? `<span class="badge badge-ok"><span class="dot"></span>Configured</span>`
+      : `<span class="badge badge-off"><span class="dot"></span>Not set</span>`;
+  const providerRow = (label, yes, note) =>
+    `<div class="row" style="justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid var(--border-soft)">
+      <div><div style="font-weight:600">${label}</div><div class="dim" style="font-size:12px">${note}</div></div>
+      ${onOff(yes)}</div>`;
+
+  const localBlock = c.local
+    ? `<dl class="kv" style="margin:8px 0 0">
+         <dt>Endpoint</dt><dd><code>${esc(c.local.base_url)}</code></dd>
+         <dt>Model</dt><dd><code>${esc(c.local.default_model)}</code></dd>
+       </dl>
+       <div class="hint">This is the zero-cloud path: prompts to the local provider never leave your machine and need no API key.</div>`
+    : `<div class="hint">No local model wired. Point it at any OpenAI-compatible server you run yourself — <strong>Ollama</strong> (<code>http://127.0.0.1:11434/v1</code>), <strong>LM Studio</strong> (<code>http://127.0.0.1:1234/v1</code>), <strong>llama.cpp</strong>, or <strong>vLLM</strong> — to get a fully offline second opinion from a downloaded model.</div>`;
+
+  const exampleYaml =
+`settings:
+  council:
+    enabled: true
+    require_approval: false   # outbound + metered; gate it if you like
+    max_rounds: 3
+    token_budget: 2048
+    providers:
+      # Zero-cloud, zero-key: a model you downloaded and run locally.
+      local:
+        base_url: http://127.0.0.1:11434/v1   # Ollama / LM Studio / llama.cpp / vLLM
+        default_model: llama3.1
+        # api_key_ref: \${vault:local_llm_key}  # only if your server needs a token
+      # Optional cloud peers — keys stay as vault/env refs, never inline.
+      anthropic:
+        default_model: claude-opus-4-8
+        api_key_ref: \${vault:anthropic_key}
+      openai:
+        default_model: gpt-5.5
+        api_key_ref: \${env:OPENAI_API_KEY}`;
+
+  view().innerHTML =
+    pageHead(
+      "Council & local model",
+      "Let a connected agent ask a peer model — the other cloud provider, or a local offline model — for a second opinion. Both tools run through the same policy → approval → audit path as any other call."
+    ) +
+    `<div class="panel">
+      <div class="row" style="justify-content:space-between;align-items:center">
+        <div class="panel-title" style="margin:0">Status</div>
+        ${c.enabled ? `<span class="badge badge-ok"><span class="dot"></span>Enabled</span>` : `<span class="badge badge-off"><span class="dot"></span>Disabled</span>`}
+      </div>
+      <div class="hint" style="margin-top:4px">${
+        c.enabled
+          ? `Two tools are live in the <a href="#/playground">Playground</a> and to every connected client: <code>council__council_consult</code> (one relay) and <code>council__council_debate</code> (a bounded multi-round debate, then a synthesized conclusion).`
+          : `Off by default — the council makes outbound, metered model calls. Enable it in <code>config.yaml</code> (template below), then the relay tools appear automatically.`
+      }</div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">Providers</div>
+      ${providerRow("Local model", Boolean(p.local), "OpenAI-compatible server on your machine — offline, no key.")}
+      ${providerRow("Anthropic (Claude)", Boolean(p.anthropic), "Cloud peer. Key stays a vault/env reference.")}
+      ${providerRow("OpenAI (ChatGPT)", Boolean(p.openai), "Cloud peer. Key stays a vault/env reference.")}
+      <div style="margin-top:14px">${localBlock}</div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">Limits</div>
+      <dl class="kv">
+        <dt>Max debate rounds</dt><dd>${esc(String(c.max_rounds))}</dd>
+        <dt>Token budget / call</dt><dd>${esc(String(c.token_budget))}</dd>
+        <dt>Requires approval</dt><dd>${c.require_approval ? "yes — every council call waits for an approval decision" : "no — calls run under the standard policy ceiling"}</dd>
+      </dl>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">Enable it</div>
+      <div class="hint" style="margin-bottom:8px">Edit <code>config.yaml</code> — keys are never entered here. Cloud keys stay as <code>\${vault:..}</code> / <code>\${env:..}</code> references resolved at call time; the local model usually needs none.</div>
+      <div class="token-box mono" style="white-space:pre-wrap;color:var(--fg)">${esc(exampleYaml)}</div>
+    </div>`;
+}
+
 // ----- Settings: API keys -----
 async function renderSettingsApiKeys() {
   loadingView();
@@ -1197,18 +1305,20 @@ let triggersCfg = { enabled: false, poll_interval_seconds: 60, definitions: [] }
 
 async function renderTriggers() {
   loadingView("Loading triggers…");
-  let state, settings, toolData;
+  let state, settings, toolData, templateData;
   try {
-    [state, settings, toolData] = await Promise.all([
+    [state, settings, toolData, templateData] = await Promise.all([
       api("/api/triggers"),
       loadSettings(),
       api("/api/playground/tools").catch(() => ({ tools: [] })),
+      api("/api/trigger-templates").catch(() => ({ templates: [] })),
     ]);
   } catch (e) {
     view().innerHTML = pageHead("Triggers") + errorBanner(e);
     return;
   }
 
+  const templates = templateData.templates || [];
   const raw = settings.triggers || {};
   triggersCfg = {
     enabled: raw.enabled === true,
@@ -1233,6 +1343,7 @@ async function renderTriggers() {
   const statusBadge = (t) => {
     if (!triggersCfg.enabled) return `<span class="badge badge-off"><span class="dot"></span>Polling off</span>`;
     if (!t.enabled) return `<span class="badge badge-off"><span class="dot"></span>Disabled</span>`;
+    if (t.paused) return `<span class="badge badge-off" title="Paused — definition kept, scheduled polling silenced"><span class="dot"></span>Paused</span>`;
     if (t.last_error) return `<span class="badge badge-off" title="${attr(t.last_error)}"><span class="dot"></span>Error</span>`;
     if (!t.baseline) return `<span class="badge"><span class="dot"></span>Arming…</span>`;
     return `<span class="badge badge-ok"><span class="dot"></span>Armed</span>`;
@@ -1255,6 +1366,9 @@ async function renderTriggers() {
           <td>${statusBadge(t)}</td>
           <td class="nowrap" style="text-align:right">
             <button class="btn btn-sm" data-tr-poll="${attr(t.id)}" title="Poll once now">Poll now</button>
+            ${t.paused
+              ? `<button class="btn btn-sm" data-tr-resume="${attr(t.id)}" style="margin-left:6px" title="Resume scheduled polling">Resume</button>`
+              : `<button class="btn btn-sm" data-tr-pause="${attr(t.id)}" style="margin-left:6px" title="Pause scheduled polling — keeps the definition, silences the poll">Pause</button>`}
             <button class="btn btn-sm" data-tr-edit="${attr(t.id)}" style="margin-left:6px">Edit</button>
             <label class="switch" title="Enable / disable" style="margin-left:8px;vertical-align:middle">
               <input type="checkbox" data-tr-toggle="${attr(t.id)}" ${t.enabled ? "checked" : ""} />
@@ -1356,7 +1470,7 @@ async function renderTriggers() {
         toast(e.message, "error");
         triggersCfg.definitions = triggersCfg.definitions.filter((d) => d.id !== def.id);
       }
-    })
+    }, templates)
   );
 
   // --- edit ---
@@ -1415,6 +1529,30 @@ async function renderTriggers() {
     })
   );
 
+  // --- pause / resume (in-memory; keeps the definition, silences the scheduled poll) ---
+  $$("[data-tr-pause]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      const id = b.dataset.trPause;
+      b.disabled = true;
+      try {
+        await api(`/api/triggers/${encodeURIComponent(id)}/pause`, { method: "POST" });
+        toast(`Trigger “${id}” paused — definition kept, polling silenced until resumed.`, "ok");
+        renderTriggers();
+      } catch (e) { toast(e.message, "error"); b.disabled = false; }
+    })
+  );
+  $$("[data-tr-resume]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      const id = b.dataset.trResume;
+      b.disabled = true;
+      try {
+        await api(`/api/triggers/${encodeURIComponent(id)}/resume`, { method: "POST" });
+        toast(`Trigger “${id}” resumed.`, "ok");
+        renderTriggers();
+      } catch (e) { toast(e.message, "error"); b.disabled = false; }
+    })
+  );
+
   // --- remove ---
   $$("[data-tr-remove]").forEach((b) =>
     b.addEventListener("click", () => {
@@ -1442,13 +1580,28 @@ async function renderTriggers() {
 }
 
 // Add / edit a trigger definition. `onSaved(def, isEdit, modal)` owns persistence + close.
-function openTriggerModal(existing, toolNames, onSaved) {
+// `templates` (optional) seeds a "Start from a template" picker shown only when adding — it
+// pre-fills the detection wiring (tool hint, item_path/item_key, interval, default args) for a
+// common "watch X for new items" recipe; the operator then points the tool field at the exposed
+// name their mounted server actually provides.
+function openTriggerModal(existing, toolNames, onSaved, templates = []) {
   const isEdit = !!existing;
   const d = existing || {};
   const datalist = (toolNames || []).map((n) => `<option value="${attr(n)}"></option>`).join("");
+  const tplPicker =
+    !isEdit && templates.length
+      ? `<div class="field"><label for="trm-tpl">Start from a template <span class="dim">(optional)</span></label>
+          <select id="trm-tpl" class="select">
+            <option value="">— blank trigger —</option>
+            ${templates
+              .map((t) => `<option value="${attr(t.id)}" title="${attr(t.description || "")}">${esc(t.category ? `${t.category} · ` : "")}${esc(t.name)}</option>`)
+              .join("")}
+          </select>
+          <div class="hint">Pre-fills the detection wiring for a common “new item” recipe. Then point <strong>Tool</strong> at the exposed name your mounted server provides (e.g. <code>github__list_issues</code>).</div></div>`
+      : "";
   const m = openModal({
     title: isEdit ? `Edit trigger “${esc(d.id)}”` : "Add trigger",
-    body: `
+    body: tplPicker + `
       <div class="field"><label for="trm-id">ID</label>
         <input id="trm-id" class="input" value="${attr(d.id || "")}" ${isEdit ? "disabled" : ""} placeholder="new-issues" />
         <div class="hint">A stable, unique key. Appears in the webhook payload and the fired-event log.</div></div>
@@ -1475,6 +1628,32 @@ function openTriggerModal(existing, toolNames, onSaved) {
              <button class="btn btn-primary" id="trm-save">${isEdit ? "Save" : "Add trigger"}</button>`,
   });
   $("#trm-cancel", m.root).addEventListener("click", m.close);
+
+  // Template picker → prefill. Resolve the bare tool_hint to the operator's REAL exposed name when
+  // their mounted server provides it (e.g. `list_issues` → `github__list_issues`); otherwise seed
+  // the bare hint as a starting point. Set item_path/item_key only TOGETHER and only when the
+  // template's path is non-empty — that mirrors the runtime's `item_path && item_key` gate, so the
+  // form shows the SAME detection mode (item vs hash) the trigger will actually use.
+  const tplSel = $("#trm-tpl", m.root);
+  if (tplSel) {
+    const resolveTool = (hint) =>
+      (toolNames || []).find((n) => n === hint || n.endsWith("__" + hint)) || hint || "";
+    tplSel.addEventListener("change", () => {
+      const t = templates.find((x) => x.id === tplSel.value);
+      if (!t) return;
+      const idEl = $("#trm-id", m.root);
+      if (!idEl.value.trim()) idEl.value = t.id;
+      $("#trm-name", m.root).value = t.name || "";
+      $("#trm-tool", m.root).value = resolveTool(t.tool_hint);
+      $("#trm-tool", m.root).placeholder = t.tool_hint ? `e.g. <server>__${t.tool_hint}` : "github__list_issues";
+      $("#trm-interval", m.root).value = t.interval_seconds != null ? String(t.interval_seconds) : "";
+      $("#trm-args", m.root).value = t.args ? JSON.stringify(t.args, null, 2) : "";
+      const itemMode = !!(t.item_path && t.item_key);
+      $("#trm-path", m.root).value = itemMode ? t.item_path : "";
+      $("#trm-key", m.root).value = itemMode ? t.item_key : "";
+    });
+  }
+
   $("#trm-save", m.root).addEventListener("click", () => {
     const id = $("#trm-id", m.root).value.trim();
     const tool = $("#trm-tool", m.root).value.trim();
@@ -1535,6 +1714,7 @@ const routes = {
   "/settings/usage": renderSettingsUsage,
   "/settings/auth-screen": renderSettingsAuthScreen,
   "/settings/webhook": renderSettingsWebhook,
+  "/settings/council": renderSettingsCouncil,
   "/settings/api-keys": renderSettingsApiKeys,
 };
 
