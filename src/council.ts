@@ -3,9 +3,10 @@
  *
  * Switchboard already brokers tool calls; the council lets one agent broker a *peer model*.
  * Two tools are exposed:
- *   - `council_consult` — relay a single prompt to a configured provider (Anthropic or
- *     OpenAI) and return its reply. The headline use case: a ChatGPT or Claude client
- *     connected to Switchboard asking the *other* provider for a second opinion.
+ *   - `council_consult` — relay a single prompt to a configured provider (Anthropic, OpenAI,
+ *     or a LOCAL OpenAI-compatible model) and return its reply. The headline use case: a
+ *     ChatGPT or Claude client connected to Switchboard asking the *other* provider — or a
+ *     local offline model — for a second opinion.
  *   - `council_debate`  — run a bounded, multi-round exchange between the configured
  *     providers on a topic, then synthesize a moderator's conclusion.
  *
@@ -19,7 +20,8 @@
  *   - Outbound + metered, so the whole feature is OFF by default (`enabled: false`).
  *   - API keys are NEVER held in config — `api_key_ref` is a `${vault:..}`/`${env:..}`
  *     reference resolved through the vault at CALL time, fail-closed (config.ts enforces the
- *     reference form; the vault throws if the secret is missing).
+ *     reference form; the vault throws if the secret is missing). The local provider's key ref
+ *     is OPTIONAL (most local servers need no token); when omitted no auth header is sent.
  *   - Model ids are config/param-driven (`default_model`, optional per-call `model`) so a
  *     post-cutoff model rename never silently breaks — nothing is hardcoded.
  *   - Loop/cost guards: `token_budget` caps every call's `max_tokens`; `max_rounds` caps the
@@ -35,6 +37,7 @@ import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import type {
   CouncilConfig,
   CouncilProviderConfig,
+  LocalProviderConfig,
   Scope,
 } from "./types.js";
 import type { Vault } from "./vault.js";
@@ -42,9 +45,16 @@ import type { Vault } from "./vault.js";
 /** Synthetic server id — also the tool namespace (`council__council_consult`, …). */
 export const COUNCIL_SERVER_ID = "council";
 
-type ProviderName = "anthropic" | "openai";
+/**
+ * Every provider the council can relay to. `local` is an OpenAI-compatible model server running
+ * on the operator's own machine (Ollama / LM Studio / llama.cpp / vLLM) — the zero-cloud, zero-key
+ * option that lets the whole feature run offline with a downloaded model.
+ */
+type ProviderName = "anthropic" | "openai" | "local";
+/** The two hosted cloud providers (a key ref is mandatory; a sane public base URL is built-in). */
+type CloudProviderName = "anthropic" | "openai";
 
-const DEFAULT_BASE_URL: Record<ProviderName, string> = {
+const DEFAULT_BASE_URL: Record<CloudProviderName, string> = {
   anthropic: "https://api.anthropic.com",
   openai: "https://api.openai.com",
 };
@@ -56,16 +66,17 @@ interface CallResult {
   outputTokens: number;
 }
 
-/** Providers actually configured (have a key ref + default model). Order is stable. */
+/** Providers actually configured. Order is stable (cloud first, then the local server). */
 function configuredProviders(council: CouncilConfig): ProviderName[] {
   const providers = council.providers ?? {};
   const out: ProviderName[] = [];
   if (providers.anthropic) out.push("anthropic");
   if (providers.openai) out.push("openai");
+  if (providers.local) out.push("local");
   return out;
 }
 
-function providerConfig(council: CouncilConfig, name: ProviderName): CouncilProviderConfig {
+function providerConfig(council: CouncilConfig, name: CloudProviderName): CouncilProviderConfig {
   const cfg = council.providers?.[name];
   if (!cfg) {
     throw new Error(`council provider '${name}' is not configured under settings.council.providers`);
@@ -74,7 +85,7 @@ function providerConfig(council: CouncilConfig, name: ProviderName): CouncilProv
 }
 
 /** Strip a trailing slash so `${base}/v1/...` never doubles up. */
-function baseUrl(name: ProviderName, cfg: CouncilProviderConfig): string {
+function baseUrl(name: CloudProviderName, cfg: CouncilProviderConfig): string {
   return (cfg.base_url ?? DEFAULT_BASE_URL[name]).replace(/\/$/, "");
 }
 
@@ -166,6 +177,50 @@ async function callOpenAI(
   };
 }
 
+/**
+ * A LOCAL OpenAI-compatible model server (Ollama / LM Studio / llama.cpp / vLLM). Same Chat
+ * Completions wire format as {@link callOpenAI}, but `base_url` is REQUIRED and already includes the
+ * API root (e.g. `http://127.0.0.1:11434/v1`), so we append only `/chat/completions` — never a second
+ * `/v1`. The bearer header is sent ONLY when `api_key_ref` is configured (most local servers need no
+ * token); when it IS set it is resolved from the vault at call time, fail-closed. No key, no cloud,
+ * no custody — the whole council can run offline against a downloaded model.
+ */
+async function callLocal(
+  vault: Vault,
+  cfg: LocalProviderConfig,
+  args: { prompt: string; system?: string; model?: string; maxTokens: number },
+): Promise<CallResult> {
+  const model = args.model?.trim() || cfg.default_model;
+  const messages: { role: string; content: string }[] = [];
+  if (args.system) messages.push({ role: "system", content: args.system });
+  messages.push({ role: "user", content: args.prompt });
+
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (cfg.api_key_ref) headers.authorization = `Bearer ${vault.resolve(cfg.api_key_ref)}`; // fail-closed only when a token is configured
+
+  const base = cfg.base_url.replace(/\/$/, "");
+  const res = await fetch(`${base}/chat/completions`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ model, messages, max_tokens: args.maxTokens }),
+  });
+
+  const bodyText = await res.text();
+  if (!res.ok) {
+    throw new Error(`local ${res.status}: ${bodyText.slice(0, 500)}`);
+  }
+  const data = JSON.parse(bodyText) as {
+    choices?: { message?: { content?: string } }[];
+    usage?: { prompt_tokens?: number; completion_tokens?: number };
+  };
+  const text = (data.choices?.[0]?.message?.content ?? "").trim();
+  return {
+    text: text || "(empty response)",
+    inputTokens: data.usage?.prompt_tokens ?? 0,
+    outputTokens: data.usage?.completion_tokens ?? 0,
+  };
+}
+
 /** Dispatch one turn to the named provider. */
 async function dispatch(
   vault: Vault,
@@ -173,6 +228,11 @@ async function dispatch(
   name: ProviderName,
   args: { prompt: string; system?: string; model?: string; maxTokens: number },
 ): Promise<CallResult> {
+  if (name === "local") {
+    const cfg = council.providers?.local;
+    if (!cfg) throw new Error("council provider 'local' is not configured under settings.council.providers");
+    return callLocal(vault, cfg, args);
+  }
   const cfg = providerConfig(council, name);
   return name === "anthropic"
     ? callAnthropic(vault, cfg, args)
@@ -221,8 +281,9 @@ export function buildCouncilServer(
       name: "council_consult",
       description:
         "Relay a single prompt to a peer LLM provider and return its reply. Use to get a " +
-        "second opinion from the other model (e.g. a Claude client consulting OpenAI, or " +
-        "vice-versa). Outbound + metered; governed and audited like any tool.",
+        "second opinion from another model — a Claude client consulting OpenAI, OpenAI " +
+        "consulting Claude, or either consulting a local offline model. Outbound + metered; " +
+        "governed and audited like any tool.",
       inputSchema: {
         type: "object",
         properties: {
