@@ -14,12 +14,13 @@ import { fileURLToPath } from "node:url";
 import express, { type Request, type Response } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Gateway } from "./gateway.js";
-import type { SwitchboardConfig, SettingsConfig } from "./types.js";
+import type { SwitchboardConfig, SettingsConfig, ServerConfig, CouncilConfig } from "./types.js";
 import { writeConfig, parseTriggersConfig } from "./config.js";
 import { recentAudit, usageStats } from "./audit.js";
 import { inferScope } from "./policy.js";
 import { ApiKeyStore } from "./apikeys.js";
-import { loadCatalog, queryCatalog, type CatalogSnapshot } from "./catalog.js";
+import { loadCatalog, queryCatalog, type CatalogSnapshot, type Toolkit } from "./catalog.js";
+import { listTriggerTemplates } from "./trigger-templates.js";
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { resolveOAuthServerOptions, SwitchboardAuthProvider, OAUTH_SCOPES_SUPPORTED } from "./authserver.js";
@@ -60,6 +61,77 @@ function presentedToken(req: Request): string | null {
 function isLocalRequest(req: Request): boolean {
   const ip = req.ip ?? req.socket.remoteAddress ?? "";
   return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1" || ip.startsWith("127.");
+}
+
+/**
+ * Map currently-configured servers back to the catalog slugs they were mounted from, by matching
+ * each server's identifying upstream value against the catalog (remote→url, npx→package,
+ * app2mcp→openapi). Correlation is by upstream identity, NOT a stored slug, so it survives id
+ * renames and hand-added servers; `manual`-source toolkits (no mountable identity) never match.
+ * Used to float already-mounted toolkits to the front of the catalog grid and badge them as added.
+ * Exported so the deterministic dashboard oracle can prove the correlation without a live server.
+ */
+export function correlateMountedSlugs(toolkits: Toolkit[], servers: ServerConfig[]): Set<string> {
+  const byRemote = new Map<string, string>();
+  const byNpx = new Map<string, string>();
+  const byApp2mcp = new Map<string, string>();
+  for (const t of toolkits) {
+    if (t.mount.source === "remote") byRemote.set(t.mount.url, t.slug);
+    else if (t.mount.source === "npx") byNpx.set(t.mount.package, t.slug);
+    else if (t.mount.source === "app2mcp") byApp2mcp.set(t.mount.openapi, t.slug);
+  }
+  const mounted = new Set<string>();
+  for (const s of servers) {
+    let slug: string | undefined;
+    if (s.url) slug = byRemote.get(s.url);
+    else if (s.package) slug = byNpx.get(s.package);
+    else if (s.openapi) slug = byApp2mcp.get(s.openapi);
+    if (slug) mounted.add(slug);
+  }
+  return mounted;
+}
+
+/**
+ * Honest page count for a paginated catalog response. Clamps `limit` to the SAME [1,200] window
+ * `queryCatalog` enforces internally, so `total_pages` reflects the page size actually used (a
+ * caller asking for limit=500 is paginated by 200, and the page count says so). Zero results → 0.
+ * Exported for the oracle.
+ */
+export function pageCount(total: number, limit: number): number {
+  const effective = Math.min(200, Math.max(1, limit || 60));
+  return total <= 0 ? 0 : Math.ceil(total / effective);
+}
+
+/** The non-secret council summary surfaced by `/api/settings`. */
+export interface CouncilSummary {
+  enabled: boolean;
+  providers: { anthropic: boolean; openai: boolean; local: boolean };
+  /** The local provider's NON-secret endpoint+model, so the Playground can offer the zero-cloud path. */
+  local: { base_url: string; default_model: string } | null;
+  max_rounds: number;
+  token_budget: number;
+  require_approval: boolean;
+}
+
+/**
+ * Reduce the council config to a settings-safe summary: which providers are configured (booleans)
+ * and the local provider's non-secret base_url/default_model — but NEVER any `api_key_ref` value.
+ * Absent council → disabled with no providers. Exported so the oracle can pin the redaction.
+ */
+export function councilSummary(council?: CouncilConfig): CouncilSummary {
+  const p = council?.providers;
+  return {
+    enabled: Boolean(council?.enabled),
+    providers: {
+      anthropic: Boolean(p?.anthropic),
+      openai: Boolean(p?.openai),
+      local: Boolean(p?.local),
+    },
+    local: p?.local ? { base_url: p.local.base_url, default_model: p.local.default_model } : null,
+    max_rounds: council?.max_rounds ?? 3,
+    token_budget: council?.token_budget ?? 2048,
+    require_approval: Boolean(council?.require_approval),
+  };
 }
 
 export interface McpEndpointOptions {
@@ -304,8 +376,19 @@ export async function startDashboard(
     const origin = typeof req.query.origin === "string" ? req.query.origin : "";
     const offset = Number.parseInt(String(req.query.offset ?? "0"), 10) || 0;
     const limit = Number.parseInt(String(req.query.limit ?? "60"), 10) || 60;
-    const { total, items } = queryCatalog(catalog, { q, category, origin, offset, limit });
-    res.json({ total, offset, limit, items, catalog_total: catalog.counts.total });
+    // Always correlate (cheap) so every item carries an honest `mounted` flag; `?sort=mounted`
+    // additionally floats the already-mounted toolkits to the front as a stable alpha partition.
+    const mountedSlugs = correlateMountedSlugs(catalog.toolkits, cfg.servers);
+    const sortBy = req.query.sort === "mounted" ? "mounted" : "alpha";
+    const { total, items } = queryCatalog(catalog, { q, category, origin, offset, limit, sortBy, mountedSlugs });
+    res.json({
+      total,
+      offset,
+      limit,
+      total_pages: pageCount(total, limit),
+      items: items.map((t) => ({ ...t, mounted: mountedSlugs.has(t.slug) })),
+      catalog_total: catalog.counts.total,
+    });
   });
 
   app.get("/api/toolkits/:slug", (req: Request, res: Response) => {
@@ -403,6 +486,24 @@ export async function startDashboard(
       auth_screen: cfg.settings?.auth_screen ?? {},
       webhook: cfg.settings?.webhook ?? {},
       triggers: cfg.settings?.triggers ?? {},
+      logs: cfg.settings?.logs ?? {},
+      // Council reasoning loop — non-secret summary only (provider presence + the local
+      // endpoint/model), never an api_key_ref value. Lets the Playground offer the zero-cloud path.
+      council: councilSummary(cfg.settings?.council),
+      // Built-in OAuth 2.1 authorization server — the path that lets ChatGPT / claude.ai reach a
+      // tunnelled Switchboard. `enforced` reflects whether it is actually wired this run.
+      oauth_server: {
+        enabled: Boolean(cfg.settings?.oauth_server?.enabled),
+        public_url: cfg.settings?.oauth_server?.public_url ?? "",
+        consent: cfg.settings?.oauth_server?.consent !== false,
+        enforced: Boolean(oauthOpts),
+      },
+      // Per-call upstream timeout (ms); null = SDK default.
+      call_timeout_ms: cfg.settings?.call_timeout_ms ?? null,
+      // Hand-declared HTTP tools per server (id + count only — the defs themselves carry secret refs).
+      http_tools: cfg.servers
+        .filter((s) => s.source === "http-tool")
+        .map((s) => ({ id: s.id, enabled: s.enabled, count: s.http_tools?.length ?? 0 })),
       gateway: {
         host: cfg.gateway.http.host,
         port: cfg.gateway.http.port,
@@ -539,6 +640,43 @@ export async function startDashboard(
       const msg = err instanceof Error ? err.message : String(err);
       res.status(500).json({ error: msg });
     }
+  });
+
+  // Pause / resume a single trigger WITHOUT removing its definition. Pause short-circuits the
+  // poller before the governed tool call, so the trigger stays configured but goes quiet; resume
+  // re-arms it. Loopback-only (both change live poller behavior). A 404 when the id is unknown so
+  // the dashboard never silently no-ops a typo'd id. Pause state is in-memory and resets on reload.
+  app.post("/api/triggers/:id/pause", (req: Request, res: Response) => {
+    if (!isLocalRequest(req)) {
+      res.status(403).json({ error: "triggers can only be paused from the local machine" });
+      return;
+    }
+    const id = String(req.params.id);
+    if (!gateway.triggers.pauseTrigger(id)) {
+      res.status(404).json({ error: `unknown trigger '${id}'` });
+      return;
+    }
+    res.json({ id, paused: true, state: gateway.triggers.state() });
+  });
+
+  app.post("/api/triggers/:id/resume", (req: Request, res: Response) => {
+    if (!isLocalRequest(req)) {
+      res.status(403).json({ error: "triggers can only be resumed from the local machine" });
+      return;
+    }
+    const id = String(req.params.id);
+    if (!gateway.triggers.resumeTrigger(id)) {
+      res.status(404).json({ error: `unknown trigger '${id}'` });
+      return;
+    }
+    res.json({ id, paused: false, state: gateway.triggers.state() });
+  });
+
+  // The curated poll-first trigger templates (pure data) — the picker the dashboard renders so an
+  // operator can stamp a "watch X for new items" recipe onto a tool a mounted server exposes.
+  // Read-only catalog; safe for any caller (no secrets, no mutation).
+  app.get("/api/trigger-templates", (_req: Request, res: Response) => {
+    res.json({ templates: listTriggerTemplates() });
   });
 
   // ====================================================================
