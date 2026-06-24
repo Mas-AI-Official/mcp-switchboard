@@ -96,6 +96,9 @@ The local **win** is removing the tool-call meter and the OAuth-app lock-in enti
 
 **Phase 5 (optional fork) — claude.ai-web OAuth + council relay tools.** OAuth 2.1 + PKCE on the gateway (AS metadata, DCR, `/authorize`+`/token`) for claude.ai web; `council_consult`/`council_debate` tools with guards; defer Triggers (poll-first) + Webhooks here or later (`src/gateway.ts`, `src/dashboard.ts`, `src/router.ts`, `src/oauth.ts`, `src/cli.ts`).
 
+- **Phase 5a — council relay tools: DONE.** `src/council.ts` builds a synthetic in-process MCP server (`council_consult` + `council_debate`) mounted via `Registry.mountLocal`, so both tools flow through the existing scope → policy → approval → audit path (both `write`-scoped). Keys are `${vault:..}`/`${env:..}` refs resolved at call time (fail-closed, enforced in `config.ts`); model ids are config/param-driven; loop/cost guards are `token_budget` (per-call `max_tokens`) + `max_rounds` (debate cap, total calls ≤ `rounds*participants + 1`). Gated by `settings.council.enabled` (off by default). Anthropic Messages + OpenAI Chat Completions via global `fetch`. **Verified:** mounts as `council__council_consult` / `council__council_debate` with `write` hints; approval gate denies fail-closed under no-TTY; dispatch returns a graceful `isError` result on transport failure (no outbound traffic in the test).
+- **Phase 5b — claude.ai-web OAuth 2.1 + PKCE Authorization Server: TODO.** Config-gated, off by default.
+
 ## 7. Risks & Forks (maintainer decisions)
 
 1. **Is cloud exposure in scope now?** If yes → Phase 0 + Phase 4 committed. If no → ship P1–P3 local; still do Phase 0 (cheap, closes the one real hole). **DECISION: in scope — the brainstorm explicitly asks to connect ChatGPT/claude.ai, so Phase 0 + Phase 4 are committed.**

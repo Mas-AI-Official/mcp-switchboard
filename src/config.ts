@@ -79,6 +79,39 @@ const vault = z
   .strict()
   .default({ backend: "encrypted-file" });
 
+// A council provider's API key MUST be a vault/env reference — never a literal secret in
+// source (NEVER #1). This refine fails the config fast if someone pastes a raw key.
+const councilKeyRef = z
+  .string()
+  .min(1)
+  .refine((s) => /^\$\{(vault|env):[^}]+\}$/.test(s.trim()), {
+    message: "must be a ${vault:NAME} or ${env:NAME} reference, never a literal API key",
+  });
+
+const councilProvider = z
+  .object({
+    api_key_ref: councilKeyRef,
+    default_model: z.string().min(1),
+    base_url: z.url().optional(),
+  })
+  .strict();
+
+const council = z
+  .object({
+    enabled: z.boolean().default(false),
+    providers: z
+      .object({
+        anthropic: councilProvider.optional(),
+        openai: councilProvider.optional(),
+      })
+      .strict()
+      .optional(),
+    max_rounds: z.number().int().positive().max(10).default(3),
+    token_budget: z.number().int().positive().max(32768).default(2048),
+    require_approval: z.boolean().default(false),
+  })
+  .strict();
+
 const settings = z
   .object({
     general: z
@@ -115,6 +148,7 @@ const settings = z
       })
       .strict()
       .optional(),
+    council: council.optional(),
   })
   .strict()
   .optional();

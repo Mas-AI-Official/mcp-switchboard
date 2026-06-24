@@ -19,12 +19,13 @@ import {
   ListToolsRequestSchema,
   type CallToolResult,
 } from "@modelcontextprotocol/sdk/types.js";
-import type { SwitchboardConfig } from "./types.js";
+import type { ServerConfig, SwitchboardConfig } from "./types.js";
 import { Vault } from "./vault.js";
 import { OAuthStore } from "./oauth.js";
 import { Registry } from "./registry.js";
 import { Router } from "./router.js";
 import { setStdioActive } from "./approval.js";
+import { buildCouncilServer, COUNCIL_SERVER_ID } from "./council.js";
 import { log } from "./logger.js";
 
 const NAME = "switchboard";
@@ -54,6 +55,34 @@ export class Gateway {
         const msg = err instanceof Error ? err.message : String(err);
         log.error(`failed to mount '${server.id}': ${msg}`);
       }
+    }
+    await this.mountCouncil();
+  }
+
+  /**
+   * Mount the synthetic council relay server when `settings.council.enabled`. It is built
+   * in-process and linked over an in-memory transport (same wiring as app2mcp), so its tools
+   * are governed and audited by the router exactly like any upstream server. The synthetic
+   * config carries a `write` ceiling and, when configured, an approval gate over write/full.
+   */
+  private async mountCouncil(): Promise<void> {
+    const council = this.cfg.settings?.council;
+    if (!council?.enabled) return;
+
+    try {
+      const { server, scopeHints, toolCount } = buildCouncilServer(council, this.vault);
+      if (toolCount === 0) return;
+      const synthetic: ServerConfig = {
+        id: COUNCIL_SERVER_ID,
+        source: "council",
+        enabled: true,
+        policy: "write",
+        approval: council.require_approval ? { require_for: ["write", "full"] } : undefined,
+      };
+      await this.registry.mountLocal(synthetic, server, scopeHints);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error(`failed to mount council: ${msg}`);
     }
   }
 

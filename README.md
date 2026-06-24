@@ -154,6 +154,39 @@ Each operation becomes a governed tool. Scope is inferred from the HTTP verb
 (`GET`→read, `POST/PUT/PATCH`→write, `DELETE`→full), so a generated `deletepet` is **denied** under the
 `read` ceiling above — same policy engine as every other server.
 
+### Cross-provider council (Phase 5)
+
+Switchboard already brokers tool calls; the **council** lets one agent broker a *peer model*. Turn it
+on and Switchboard exposes two governed tools — `council_consult` (relay a prompt to the other provider
+and return its reply) and `council_debate` (a bounded multi-round exchange between providers plus a
+synthesized conclusion). The headline use case: a **Claude client asking OpenAI for a second opinion**,
+or vice-versa — the chat-window model orchestrates, Switchboard relays + governs + logs.
+
+```bash
+# keys live in the vault, never in config (BYO keys, zero custody)
+printf '%s' 'sk-ant-...' | node dist/cli.js vault set anthropic_api_key
+printf '%s' 'sk-...'     | node dist/cli.js vault set openai_api_key
+```
+
+```yaml
+# switchboard.config.yaml  (off by default — outbound + metered)
+settings:
+  council:
+    enabled: true
+    max_rounds: 3          # loop guard for council_debate
+    token_budget: 2048     # max_tokens cap per provider call (cost guard)
+    require_approval: false # true → every council call needs a human confirm
+    providers:
+      anthropic: { api_key_ref: ${vault:anthropic_api_key}, default_model: claude-opus-4-8 }
+      openai:    { api_key_ref: ${vault:openai_api_key},    default_model: gpt-4o }
+```
+
+The council mounts as a synthetic in-process MCP server, so its tools flow through the **same**
+policy → approval → audit path as any upstream tool (both are `write`-scoped). Model ids are
+config/param-driven, so nothing breaks when a provider renames a model. Reaching ChatGPT or
+claude.ai *web* additionally needs the authenticated tunnel / OAuth layer (see the roadmap); a local
+Claude Desktop or Claude Code client can use the council with zero tunnel.
+
 ## CLI
 
 | Command | What it does |
@@ -210,6 +243,10 @@ works end-to-end through the governed path.
   an in-process MCP server at mount, with verb→scope inference flowing into the **same** governance
   engine (a generated `deletepet` is denied under a `read` ceiling). A reference without a resolvable
   spec still fails closed.
+- **Council relay (Phase 5a)** — `settings.council` exposes `council_consult` + `council_debate` as a
+  synthetic in-process server, letting one model consult/debate the other provider through the same
+  policy → approval → audit path. Off by default; outbound + metered; keys resolved from the vault at
+  call time. The claude.ai-*web* OAuth 2.1 + PKCE layer (Phase 5b) is the remaining piece.
 
 See **[docs/ROADMAP.md](docs/ROADMAP.md)** for the phase-by-phase detail.
 

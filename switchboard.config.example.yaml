@@ -65,6 +65,32 @@ settings:
     # Off by default — turn it on only when you need to inspect tool I/O.
     capture_io: false
 
+  # Cross-provider "council" relay tools. Lets an agent connected to Switchboard broker a
+  # PEER model: council_consult (one prompt -> the other provider) and council_debate (a
+  # bounded multi-round exchange between providers + a synthesized conclusion). The headline
+  # use case: a Claude client asking OpenAI for a second opinion, or vice-versa.
+  #
+  # These tools are OUTBOUND + metered, so the whole feature is OFF by default. They mount as
+  # a synthetic in-process MCP server and flow through the SAME policy -> approval -> audit
+  # path as any upstream tool (both are `write`-scoped). Store the keys first:
+  #   switchboard vault set anthropic_api_key
+  #   switchboard vault set openai_api_key
+  # API keys MUST be ${vault:..}/${env:..} references — a literal key fails config validation.
+  council:
+    enabled: false
+    max_rounds: 3            # hard ceiling on council_debate rounds (loop guard, max 10)
+    token_budget: 2048       # max_tokens cap applied to every provider call (cost guard)
+    require_approval: false  # true -> every council call needs a human confirm
+    providers:               # council_debate needs at least two configured
+      anthropic:
+        api_key_ref: ${vault:anthropic_api_key}
+        default_model: claude-opus-4-8   # per-call `model` arg overrides this; nothing hardcoded
+        # base_url: https://api.anthropic.com   # override for a proxy / gateway
+      openai:
+        api_key_ref: ${vault:openai_api_key}
+        default_model: gpt-4o
+        # base_url: https://api.openai.com
+
 servers:
   # --- mount an existing MCP server from npm ---
   - id: github

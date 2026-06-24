@@ -21,6 +21,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { Scope, ServerConfig } from "./types.js";
@@ -84,6 +85,32 @@ export class Registry {
 
     const { tools } = await client.listTools();
 
+    const mounted: MountedServer = { id: config.id, config, client, tools, scopeHints };
+    this.mounted.set(config.id, mounted);
+    log.ok(`mounted '${config.id}' — ${tools.length} tool${tools.length === 1 ? "" : "s"}`);
+    return mounted;
+  }
+
+  /**
+   * Mount a pre-built in-process MCP `Server` (e.g. the council relay) under a synthetic
+   * config, linking it to a fresh client over an in-memory transport — the same wiring as
+   * the `app2mcp` branch, generalized so built-in servers reuse the registry + router path.
+   * Idempotent per id.
+   */
+  async mountLocal(
+    config: ServerConfig,
+    server: Server,
+    scopeHints?: Record<string, Scope>,
+  ): Promise<MountedServer> {
+    const existing = this.mounted.get(config.id);
+    if (existing) return existing;
+
+    const client = new Client({ name: `switchboard:${config.id}`, version: "0.1.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+
+    const { tools } = await client.listTools();
     const mounted: MountedServer = { id: config.id, config, client, tools, scopeHints };
     this.mounted.set(config.id, mounted);
     log.ok(`mounted '${config.id}' — ${tools.length} tool${tools.length === 1 ? "" : "s"}`);

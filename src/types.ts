@@ -23,8 +23,9 @@ export interface ApprovalConfig {
   require_for?: Scope[];
 }
 
-/** How an upstream MCP server is sourced. */
-export type ServerSource = "npx" | "binary" | "remote" | "app2mcp";
+/** How an upstream MCP server is sourced. `council` is synthetic — built in-process from
+ *  `settings.council`, never declared in the user's `servers:` array. */
+export type ServerSource = "npx" | "binary" | "remote" | "app2mcp" | "council";
 
 /** One mounted (or mountable) upstream MCP server. */
 export interface ServerConfig {
@@ -123,6 +124,43 @@ export interface SettingsConfig {
     /** Capture (redacted, size-capped) request args + responses for allowed calls. Off by default. */
     capture_io?: boolean;
   };
+  /** Cross-provider "council" relay tools (`council_consult` / `council_debate`). Off by default. */
+  council?: CouncilConfig;
+}
+
+/** One LLM provider the council can relay to. */
+export interface CouncilProviderConfig {
+  /**
+   * `${vault:..}`/`${env:..}` reference to the provider API key. MUST be a reference,
+   * never a literal key — Switchboard never custodies plaintext secrets.
+   */
+  api_key_ref: string;
+  /** Default model id used when a call omits `model`. Config-driven to avoid hardcoded staleness. */
+  default_model: string;
+  /** Optional base URL override (e.g. a proxy or Azure/OpenAI-compatible gateway). */
+  base_url?: string;
+}
+
+/**
+ * `council_consult` proxies one prompt to the *other* provider and returns the reply;
+ * `council_debate` runs a bounded multi-round exchange between both and synthesizes.
+ * Both flow through the normal policy → approval → audit path as a synthetic in-process
+ * MCP server. Outbound + metered, so it is off by default and approval-gateable.
+ */
+export interface CouncilConfig {
+  /** Master switch. When false (default) no council tools are mounted. */
+  enabled?: boolean;
+  /** Providers the council may relay to. `council_debate` needs at least two configured. */
+  providers?: {
+    anthropic?: CouncilProviderConfig;
+    openai?: CouncilProviderConfig;
+  };
+  /** Hard ceiling on `council_debate` rounds (loop guard). Default 3, max 10. */
+  max_rounds?: number;
+  /** `max_tokens` cap applied to every provider call (cost/loop guard). Default 2048. */
+  token_budget?: number;
+  /** Require an approval confirm for every council call. Default false (off-by-default feature already opts in). */
+  require_approval?: boolean;
 }
 
 export interface SwitchboardConfig {
