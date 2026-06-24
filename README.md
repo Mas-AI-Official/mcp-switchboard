@@ -2,8 +2,9 @@
 
 # 🔌 Switchboard
 
-**One governed MCP endpoint for every app your agents touch.**
-**Local-first. Bring your own keys. Nothing leaves your machine.**
+**One connector. Every tool. Both Claude *and* ChatGPT — driving the same apps,
+through one governed control plane on your machine.**
+**Local-first. Bring your own keys. Run it fully offline with a local LLM. Nothing leaves your machine.**
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-2dd4bf.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/Model_Context_Protocol-1.29-2dd4bf.svg)](https://modelcontextprotocol.io)
@@ -14,32 +15,62 @@
 
 ---
 
-## The 30-second pitch
+## The big idea
 
-You have N agents (Claude Desktop, Claude Code, Cursor, your own agents) and M apps
-(GitHub, Notion, Slack, Gmail, an internal API). Wiring that up today is **N×M** pain: every
-client configures every server by hand, and the "easy" hosted shortcut means **your OAuth
-tokens live on someone else's server**.
+You have **two of the best agents in the world** — Claude and ChatGPT — and you'd like them to
+actually *do things*: read your GitHub, triage your Gmail, update Notion, ping Slack, hit your
+internal API. Today that means wiring every client to every app by hand (**N×M** pain), and the
+"easy" hosted shortcut parks **your OAuth tokens on someone else's server**.
 
-Switchboard collapses **N×M into N×1**. You run one local process. A **dashboard** lets you
-toggle apps **ON/OFF** and set each to **read / write / full**. Agents connect to **one MCP
-endpoint** and see only what you allowed. Your credentials sit in a **local encrypted vault** —
-there is no cloud, because there is no "us".
+Switchboard collapses **N×M into N×1**. You run **one** local process that re-exposes all your MCP
+servers behind **one governed endpoint**. You add that endpoint **once** as a connector in Claude,
+and **once** in ChatGPT — and now *both* assistants reach the same tools, through the **same
+encrypted vault, the same on/off + read/write/full policy, the same approval gates, and the same
+audit log**. One control plane. Your machine. No "us" in the middle.
 
 ```
-   Claude ─┐                          ┌─ github   (write,  delete_repo blocked)
-   Cursor ─┼──▶  SWITCHBOARD  ──▶─────┼─ notion   (read)
-   agents ─┘   one MCP endpoint       ├─ slack    (OFF)
-              + policy + vault        └─ everything (read, approval-gated)
+     Claude Desktop ─┐                            ┌─ Gmail        (read)
+     Claude Code  ───┤       ┌────────────┐       ├─ GitHub       (write · delete blocked)
+     claude.ai web ──┼─ MCP ▶│ SWITCHBOARD │▶──────┼─ Notion       (read)
+     ChatGPT      ───┤       │ vault·policy│       ├─ Slack        (OFF)
+     Cursor/agents ──┘       │ ·audit·gates│       ├─ your REST API (app2mcp)
+                             └────────────┘       └─ a local LLM   (offline council)
 ```
+
+### "So Claude and ChatGPT share my email?" — almost; here's the precise mental model
+
+You're **right** that Switchboard is the single connector both assistants point at to reach every
+app. Two corrections worth making:
+
+- **It's a shared *control plane*, not a shared *session*.** Claude and ChatGPT don't see each
+  other's chats or share conversation state. What they share is the layer *underneath*: one set of
+  BYO credentials, one policy, one audit trail. Both can act on your Gmail — each governed
+  identically, every call logged in one place — but neither inherits the other's context.
+- **Local clients connect directly; cloud clients need a door.** Anything running **on your machine**
+  (Claude Desktop, Claude Code, Cursor, your own agents) reaches `127.0.0.1:8088` directly with an
+  API key — zero setup. Anything running **in a vendor's cloud** — **claude.ai web** and **ChatGPT's
+  custom connectors** (Developer Mode, on Pro/Team/Enterprise/Edu) — *cannot* reach your laptop's
+  localhost. For those, run `switchboard expose` to get a public HTTPS URL and turn on the built-in
+  **OAuth 2.1 + PKCE** server, then paste that URL as the connector and authorize once. Same governed
+  endpoint, reachable from the cloud, still zero token custody. See
+  **[Connecting cloud clients](#connecting-cloud-clients--claudeai-web--chatgpt-oauth-21--pkce-phase-5b)**.
+
+### No cloud account? Run it fully offline.
+
+Adoption shouldn't require an API bill. Point Switchboard's **council** at a **local LLM** — Ollama,
+LM Studio, llama.cpp, or vLLM — and you get a second-opinion / debate model with **zero cloud, zero
+keys, zero data leaving the box**. Download a model, set one `base_url`, and the whole stack (vault,
+policy, audit, council) runs on your hardware. See **[Cross-provider council](#cross-provider-council-phase-5)**.
 
 ## Why it's different
 
 |  | Switchboard | Hosted tool routers |
 |---|---|---|
+| **One connector, every assistant** | Add it once; **Claude *and* ChatGPT** share the same governed tools | Per-vendor, per-app setup |
 | **Where your tokens live** | A local AES-256 vault on **your** machine | Their cloud |
 | **Integrations** | **Mounts existing MCP servers** — no treadmill | Hand-built, must be maintained |
 | **Governance** | Per-tool `read/write/full` + approval gates + audit log | Usually all-or-nothing |
+| **Works offline** | Council runs against a **local LLM** — no account required | Cloud-only |
 | **Context blow-up** | `search` mode → 2 meta-tools no matter how many servers | Dump every tool into context |
 | **Cost** | Free, Apache-2.0, self-hosted | Metered SaaS |
 
@@ -266,13 +297,15 @@ The whole contract — poll is audited, fire is not, fire bypasses the `events` 
 denies a non-read trigger, baseline survives restart — is verified by a deterministic oracle:
 `npm run verify:triggers` — 36/36. (`npm run verify` runs the build + all three oracles.)
 
-### Connecting claude.ai web (OAuth 2.1 + PKCE, Phase 5b)
+### Connecting cloud clients — claude.ai web & ChatGPT (OAuth 2.1 + PKCE, Phase 5b)
 
-Claude Desktop, Claude Code, and ChatGPT dev-mode all reach a *local* `/mcp` endpoint with a plain
-API key (`switchboard apikey new <name>`) — no OAuth required. **claude.ai web is different**: it can
-only reach Switchboard through a public HTTPS URL and refuses a static bearer, so it speaks OAuth 2.1
-with mandatory PKCE and Dynamic Client Registration. Turn on the built-in Authorization Server only
-for that case.
+**Local** clients — Claude Desktop, Claude Code, Cursor, your own agents — reach the *local* `/mcp`
+endpoint with a plain API key (`switchboard apikey new <name>`), no OAuth. **Cloud** clients —
+**claude.ai web** and **ChatGPT's custom connectors** (Developer Mode, on Pro/Team/Enterprise/Edu) —
+run on a vendor's servers: they *can't* reach your laptop's localhost, they refuse a static bearer,
+and they speak OAuth 2.1 with mandatory PKCE + Dynamic Client Registration. Turn on the built-in
+Authorization Server for those — one switch covers both providers, because they connect to the **same**
+governed endpoint the same way.
 
 ```bash
 # 1) expose the local gateway over an HTTPS tunnel and copy the public URL
@@ -290,7 +323,13 @@ settings:
     consent: true                 # show the human approval screen on every authorization
 ```
 
-Then add `https://abc123.trycloudflare.com/mcp` as a custom connector in claude.ai. The SDK router
+Then add `https://abc123.trycloudflare.com/mcp` as a custom connector:
+
+- **claude.ai web** — Settings ▸ Connectors ▸ **Add custom connector**, paste the URL, authorize.
+- **ChatGPT** — enable **Developer Mode** (Settings ▸ Connectors ▸ Advanced, on Pro/Team/Enterprise/Edu),
+  then Connectors ▸ **Create**, paste the URL, set Authentication: **OAuth**, and complete the flow.
+
+Both land on the same `authorize → consent → token` exchange against the same governed endpoint. The SDK router
 publishes RFC 8414 AS metadata + RFC 9728 protected-resource metadata under `/.well-known/*`, accepts
 RFC 7591 dynamic client registration at `/register`, and runs the mandatory-PKCE `authorize → consent
 → token` flow. Tokens are **opaque** (looked up server-side, never JWTs), persisted *sealed* with your
