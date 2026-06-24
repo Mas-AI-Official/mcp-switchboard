@@ -15,11 +15,39 @@ import type { SwitchboardConfig } from "./types.js";
 import { writeConfig } from "./config.js";
 import { recentAudit } from "./audit.js";
 import { inferScope } from "./policy.js";
+import { ApiKeyStore } from "./apikeys.js";
 import { log } from "./logger.js";
 
 export interface DashboardHandle {
   url: string;
   close: () => Promise<void>;
+}
+
+/** A loopback bind needs no network auth; anything else is reachable by other hosts. */
+function isLoopbackHost(host: string): boolean {
+  return host === "127.0.0.1" || host === "localhost" || host === "::1" || host.startsWith("127.");
+}
+
+/** Resolve whether `/mcp` requires an API key, given the configured mode and bind host. */
+function authRequired(mode: "auto" | "always" | "never", host: string): boolean {
+  if (mode === "always") return true;
+  if (mode === "never") return false;
+  return !isLoopbackHost(host); // auto: require iff exposed beyond loopback
+}
+
+/** Pull a bearer token from `Authorization: Bearer <t>` or the `x-api-key` header. */
+function presentedToken(req: Request): string | null {
+  const auth = req.headers["authorization"];
+  if (typeof auth === "string" && auth.startsWith("Bearer ")) return auth.slice(7).trim();
+  const apiKey = req.headers["x-api-key"];
+  if (typeof apiKey === "string" && apiKey.trim()) return apiKey.trim();
+  return null;
+}
+
+/** True if the request originated from the local machine (loopback peer address). */
+function isLocalRequest(req: Request): boolean {
+  const ip = req.ip ?? req.socket.remoteAddress ?? "";
+  return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1" || ip.startsWith("127.");
 }
 
 /**
@@ -35,8 +63,22 @@ export async function startDashboard(
   const app = express();
   app.use(express.json());
 
+  const apiKeys = new ApiKeyStore();
+  const { host, port } = cfg.gateway.http;
+  const requireAuth = authRequired(cfg.gateway.http.require_auth, host);
+
   // --- MCP Streamable HTTP endpoint (stateless) ---
   app.all("/mcp", async (req: Request, res: Response) => {
+    // Gate before doing any work. Fail closed: a missing/invalid key is a 401, and we
+    // never echo or log the presented token.
+    if (requireAuth) {
+      const token = presentedToken(req);
+      if (!token || !apiKeys.verify(token)) {
+        res.set("WWW-Authenticate", 'Bearer realm="switchboard"');
+        res.status(401).json({ error: "unauthorized: missing or invalid API key" });
+        return;
+      }
+    }
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on("close", () => void transport.close());
     try {
@@ -73,6 +115,37 @@ export async function startDashboard(
 
   app.get("/api/audit", (_req: Request, res: Response) => {
     res.json(recentAudit(100));
+  });
+
+  // --- API keys: bearer tokens that authenticate `/mcp` (Composio "API Keys" page) ---
+  // Listing is redacted (never the hash). Issuing/revoking mutate local state and are
+  // restricted to loopback callers so a tunnelled dashboard can't mint itself a key.
+  app.get("/api/apikeys", (_req: Request, res: Response) => {
+    res.json({ keys: apiKeys.list(), require_auth: cfg.gateway.http.require_auth, enforced: requireAuth });
+  });
+
+  app.post("/api/apikeys", (req: Request, res: Response) => {
+    if (!isLocalRequest(req)) {
+      res.status(403).json({ error: "API keys can only be issued from the local machine" });
+      return;
+    }
+    const name = typeof req.body?.name === "string" ? req.body.name : "";
+    const { token, record } = apiKeys.issue(name);
+    // The plaintext token is returned ONCE here and never again.
+    res.json({ token, key: record });
+  });
+
+  app.delete("/api/apikeys/:id", (req: Request, res: Response) => {
+    if (!isLocalRequest(req)) {
+      res.status(403).json({ error: "API keys can only be revoked from the local machine" });
+      return;
+    }
+    const removed = apiKeys.revoke(String(req.params.id));
+    if (!removed) {
+      res.status(404).json({ error: `unknown key '${req.params.id}'` });
+      return;
+    }
+    res.json({ revoked: req.params.id });
   });
 
   // --- OAuth catalog (Phase 3): browse providers, connect via local loopback ---
@@ -134,7 +207,21 @@ export async function startDashboard(
     }
   });
 
-  const { host, port } = cfg.gateway.http;
+  // Surface the auth posture loudly at startup so a misconfigured exposure is obvious.
+  if (requireAuth) {
+    if (apiKeys.count === 0) {
+      log.warn(
+        `/mcp requires an API key but none exist — run \`switchboard apikey new <name>\` to issue one; clients cannot connect until you do`,
+      );
+    } else {
+      log.info(`/mcp authentication required (${apiKeys.count} API key${apiKeys.count === 1 ? "" : "s"} issued)`);
+    }
+  } else if (!isLoopbackHost(host)) {
+    log.warn(
+      `/mcp is exposed on ${host} WITHOUT authentication (require_auth: never) — anyone who can reach this host can use your tools`,
+    );
+  }
+
   return new Promise<DashboardHandle>((resolve) => {
     const httpServer = app.listen(port, host, () => {
       const url = `http://${host}:${port}`;

@@ -13,6 +13,13 @@ gateway:
   http:
     host: 127.0.0.1        # local-first: bound to loopback, not the network
     port: 8088
+    # Whether /mcp demands a bearer API key (issue one with `switchboard apikey new <name>`,
+    # then pass it as `Authorization: Bearer <token>` or the `x-api-key` header):
+    #   auto   -> require iff host is NOT loopback (default). Zero friction on localhost;
+    #             fails closed the instant you bind to the network or front it with a tunnel.
+    #   always -> require even on localhost (defense in depth on a shared machine)
+    #   never  -> serve unauthenticated (only safe behind another gate you control)
+    require_auth: auto
   # How upstream tools are presented to agents:
   #   namespaced -> serverId__toolName (collision-free, the safe default)
   #   flat       -> bare toolName (first server to claim a name wins)

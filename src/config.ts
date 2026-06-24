@@ -54,16 +54,20 @@ const gateway = z
       .object({
         host: z.string().default("127.0.0.1"),
         port: z.number().int().positive().default(8088),
+        // When the `/mcp` endpoint requires a bearer API key. "auto" (the default)
+        // requires one whenever the bind host is NOT loopback — zero friction on
+        // localhost, fails closed the instant you expose to the network or a tunnel.
+        require_auth: z.enum(["auto", "always", "never"]).default("auto"),
       })
       .strict()
-      .default({ host: "127.0.0.1", port: 8088 }),
+      .default({ host: "127.0.0.1", port: 8088, require_auth: "auto" }),
     tool_exposure: z.enum(["namespaced", "flat", "search"]).default("namespaced"),
     default_policy: scope.default("read"),
   })
   .strict()
   .default({
     transport: ["stdio"],
-    http: { host: "127.0.0.1", port: 8088 },
+    http: { host: "127.0.0.1", port: 8088, require_auth: "auto" },
     tool_exposure: "namespaced",
     default_policy: "read",
   });
@@ -109,7 +113,7 @@ export function starterConfig(): SwitchboardConfig {
   return {
     gateway: {
       transport: ["stdio", "http"],
-      http: { host: "127.0.0.1", port: 8088 },
+      http: { host: "127.0.0.1", port: 8088, require_auth: "auto" },
       tool_exposure: "namespaced",
       default_policy: "read",
     },

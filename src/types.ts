@@ -70,7 +70,17 @@ export interface ServerConfig {
 export interface GatewayConfig {
   /** Which transports the gateway exposes to agent clients. */
   transport: ("stdio" | "http")[];
-  http: { host: string; port: number };
+  http: {
+    host: string;
+    port: number;
+    /**
+     * Whether the `/mcp` endpoint requires a bearer API key.
+     * - `auto` (default): require iff `host` is not a loopback address.
+     * - `always`: require even on localhost.
+     * - `never`: serve without auth (only safe behind another gate).
+     */
+    require_auth: "auto" | "always" | "never";
+  };
   /** How upstream tools are presented to agents. */
   tool_exposure: "namespaced" | "flat" | "search";
   /** Scope ceiling applied to any server that omits its own `policy`. */

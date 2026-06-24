@@ -26,6 +26,7 @@ import { startDashboard } from "./dashboard.js";
 import { dashboardHtml } from "./console.js";
 import { Vault, HOME_DIR } from "./vault.js";
 import { OAuthStore } from "./oauth.js";
+import { ApiKeyStore } from "./apikeys.js";
 import { inferScope, evaluate } from "./policy.js";
 import { log, out } from "./logger.js";
 
@@ -264,6 +265,54 @@ vaultCmd
     const vault = new Vault(cfg.vault.backend);
     vault.remove(name);
     log.ok(`removed '${name}'`);
+  });
+
+const apikeyCmd = program
+  .command("apikey")
+  .description("manage API keys that authenticate the HTTP /mcp endpoint (for ChatGPT, remote clients, tunnels)");
+
+apikeyCmd
+  .command("new <name>")
+  .description("issue a new API key — the token is shown once and stored only as a one-way hash")
+  .action((name: string) => {
+    const { token, record } = new ApiKeyStore().issue(name);
+    log.ok(`issued API key '${record.name}' (id ${record.id})`);
+    out("");
+    out("  Token (shown once — copy it now):");
+    out("");
+    out(`    ${token}`);
+    out("");
+    out("  Give it to an MCP client as a bearer header:");
+    out(`    Authorization: Bearer ${token}`);
+    out("");
+    out("  Stored as a one-way hash and never recoverable — if you lose it, issue a new one.");
+  });
+
+apikeyCmd
+  .command("list")
+  .description("list API keys (names + prefixes, never the full token)")
+  .action(() => {
+    const keys = new ApiKeyStore().list();
+    if (!keys.length) {
+      out("no API keys issued — run `switchboard apikey new <name>`");
+      return;
+    }
+    for (const k of keys) {
+      const used = k.last_used ? `last used ${k.last_used}` : "never used";
+      out(`  ${k.id}  ${k.name.padEnd(16)} ${k.prefix}…  (created ${k.created}, ${used})`);
+    }
+  });
+
+apikeyCmd
+  .command("rm <id>")
+  .description("revoke an API key by id")
+  .action((id: string) => {
+    if (new ApiKeyStore().revoke(id)) {
+      log.ok(`revoked API key '${id}'`);
+    } else {
+      log.error(`no API key with id '${id}'`);
+      process.exitCode = 1;
+    }
   });
 
 /** Read a secret from a pipe (preferred) or an interactive prompt. */
