@@ -56,6 +56,7 @@
     "dev": "tsc --watch",
     "start": "node dist/cli.js",
     "serve": "node dist/cli.js serve",
+    "verify:oauth": "node scripts/verify-oauth.mjs",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {

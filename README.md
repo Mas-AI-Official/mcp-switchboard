@@ -183,9 +183,43 @@ settings:
 
 The council mounts as a synthetic in-process MCP server, so its tools flow through the **same**
 policy → approval → audit path as any upstream tool (both are `write`-scoped). Model ids are
-config/param-driven, so nothing breaks when a provider renames a model. Reaching ChatGPT or
-claude.ai *web* additionally needs the authenticated tunnel / OAuth layer (see the roadmap); a local
-Claude Desktop or Claude Code client can use the council with zero tunnel.
+config/param-driven, so nothing breaks when a provider renames a model. A local Claude Desktop or
+Claude Code client can use the council with zero tunnel; reaching **claude.ai *web*** additionally
+needs the OAuth layer below.
+
+### Connecting claude.ai web (OAuth 2.1 + PKCE, Phase 5b)
+
+Claude Desktop, Claude Code, and ChatGPT dev-mode all reach a *local* `/mcp` endpoint with a plain
+API key (`switchboard apikey new <name>`) — no OAuth required. **claude.ai web is different**: it can
+only reach Switchboard through a public HTTPS URL and refuses a static bearer, so it speaks OAuth 2.1
+with mandatory PKCE and Dynamic Client Registration. Turn on the built-in Authorization Server only
+for that case.
+
+```bash
+# 1) expose the local gateway over an HTTPS tunnel and copy the public URL
+node dist/cli.js expose            # prints e.g. https://abc123.trycloudflare.com
+```
+
+```yaml
+# 2) switchboard.config.yaml — paste the tunnel URL as the issuer/audience
+settings:
+  oauth_server:
+    enabled: true
+    public_url: "https://abc123.trycloudflare.com"   # REQUIRED when enabled; the loopback URL can't be the issuer
+    access_token_ttl: 3600        # 1h
+    refresh_token_ttl: 1209600    # 14d (0 disables refresh)
+    consent: true                 # show the human approval screen on every authorization
+```
+
+Then add `https://abc123.trycloudflare.com/mcp` as a custom connector in claude.ai. The SDK router
+publishes RFC 8414 AS metadata + RFC 9728 protected-resource metadata under `/.well-known/*`, accepts
+RFC 7591 dynamic client registration at `/register`, and runs the mandatory-PKCE `authorize → consent
+→ token` flow. Tokens are **opaque** (looked up server-side, never JWTs), persisted *sealed* with your
+vault key and additionally stored one-way hashed; the token audience is bound to `<public_url>/mcp`
+(RFC 8707). `/mcp` then accepts **either** a local API key **or** a valid OAuth bearer, and enabling
+the server **forces `/mcp` authentication on** (fail-closed — a public issuer means the endpoint is
+exposed). The full chain (metadata → DCR → PKCE → consent → token → authed `/mcp` → refresh → revoke)
+is verified end-to-end by a deterministic oracle: `npm run verify:oauth` (20/20).
 
 ## CLI
 
@@ -194,10 +228,12 @@ Claude Desktop or Claude Code client can use the council with zero tunnel.
 | `switchboard init` | Scaffold `switchboard.config.yaml` + the `~/.switchboard` home |
 | `switchboard serve` | Run the gateway (stdio and/or HTTP, per config) |
 | `switchboard dashboard` | Run only the HTTP endpoint + web console |
+| `switchboard expose` | Open an HTTPS tunnel to the local endpoint (for claude.ai web / remote clients) |
 | `switchboard list` | Mount everything and print the governed tool list, then exit |
 | `switchboard doctor` | Check Node, config, transports, and that every secret resolves |
 | `switchboard catalog` | List the OAuth providers and their connection status |
 | `switchboard connect <provider>` | Authorize a provider locally (loopback OAuth → token sealed in the vault) |
+| `switchboard apikey new <name>\|list\|rm <id>` | Manage `/mcp` bearer API keys for local clients |
 | `switchboard vault set\|list\|rm <name>` | Manage locally-stored secrets |
 
 Global flag: `-c, --config <path>` (default `switchboard.config.yaml`).
@@ -246,7 +282,13 @@ works end-to-end through the governed path.
 - **Council relay (Phase 5a)** — `settings.council` exposes `council_consult` + `council_debate` as a
   synthetic in-process server, letting one model consult/debate the other provider through the same
   policy → approval → audit path. Off by default; outbound + metered; keys resolved from the vault at
-  call time. The claude.ai-*web* OAuth 2.1 + PKCE layer (Phase 5b) is the remaining piece.
+  call time.
+- **claude.ai-web OAuth (Phase 5b)** — `settings.oauth_server` turns the `/mcp` endpoint into an OAuth
+  2.1 + PKCE Authorization Server (RFC 8414/9728/7591/8707 + RFC 7009 revocation) so claude.ai web can
+  connect over an HTTPS tunnel. Opaque tokens, sealed + one-way-hashed in the vault; consent-gated;
+  `/mcp` accepts an API key **or** an OAuth bearer; enabling it forces auth on (fail-closed). Off by
+  default. Verified end-to-end (metadata → DCR → PKCE → consent → token → refresh → revoke) by
+  `npm run verify:oauth` — 20/20.
 
 See **[docs/ROADMAP.md](docs/ROADMAP.md)** for the phase-by-phase detail.
 

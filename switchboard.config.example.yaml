@@ -91,6 +91,30 @@ settings:
         default_model: gpt-4o
         # base_url: https://api.openai.com
 
+  # Built-in OAuth 2.1 + PKCE Authorization Server for the `/mcp` endpoint. Turn this ON only
+  # to connect a hosted MCP client that can reach Switchboard ONLY through a public HTTPS
+  # tunnel and refuses a static bearer token — notably claude.ai web, which requires OAuth 2.1
+  # + PKCE + Dynamic Client Registration. Claude Desktop, Claude Code, and ChatGPT dev-mode all
+  # reach a local endpoint with a plain API key instead, so they do NOT need this.
+  #
+  # How it works: enabling this turns the dashboard's own `/mcp` into an OAuth Resource Server.
+  # The SDK router publishes RFC 8414 AS metadata + RFC 9728 protected-resource metadata at
+  # `/.well-known/*`, accepts RFC 7591 dynamic client registration at `/register`, and runs the
+  # mandatory-PKCE authorize -> consent -> token flow. Tokens are opaque (looked up server-side,
+  # never JWTs), persisted SEALED with your vault key, and additionally stored one-way hashed.
+  # `/mcp` then accepts EITHER a local API key OR a valid OAuth token. Enabling it also FORCES
+  # `/mcp` authentication on (fail-closed) — a public issuer implies the endpoint is exposed.
+  #
+  # `public_url` is REQUIRED when enabled and MUST be the public HTTPS origin your tunnel serves
+  # (the loopback address cannot be the issuer for a cloud client). Start a tunnel first, e.g.
+  # `switchboard expose`, then paste its URL here. The canonical token audience is `<public_url>/mcp`.
+  oauth_server:
+    enabled: false
+    public_url: ""                  # e.g. https://abc123.trycloudflare.com  (REQUIRED when enabled)
+    access_token_ttl: 3600          # access-token lifetime in seconds (default 1h)
+    refresh_token_ttl: 1209600      # refresh-token lifetime in seconds (default 14d; 0 disables refresh)
+    consent: true                   # show the human approval screen on every authorization (governance-first)
+
 servers:
   # --- mount an existing MCP server from npm ---
   - id: github

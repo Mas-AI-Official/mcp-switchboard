@@ -20,6 +20,9 @@ import { recentAudit, usageStats } from "./audit.js";
 import { inferScope } from "./policy.js";
 import { ApiKeyStore } from "./apikeys.js";
 import { loadCatalog, queryCatalog, type CatalogSnapshot } from "./catalog.js";
+import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
+import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
+import { resolveOAuthServerOptions, SwitchboardAuthProvider, OAUTH_SCOPES_SUPPORTED } from "./authserver.js";
 import { log } from "./logger.js";
 
 export interface DashboardHandle {
@@ -68,6 +71,18 @@ export interface McpEndpointOptions {
   /** The key store the bearer token is verified against. */
   apiKeys: ApiKeyStore;
   /**
+   * Optional OAuth bearer verifier. When the built-in Authorization Server is enabled, the
+   * `/mcp` gate accepts EITHER a valid API key OR an OAuth access token this resolves to a
+   * non-null `AuthInfo`. Never throws (the provider's `verifyToken` swallows errors → null).
+   */
+  verifyOAuthToken?: (token: string) => Promise<AuthInfo | null>;
+  /**
+   * RFC 9728 protected-resource metadata URL. When set, an unauthenticated `/mcp` response
+   * advertises it via `WWW-Authenticate: Bearer ..., resource_metadata="<url>"` so a spec
+   * client (e.g. claude.ai web) can discover the Authorization Server and start the flow.
+   */
+  resourceMetadataUrl?: string;
+  /**
    * Respond with plain JSON instead of an SSE stream. Needed behind tunnels that do not
    * support Server-Sent Events (e.g. cloudflared quick tunnels). Safe for the stateless
    * server pattern, where each `/mcp` POST is a single request/response.
@@ -86,9 +101,18 @@ export function mountMcpEndpoint(app: express.Express, gateway: Gateway, opts: M
     // never echo or log the presented token.
     if (opts.requireAuth()) {
       const token = presentedToken(req);
-      if (!token || !opts.apiKeys.verify(token)) {
-        res.set("WWW-Authenticate", 'Bearer realm="switchboard"');
-        res.status(401).json({ error: "unauthorized: missing or invalid API key" });
+      // Accept either a local API key or — when the OAuth AS is enabled — a valid OAuth
+      // access token. The token value is never echoed or logged.
+      const apiKeyOk = !!token && opts.apiKeys.verify(token);
+      const oauthOk = !apiKeyOk && !!token && !!opts.verifyOAuthToken && (await opts.verifyOAuthToken(token)) !== null;
+      if (!apiKeyOk && !oauthOk) {
+        // RFC 9728: point spec clients at the protected-resource metadata so they can
+        // discover the Authorization Server and run the PKCE flow.
+        const challenge = opts.resourceMetadataUrl
+          ? `Bearer realm="switchboard", resource_metadata="${opts.resourceMetadataUrl}"`
+          : 'Bearer realm="switchboard"';
+        res.set("WWW-Authenticate", challenge);
+        res.status(401).json({ error: "unauthorized: missing or invalid API key or OAuth token" });
         return;
       }
     }
@@ -130,9 +154,64 @@ export async function startDashboard(
   // file out of band, and a dashboard restart picks it up. Reload lazily if it was empty.
   let catalog: CatalogSnapshot = loadCatalog();
 
+  // --- OAuth 2.1 + PKCE Authorization Server (optional; for claude.ai-web over a tunnel) ---
+  // Off unless `settings.oauth_server.enabled`. When on, this dashboard's own `/mcp` becomes
+  // an OAuth Resource Server: a spec client discovers metadata, dynamically registers, runs
+  // the PKCE authorize→consent→token dance, then presents a bearer token. Mounting the SDK
+  // router at the app ROOT (its hard contract) installs `/.well-known/*`, `/authorize`,
+  // `/token`, `/register`, and `/revoke`. `resolveOAuthServerOptions` fails closed: it logs
+  // and returns null if enabled-without-public_url, so a misconfig never silently runs HTTP.
+  const oauthOpts = resolveOAuthServerOptions(cfg);
+  let oauthProvider: SwitchboardAuthProvider | undefined;
+  let resourceMetadataUrl: string | undefined;
+  if (oauthOpts) {
+    oauthProvider = new SwitchboardAuthProvider(oauthOpts, cfg.settings?.auth_screen);
+    app.use(
+      mcpAuthRouter({
+        provider: oauthProvider,
+        issuerUrl: oauthOpts.issuerUrl,
+        // Supplying the resource server URL makes the router also advertise RFC 9728
+        // protected-resource metadata pointing back at this issuer.
+        resourceServerUrl: new URL(oauthOpts.canonicalResource),
+        scopesSupported: [...OAUTH_SCOPES_SUPPORTED],
+        resourceName: "Switchboard",
+        // Public clients (claude.ai) register without a secret; any issued secret never expires.
+        clientRegistrationOptions: { clientSecretExpirySeconds: 0 },
+      }),
+    );
+    // The consent screen rendered by the provider's `authorize()` POSTs the human decision
+    // here. Finalize it and 302 the user-agent back to the client with a code, or 400 an
+    // expired/unknown request with a themed page.
+    app.post("/oauth/consent", express.urlencoded({ extended: false }), (req: Request, res: Response) => {
+      const body = req.body as { pending_id?: unknown; decision?: unknown };
+      const pendingId = typeof body.pending_id === "string" ? body.pending_id : "";
+      const url = oauthProvider!.completeConsent(pendingId, body.decision === "approve");
+      if (!url) {
+        res
+          .status(400)
+          .type("html")
+          .send(callbackPage("This authorization request expired — start again from your client.", false, cfg.settings?.auth_screen));
+        return;
+      }
+      res.redirect(url);
+    });
+    resourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(new URL(oauthOpts.canonicalResource));
+    // A tunnel-fronted endpoint must NEVER serve `/mcp` unauthenticated. Force the gate on
+    // regardless of the loopback `require_auth` heuristic — the public issuer implies exposure.
+    requireAuth = true;
+    log.info(
+      `OAuth 2.1 Authorization Server enabled — issuer ${oauthOpts.issuerUrl.href} · /mcp now requires an API key OR an OAuth bearer token`,
+    );
+  }
+
   // --- MCP Streamable HTTP endpoint (stateless) ---
   // `() => requireAuth` is re-read per request so a live settings change takes effect.
-  mountMcpEndpoint(app, gateway, { requireAuth: () => requireAuth, apiKeys });
+  mountMcpEndpoint(app, gateway, {
+    requireAuth: () => requireAuth,
+    apiKeys,
+    verifyOAuthToken: oauthProvider ? (t) => oauthProvider!.verifyToken(t) : undefined,
+    resourceMetadataUrl,
+  });
 
   // ====================================================================
   // JSON API for the dashboard
@@ -356,7 +435,9 @@ export async function startDashboard(
     if (body.gateway?.default_policy) cfg.gateway.default_policy = body.gateway.default_policy;
 
     // Re-evaluate the live auth posture so a require_auth change takes effect immediately.
-    requireAuth = authRequired(cfg.gateway.http.require_auth, host);
+    // The OAuth AS, when enabled, is a hard floor: a settings edit must never drop the
+    // `/mcp` gate below "required" while a public issuer is exposing the endpoint.
+    requireAuth = authRequired(cfg.gateway.http.require_auth, host) || Boolean(oauthOpts);
 
     try {
       if (configPath) writeConfig(configPath, cfg);
@@ -498,7 +579,9 @@ export async function startDashboard(
   const dir = publicDir();
   app.use(express.static(dir));
   // Any non-API GET falls back to the SPA shell (hash routing means this is mostly `/`).
-  app.get(/^(?!\/api\/|\/mcp|\/oauth\/).*/, (_req: Request, res: Response) => {
+  // Excludes the API, `/mcp`, the OAuth connect routes, and — so the AS router (or a clean
+  // 404 when it's off) handles them — the OAuth 2.1 metadata/endpoint paths.
+  app.get(/^(?!\/api\/|\/mcp|\/oauth\/|\/\.well-known\/|\/authorize|\/token|\/register|\/revoke).*/, (_req: Request, res: Response) => {
     res.sendFile("index.html", { root: dir }, (err) => {
       if (err) res.status(404).type("text").send("dashboard not built — run `npm run build`");
     });
@@ -506,10 +589,12 @@ export async function startDashboard(
 
   // Surface the auth posture loudly at startup so a misconfigured exposure is obvious.
   if (requireAuth) {
-    if (apiKeys.count === 0) {
+    if (apiKeys.count === 0 && !oauthProvider) {
       log.warn(
         `/mcp requires an API key but none exist — run \`switchboard apikey new <name>\` to issue one; clients cannot connect until you do`,
       );
+    } else if (apiKeys.count === 0 && oauthProvider) {
+      log.info("/mcp authentication required — no API keys issued; clients authenticate via the OAuth 2.1 flow");
     } else {
       log.info(`/mcp authentication required (${apiKeys.count} API key${apiKeys.count === 1 ? "" : "s"} issued)`);
     }

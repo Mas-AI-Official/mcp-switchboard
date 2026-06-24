@@ -126,6 +126,34 @@ export interface SettingsConfig {
   };
   /** Cross-provider "council" relay tools (`council_consult` / `council_debate`). Off by default. */
   council?: CouncilConfig;
+  /**
+   * Built-in OAuth 2.1 + PKCE Authorization Server for the `/mcp` endpoint. Off by default.
+   * Required for hosted MCP clients (e.g. claude.ai web) that can only reach Switchboard
+   * through a public HTTPS tunnel and refuse to connect without OAuth + DCR.
+   */
+  oauth_server?: OAuthServerConfig;
+}
+
+/**
+ * Turns the dashboard's own `/mcp` endpoint into an OAuth 2.1 Authorization + Resource
+ * Server (RFC 8414/9728 metadata, RFC 7591 dynamic client registration, mandatory PKCE,
+ * RFC 8707 resource binding). Off by default; fails closed if `public_url` is missing.
+ */
+export interface OAuthServerConfig {
+  /** Master switch. When false (default) no OAuth routes are mounted. */
+  enabled?: boolean;
+  /**
+   * Public HTTPS origin the tunnel exposes (e.g. `https://abc.trycloudflare.com`). Becomes
+   * the OAuth issuer and the base of the canonical `/mcp` audience. REQUIRED when enabled —
+   * the loopback address can't be the issuer for a cloud client.
+   */
+  public_url?: string;
+  /** Access-token lifetime in seconds. Default 3600 (1h). */
+  access_token_ttl?: number;
+  /** Refresh-token lifetime in seconds. Default 14 days. 0 disables refresh-token issuance. */
+  refresh_token_ttl?: number;
+  /** Show the human consent screen on every authorization. Default true (governance-first). */
+  consent?: boolean;
 }
 
 /** One LLM provider the council can relay to. */

@@ -149,6 +149,19 @@ const settings = z
       .strict()
       .optional(),
     council: council.optional(),
+    oauth_server: z
+      .object({
+        enabled: z.boolean().default(false),
+        public_url: z.url().optional(),
+        access_token_ttl: z.number().int().positive().optional(),
+        refresh_token_ttl: z.number().int().min(0).optional(),
+        consent: z.boolean().optional(),
+      })
+      .strict()
+      .refine((v) => !v.enabled || !!v.public_url, {
+        message: "settings.oauth_server.public_url is required when oauth_server.enabled is true",
+      })
+      .optional(),
   })
   .strict()
   .optional();
