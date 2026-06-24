@@ -24,6 +24,7 @@ import { Vault } from "./vault.js";
 import { OAuthStore } from "./oauth.js";
 import { Registry } from "./registry.js";
 import { Router } from "./router.js";
+import { TriggerManager } from "./triggers.js";
 import { setStdioActive } from "./approval.js";
 import { buildCouncilServer, COUNCIL_SERVER_ID } from "./council.js";
 import { log } from "./logger.js";
@@ -36,12 +37,15 @@ export class Gateway {
   readonly oauth: OAuthStore;
   readonly registry: Registry;
   readonly router: Router;
+  readonly triggers: TriggerManager;
 
   constructor(private readonly cfg: SwitchboardConfig) {
     this.vault = new Vault(cfg.vault.backend);
     this.oauth = new OAuthStore(this.vault);
     this.registry = new Registry(this.vault, this.oauth);
     this.router = new Router(this.registry, cfg, (ref) => this.vault.resolve(ref));
+    // Polls run through this.router, so every trigger poll is governed + audited like any call.
+    this.triggers = new TriggerManager(this.router, cfg, (ref) => this.vault.resolve(ref));
   }
 
   /** Mount every enabled server. Failures are isolated so one bad server can't sink the rest. */
@@ -111,6 +115,8 @@ export class Gateway {
   }
 
   async shutdown(): Promise<void> {
+    // Stop pollers before unmounting so an in-flight poll can't hit a torn-down upstream.
+    this.triggers.stop();
     await this.registry.unmountAll();
   }
 }
@@ -119,5 +125,9 @@ export class Gateway {
 export async function createGateway(cfg: SwitchboardConfig): Promise<Gateway> {
   const gateway = new Gateway(cfg);
   await gateway.mountAll();
+  // Start polling only after every upstream is mounted (so the first poll can reach its tool).
+  // No-op unless `settings.triggers.enabled`. Verifiers that use `new Gateway()` directly never
+  // auto-start pollers — they drive `pollOnce()` deterministically instead.
+  gateway.triggers.start();
   return gateway;
 }

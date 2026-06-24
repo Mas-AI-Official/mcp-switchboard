@@ -115,6 +115,37 @@ settings:
     refresh_token_ttl: 1209600      # refresh-token lifetime in seconds (default 14d; 0 disables refresh)
     consent: true                   # show the human approval screen on every authorization (governance-first)
 
+  # Poll-first triggers. Each definition periodically calls a READ-scoped upstream tool, diffs
+  # the result against the last poll, and — when something new appears — fires a webhook event
+  # (`type: switchboard.trigger`) to the URL configured in `settings.webhook` above. This is the
+  # local-first, zero-infra answer to hosted "trigger" products: no inbound listener, no cloud
+  # relay, just your own gateway polling tools you already mounted.
+  #
+  # The POLL is a real governed tool call — it flows through policy -> approval -> audit exactly
+  # like any agent call (so a poll against a non-read tool is denied by the read ceiling, and
+  # every poll shows up in the Logs page). The FIRE is a distinct observation event, NOT an audit
+  # decision; it is delivered ONLY through the webhook and signed with the SAME webhook
+  # `secret_ref`, so the trigger feature requires `settings.webhook.enabled: true` with a `url`
+  # set for fires to reach you. Trigger fires ignore the webhook `events` filter — they always
+  # deliver when the webhook is on.
+  #
+  # New-item detection: point `item_path` at the array in the tool's result (dot path, e.g.
+  # `items` or `data.records`) and `item_key` at the field that uniquely identifies a row (e.g.
+  # `id`). Keys unseen since the last poll count as "new". Omit both to fire whenever the raw
+  # result text changes. Off by default — nothing polls until you enable it.
+  triggers:
+    enabled: false
+    poll_interval_seconds: 60       # default cadence for definitions that don't set their own (1..86400)
+    definitions:
+      - id: new-github-issues
+        name: New GitHub issues          # optional label shown in the dashboard
+        tool: github__list_issues         # namespaced, READ-scoped upstream tool to poll
+        args: { state: open }             # arguments passed to the tool on every poll (optional)
+        interval_seconds: 300             # per-trigger override of poll_interval_seconds (optional)
+        item_path: ""                     # dot path to the array in the result (e.g. items); blank = whole result
+        item_key: id                      # field uniquely identifying a row; new keys fire the trigger
+        enabled: true
+
 servers:
   # --- mount an existing MCP server from npm ---
   - id: github

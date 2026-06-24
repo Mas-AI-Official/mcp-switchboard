@@ -1189,12 +1189,345 @@ async function renderPlayground() {
 }
 
 // ============================================================================
+// VIEW: Triggers (poll-first, local-first change detection)
+// ============================================================================
+// The editable config (carries args/item_path/item_key the runtime snapshot omits).
+// Reassigned on every render; handlers attached in a render close over the live value.
+let triggersCfg = { enabled: false, poll_interval_seconds: 60, definitions: [] };
+
+async function renderTriggers() {
+  loadingView("Loading triggers…");
+  let state, settings, toolData;
+  try {
+    [state, settings, toolData] = await Promise.all([
+      api("/api/triggers"),
+      loadSettings(),
+      api("/api/playground/tools").catch(() => ({ tools: [] })),
+    ]);
+  } catch (e) {
+    view().innerHTML = pageHead("Triggers") + errorBanner(e);
+    return;
+  }
+
+  const raw = settings.triggers || {};
+  triggersCfg = {
+    enabled: raw.enabled === true,
+    poll_interval_seconds: raw.poll_interval_seconds || 60,
+    definitions: Array.isArray(raw.definitions) ? raw.definitions.map((d) => ({ ...d })) : [],
+  };
+  const toolNames = (toolData.tools || []).map((t) => t.name);
+
+  // Pull the (possibly unsaved) global switch + interval back into the cfg before any PUT,
+  // so adding/removing/toggling a row never silently discards a pending global edit.
+  const syncGlobalFromDom = () => {
+    const en = $("#tr-enabled");
+    if (en) triggersCfg.enabled = en.checked;
+    const iv = $("#tr-interval");
+    if (iv) {
+      const n = Number(iv.value.trim());
+      if (Number.isInteger(n) && n >= 1 && n <= 86400) triggersCfg.poll_interval_seconds = n;
+    }
+  };
+  const putTriggers = () => api("/api/triggers", { method: "PUT", body: JSON.stringify({ triggers: triggersCfg }) });
+
+  const statusBadge = (t) => {
+    if (!triggersCfg.enabled) return `<span class="badge badge-off"><span class="dot"></span>Polling off</span>`;
+    if (!t.enabled) return `<span class="badge badge-off"><span class="dot"></span>Disabled</span>`;
+    if (t.last_error) return `<span class="badge badge-off" title="${attr(t.last_error)}"><span class="dot"></span>Error</span>`;
+    if (!t.baseline) return `<span class="badge"><span class="dot"></span>Arming…</span>`;
+    return `<span class="badge badge-ok"><span class="dot"></span>Armed</span>`;
+  };
+
+  const rows = state.triggers
+    .map((t) => {
+      const detail =
+        t.detection === "items"
+          ? `<span class="dim">items · ${t.seen_count} seen</span>`
+          : `<span class="dim">hash</span>`;
+      return `
+        <tr data-id="${attr(t.id)}">
+          <td><div>${esc(t.name || t.id)}</div>${t.name ? `<code class="dim">${esc(t.id)}</code>` : ""}</td>
+          <td class="mono">${esc(t.tool)}</td>
+          <td>${detail}</td>
+          <td class="dim nowrap">${t.interval_seconds}s</td>
+          <td class="dim nowrap">${t.last_poll_ts ? esc(relTime(t.last_poll_ts)) : "never"}</td>
+          <td class="dim nowrap">${t.last_fire_ts ? esc(relTime(t.last_fire_ts)) : "never"}</td>
+          <td>${statusBadge(t)}</td>
+          <td class="nowrap" style="text-align:right">
+            <button class="btn btn-sm" data-tr-poll="${attr(t.id)}" title="Poll once now">Poll now</button>
+            <button class="btn btn-sm" data-tr-edit="${attr(t.id)}" style="margin-left:6px">Edit</button>
+            <label class="switch" title="Enable / disable" style="margin-left:8px;vertical-align:middle">
+              <input type="checkbox" data-tr-toggle="${attr(t.id)}" ${t.enabled ? "checked" : ""} />
+              <span class="track"></span>
+            </label>
+            <button class="btn btn-sm btn-danger" data-tr-remove="${attr(t.id)}" style="margin-left:8px">Remove</button>
+          </td>
+        </tr>`;
+    })
+    .join("");
+
+  const fires = state.recent_fires || [];
+  const fireRows = fires
+    .map(
+      (f) => `
+      <tr>
+        <td class="dim nowrap">${esc(fmtDateTime(f.ts))}</td>
+        <td>${esc(f.trigger_name || f.trigger_id)}</td>
+        <td class="mono">${esc(f.tool)}</td>
+        <td class="dim">${esc(f.detection)}</td>
+        <td class="dim nowrap">+${f.new_count}</td>
+        <td class="dim">${f.sample_keys && f.sample_keys.length ? esc(f.sample_keys.join(", ")) : "—"}</td>
+      </tr>`
+    )
+    .join("");
+
+  view().innerHTML =
+    pageHead(
+      "Triggers",
+      "Poll-first, local-first change detection. Each trigger periodically calls a (read-scoped) tool through the governed endpoint and fires when the result changes — no inbound port, public tunnel, or provider push required. The poll takes the full policy → approval → audit path; the fire is an observation delivered to your webhook as a distinct switchboard.trigger event and to the local log below.",
+      `<button class="btn btn-primary" id="tr-add"${toolNames.length ? "" : " disabled title=\"Enable a server under Servers first\""}>+ Add trigger</button>`
+    ) +
+    `<div class="panel">
+      <div class="row" style="justify-content:space-between;align-items:center">
+        <label class="switch"><input type="checkbox" id="tr-enabled" ${triggersCfg.enabled ? "checked" : ""} /><span class="track"></span>
+          <span style="margin-left:10px;font-weight:600">Polling enabled</span></label>
+        <span class="badge ${state.running ? "badge-ok" : "badge-off"}"><span class="dot"></span>${state.running ? "Running" : "Stopped"}</span>
+      </div>
+      <div class="field" style="margin-top:14px"><label for="tr-interval">Default poll interval (seconds)</label>
+        <input id="tr-interval" class="input" type="number" min="1" max="86400" style="max-width:200px" value="${attr(String(triggersCfg.poll_interval_seconds))}" />
+        <div class="hint">Applied to triggers that don't set their own interval. The master switch above must be on for scheduled polling to run — <strong>Poll now</strong> always works for one-shot testing.</div></div>
+      <div class="row"><button class="btn btn-primary" id="tr-save">Save changes</button></div>
+    </div>` +
+    (state.triggers.length
+      ? `<div class="panel" style="padding:6px 0">
+          <table class="table">
+            <thead><tr><th>Trigger</th><th>Tool</th><th>Detection</th><th>Interval</th><th>Last poll</th><th>Last fire</th><th>Status</th><th></th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>`
+      : `<div class="empty"><div class="empty-ico">⚡</div><div class="empty-title">No triggers yet</div>
+          <div>${toolNames.length ? `Add one to watch a tool's result for changes.` : `Enable a server under <a href="#/servers">Servers</a> first, then add a trigger.`}</div></div>`) +
+    `<div class="panel" style="padding:6px 0;margin-top:18px">
+      <div class="panel-title" style="padding:6px 16px 0">Recent fires</div>
+      ${
+        fires.length
+          ? `<table class="table">
+              <thead><tr><th>Time</th><th>Trigger</th><th>Tool</th><th>Detection</th><th>New</th><th>Sample keys</th></tr></thead>
+              <tbody>${fireRows}</tbody>
+            </table>`
+          : `<div class="dim" style="padding:10px 16px 14px">No fires recorded yet. A trigger fires when its polled result changes after the first (baseline) poll.</div>`
+      }
+    </div>`;
+
+  // --- global save ---
+  $("#tr-save").addEventListener("click", async () => {
+    const iv = Number($("#tr-interval").value.trim());
+    if (!Number.isInteger(iv) || iv < 1 || iv > 86400) {
+      toast("Default interval must be a whole number of seconds (1–86400).", "error");
+      return;
+    }
+    triggersCfg.enabled = $("#tr-enabled").checked;
+    triggersCfg.poll_interval_seconds = iv;
+    const btn = $("#tr-save");
+    btn.disabled = true; btn.innerHTML = `<span class="spinner"></span> Saving…`;
+    try {
+      await putTriggers();
+      toast("Trigger settings saved.", "ok");
+      renderTriggers();
+    } catch (e) { toast(e.message, "error"); btn.disabled = false; btn.innerHTML = "Save changes"; }
+  });
+
+  // --- add ---
+  const addBtn = $("#tr-add");
+  if (addBtn) addBtn.addEventListener("click", () =>
+    openTriggerModal(null, toolNames, async (def, _isEdit, m) => {
+      if (triggersCfg.definitions.some((d) => d.id === def.id)) {
+        toast(`A trigger with id “${def.id}” already exists.`, "error");
+        return;
+      }
+      syncGlobalFromDom();
+      triggersCfg.definitions.push(def);
+      try {
+        await putTriggers();
+        m.close();
+        toast(`Trigger “${def.id}” added.`, "ok");
+        renderTriggers();
+      } catch (e) {
+        toast(e.message, "error");
+        triggersCfg.definitions = triggersCfg.definitions.filter((d) => d.id !== def.id);
+      }
+    })
+  );
+
+  // --- edit ---
+  $$("[data-tr-edit]").forEach((b) =>
+    b.addEventListener("click", () => {
+      const id = b.dataset.trEdit;
+      const def = triggersCfg.definitions.find((d) => d.id === id);
+      if (!def) return;
+      openTriggerModal(def, toolNames, async (next, _isEdit, m) => {
+        syncGlobalFromDom();
+        const i = triggersCfg.definitions.findIndex((d) => d.id === id);
+        if (i >= 0) triggersCfg.definitions[i] = next;
+        try {
+          await putTriggers();
+          m.close();
+          toast(`Trigger “${id}” saved.`, "ok");
+          renderTriggers();
+        } catch (e) { toast(e.message, "error"); }
+      });
+    })
+  );
+
+  // --- enable / disable a definition ---
+  $$("[data-tr-toggle]").forEach((cb) =>
+    cb.addEventListener("change", async () => {
+      const id = cb.dataset.trToggle;
+      const def = triggersCfg.definitions.find((d) => d.id === id);
+      if (!def) return;
+      cb.disabled = true;
+      syncGlobalFromDom();
+      def.enabled = cb.checked;
+      try {
+        await putTriggers();
+        toast(`Trigger “${id}” ${cb.checked ? "enabled" : "disabled"}.`, "ok");
+        renderTriggers();
+      } catch (e) { toast(e.message, "error"); cb.checked = !cb.checked; cb.disabled = false; }
+    })
+  );
+
+  // --- poll now ---
+  $$("[data-tr-poll]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      const id = b.dataset.trPoll;
+      b.disabled = true;
+      const orig = b.innerHTML;
+      b.innerHTML = `<span class="spinner"></span>`;
+      try {
+        const r = await api(`/api/triggers/${encodeURIComponent(id)}/poll`, { method: "POST" });
+        if (r.skipped) toast(`Not polled: ${r.skipped}.`, "error");
+        else if (!r.ok) toast(`Poll error: ${r.error || "upstream error"}.`, "error");
+        else if (r.baseline) toast("Baseline established — nothing fires on the first poll.", "ok");
+        else if (r.fired) toast(`Fired — ${r.new_count} new ${r.detection === "items" ? "item(s)" : "change"}.`, "ok");
+        else toast("Polled — no change.", "ok");
+        renderTriggers();
+      } catch (e) { toast(e.message, "error"); b.disabled = false; b.innerHTML = orig; }
+    })
+  );
+
+  // --- remove ---
+  $$("[data-tr-remove]").forEach((b) =>
+    b.addEventListener("click", () => {
+      const id = b.dataset.trRemove;
+      const m = openModal({
+        title: `Remove trigger “${id}”?`,
+        body: `<p class="dim">This deletes the trigger from your config and stops polling it. Its past fired-event history is unaffected.</p>`,
+        footer: `<button class="btn" id="trr-cancel" data-close="1">Cancel</button>
+                 <button class="btn btn-danger" id="trr-confirm">Remove</button>`,
+      });
+      $("#trr-cancel", m.root).addEventListener("click", m.close);
+      $("#trr-confirm", m.root).addEventListener("click", async () => {
+        syncGlobalFromDom();
+        const prev = triggersCfg.definitions;
+        triggersCfg.definitions = prev.filter((d) => d.id !== id);
+        try {
+          await putTriggers();
+          m.close();
+          toast(`Trigger “${id}” removed.`, "ok");
+          renderTriggers();
+        } catch (e) { toast(e.message, "error"); triggersCfg.definitions = prev; }
+      });
+    })
+  );
+}
+
+// Add / edit a trigger definition. `onSaved(def, isEdit, modal)` owns persistence + close.
+function openTriggerModal(existing, toolNames, onSaved) {
+  const isEdit = !!existing;
+  const d = existing || {};
+  const datalist = (toolNames || []).map((n) => `<option value="${attr(n)}"></option>`).join("");
+  const m = openModal({
+    title: isEdit ? `Edit trigger “${esc(d.id)}”` : "Add trigger",
+    body: `
+      <div class="field"><label for="trm-id">ID</label>
+        <input id="trm-id" class="input" value="${attr(d.id || "")}" ${isEdit ? "disabled" : ""} placeholder="new-issues" />
+        <div class="hint">A stable, unique key. Appears in the webhook payload and the fired-event log.</div></div>
+      <div class="field"><label for="trm-name">Name <span class="dim">(optional)</span></label>
+        <input id="trm-name" class="input" value="${attr(d.name || "")}" placeholder="New GitHub issues" /></div>
+      <div class="field"><label for="trm-tool">Tool</label>
+        <input id="trm-tool" class="input" list="trm-tools" value="${attr(d.tool || "")}" placeholder="github__list_issues" />
+        <datalist id="trm-tools">${datalist}</datalist>
+        <div class="hint">An exposed tool name (see <a href="#/playground">Playground</a>). Polled on the governed path — keep it read-scoped.</div></div>
+      <div class="field"><label for="trm-interval">Interval (seconds) <span class="dim">(optional)</span></label>
+        <input id="trm-interval" class="input" type="number" min="1" max="86400" style="max-width:200px" value="${attr(d.interval_seconds != null ? String(d.interval_seconds) : "")}" placeholder="use default" />
+        <div class="hint">Overrides the default poll interval for this trigger only.</div></div>
+      <div class="field" style="max-width:none"><label for="trm-args">Arguments (JSON) <span class="dim">(optional)</span></label>
+        <textarea id="trm-args" class="input mono" rows="4" spellcheck="false" placeholder="{}">${esc(d.args ? JSON.stringify(d.args, null, 2) : "")}</textarea></div>
+      <div class="field"><label>Item-level detection <span class="dim">(optional)</span></label>
+        <div class="row" style="gap:10px">
+          <input id="trm-path" class="input" value="${attr(d.item_path || "")}" placeholder="item_path · e.g. issues" />
+          <input id="trm-key" class="input" value="${attr(d.item_key || "")}" placeholder="item_key · e.g. id" />
+        </div>
+        <div class="hint">Set both to fire on NEW array items keyed by a unique field (the “new row / issue / email” semantic). Leave blank to fire on any whole-response change (hash).</div></div>
+      <label class="switch" style="margin-top:4px"><input type="checkbox" id="trm-enabled" ${d.enabled !== false ? "checked" : ""} /><span class="track"></span>
+        <span style="margin-left:10px">Enabled</span></label>`,
+    footer: `<button class="btn" id="trm-cancel" data-close="1">Cancel</button>
+             <button class="btn btn-primary" id="trm-save">${isEdit ? "Save" : "Add trigger"}</button>`,
+  });
+  $("#trm-cancel", m.root).addEventListener("click", m.close);
+  $("#trm-save", m.root).addEventListener("click", () => {
+    const id = $("#trm-id", m.root).value.trim();
+    const tool = $("#trm-tool", m.root).value.trim();
+    if (!id) { toast("ID is required.", "error"); return; }
+    if (!tool) { toast("Tool is required.", "error"); return; }
+
+    let args;
+    const rawArgs = $("#trm-args", m.root).value.trim();
+    if (rawArgs) {
+      try { args = JSON.parse(rawArgs); }
+      catch { toast("Arguments are not valid JSON.", "error"); return; }
+      if (args === null || typeof args !== "object" || Array.isArray(args)) {
+        toast("Arguments must be a JSON object.", "error");
+        return;
+      }
+    }
+
+    let interval_seconds;
+    const intervalRaw = $("#trm-interval", m.root).value.trim();
+    if (intervalRaw) {
+      interval_seconds = Number(intervalRaw);
+      if (!Number.isInteger(interval_seconds) || interval_seconds < 1 || interval_seconds > 86400) {
+        toast("Interval must be a whole number of seconds (1–86400).", "error");
+        return;
+      }
+    }
+
+    const path = $("#trm-path", m.root).value.trim();
+    const key = $("#trm-key", m.root).value.trim();
+    if ((path && !key) || (!path && key)) {
+      toast("Item-level detection needs BOTH item_path and item_key (or neither).", "error");
+      return;
+    }
+
+    const name = $("#trm-name", m.root).value.trim();
+    const def = { id, tool, enabled: $("#trm-enabled", m.root).checked };
+    if (name) def.name = name;
+    if (interval_seconds != null) def.interval_seconds = interval_seconds;
+    if (args) def.args = args;
+    if (path) def.item_path = path;
+    if (key) def.item_key = key;
+    onSaved(def, isEdit, m);
+  });
+}
+
+// ============================================================================
 // Router
 // ============================================================================
 const routes = {
   "/catalog": renderCatalog,
   "/accounts": renderAccounts,
   "/servers": renderServers,
+  "/triggers": renderTriggers,
   "/playground": renderPlayground,
   "/logs": renderLogs,
   "/usage": renderUsage,

@@ -37,6 +37,27 @@ export interface WebhookEvent {
   error?: string;
 }
 
+/**
+ * A poll-first TRIGGER event delivered to the webhook. Distinct from `WebhookEvent`: a trigger
+ * fire is an observation ("the polled result changed"), NOT a governance decision, so it must
+ * never enter the audit log's allow/deny/approval_required accounting. Metadata only — the
+ * trigger id/name, the polled tool, and a small bounded sample of the changed item keys.
+ */
+export interface TriggerWebhookEvent {
+  /** The trigger definition id that fired. */
+  trigger_id: string;
+  /** The human label of the trigger, when set. */
+  trigger_name?: string;
+  /** The exposed tool that was polled. */
+  tool: string;
+  /** How the change was detected: new list items, or a changed whole-response hash. */
+  detection: "items" | "hash";
+  /** Number of newly-seen items (item detection) or 1 (hash detection). */
+  new_count: number;
+  /** A bounded sample of the new item keys (item detection only), for human triage. */
+  sample_keys?: string[];
+}
+
 const TIMEOUT_MS = 8000;
 
 /**
@@ -87,6 +108,59 @@ export function deliverWebhook(cfg: SwitchboardConfig, event: WebhookEvent, reso
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log.warn(`webhook: delivery to ${url} failed: ${msg}`);
+    } finally {
+      clearTimeout(timer);
+    }
+  })();
+}
+
+/**
+ * Notify the configured webhook of one TRIGGER fire. Reuses the operator's single
+ * `settings.webhook` URL + signing secret (there are no per-trigger webhook URLs) but posts a
+ * distinct `type: "switchboard.trigger"` payload and IGNORES the decision `events` filter — a
+ * trigger is not a decision, so the allow/deny/approval_required filter never applies to it.
+ * Same fire-and-forget, fail-open, HMAC-signed delivery contract as `deliverWebhook`.
+ */
+export function deliverTriggerWebhook(
+  cfg: SwitchboardConfig,
+  event: TriggerWebhookEvent,
+  resolveSecret: SecretResolver,
+): void {
+  const wh = cfg.settings?.webhook;
+  if (!wh?.enabled || !wh.url) return;
+
+  const payload = JSON.stringify({
+    type: "switchboard.trigger",
+    ts: new Date().toISOString(),
+    trigger_id: event.trigger_id,
+    ...(event.trigger_name ? { trigger_name: event.trigger_name } : {}),
+    tool: event.tool,
+    detection: event.detection,
+    new_count: event.new_count,
+    ...(event.sample_keys && event.sample_keys.length > 0 ? { sample_keys: event.sample_keys } : {}),
+  });
+
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (wh.secret_ref) {
+    try {
+      const secret = resolveSecret(wh.secret_ref);
+      headers["x-switchboard-signature"] = "sha256=" + createHmac("sha256", secret).update(payload).digest("hex");
+    } catch {
+      // Promised a signature we can't produce: drop rather than send an unsigned event. Never throws.
+      log.warn(`webhook: cannot resolve secret '${wh.secret_ref}', dropping trigger '${event.trigger_id}' notification`);
+      return;
+    }
+  }
+
+  const url = wh.url;
+  void (async () => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+    try {
+      await fetch(url, { method: "POST", headers, body: payload, signal: ctrl.signal });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.warn(`webhook: trigger delivery to ${url} failed: ${msg}`);
     } finally {
       clearTimeout(timer);
     }

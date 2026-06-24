@@ -15,7 +15,7 @@ import express, { type Request, type Response } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Gateway } from "./gateway.js";
 import type { SwitchboardConfig, SettingsConfig } from "./types.js";
-import { writeConfig } from "./config.js";
+import { writeConfig, parseTriggersConfig } from "./config.js";
 import { recentAudit, usageStats } from "./audit.js";
 import { inferScope } from "./policy.js";
 import { ApiKeyStore } from "./apikeys.js";
@@ -402,6 +402,7 @@ export async function startDashboard(
       general: cfg.settings?.general ?? {},
       auth_screen: cfg.settings?.auth_screen ?? {},
       webhook: cfg.settings?.webhook ?? {},
+      triggers: cfg.settings?.triggers ?? {},
       gateway: {
         host: cfg.gateway.http.host,
         port: cfg.gateway.http.port,
@@ -484,6 +485,59 @@ export async function startDashboard(
       res.status(502).json({ error: `delivery failed: ${msg}` });
     } finally {
       clearTimeout(timer);
+    }
+  });
+
+  // ====================================================================
+  // Triggers (poll-first change detection). The definitions live in
+  // `settings.triggers` and round-trip to config.yaml like webhook/council;
+  // the live poller state (last poll/fire, errors, recent fires) is read from
+  // the running TriggerManager. Mutating endpoints are loopback-only.
+  // ====================================================================
+  app.get("/api/triggers", (_req: Request, res: Response) => {
+    res.json(gateway.triggers.state());
+  });
+
+  // Replace the whole triggers config (definitions + master switch + interval).
+  // Validated with the same strict schema used at startup, persisted, then the
+  // poller is reloaded so the change takes effect without a restart.
+  app.put("/api/triggers", (req: Request, res: Response) => {
+    if (!isLocalRequest(req)) {
+      res.status(403).json({ error: "triggers can only be changed from the local machine" });
+      return;
+    }
+    let parsed;
+    try {
+      parsed = parseTriggersConfig(req.body?.triggers ?? req.body ?? {});
+    } catch (err) {
+      res.status(400).json({ error: `invalid triggers config: ${err instanceof Error ? err.message : String(err)}` });
+      return;
+    }
+    cfg.settings = cfg.settings ?? {};
+    cfg.settings.triggers = parsed;
+    try {
+      if (configPath) writeConfig(configPath, cfg);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+      return;
+    }
+    gateway.triggers.reload();
+    res.json({ ok: true, state: gateway.triggers.state() });
+  });
+
+  // Run one trigger's poll right now (the "Poll now" button). Loopback-only because
+  // a poll is a real governed tool call. Returns the PollResult (fired? new_count? error?).
+  app.post("/api/triggers/:id/poll", async (req: Request, res: Response) => {
+    if (!isLocalRequest(req)) {
+      res.status(403).json({ error: "triggers can only be polled from the local machine" });
+      return;
+    }
+    try {
+      const result = await gateway.triggers.pollOnce(String(req.params.id));
+      res.json(result);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ error: msg });
     }
   });
 

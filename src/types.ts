@@ -132,6 +132,54 @@ export interface SettingsConfig {
    * through a public HTTPS tunnel and refuse to connect without OAuth + DCR.
    */
   oauth_server?: OAuthServerConfig;
+  /**
+   * Poll-first triggers: periodically call a read-scoped tool and fire a local + (optional)
+   * webhook event when its result changes. NAT-friendly (outbound poll, no inbound port). Off
+   * by default. See `TriggersConfig`.
+   */
+  triggers?: TriggersConfig;
+}
+
+/**
+ * Poll-first triggers. Each enabled definition is polled on its own interval by calling a
+ * read-scoped tool through the SAME policy → approval → audit path as any agent call; when the
+ * result changes (a new list item, or a changed whole-response hash) a `switchboard.trigger`
+ * event is recorded locally and, if `settings.webhook` is enabled, delivered to the operator's
+ * webhook. Local-first by design: the poll is an outbound call, so no inbound port or public
+ * tunnel is ever required (unlike inbound webhooks from a provider).
+ */
+export interface TriggersConfig {
+  /** Master switch. When false (default) no polling loop runs. */
+  enabled?: boolean;
+  /** Default seconds between polls for definitions that omit their own `interval_seconds`. Default 60. */
+  poll_interval_seconds?: number;
+  /** The triggers to evaluate. */
+  definitions?: TriggerDefinition[];
+}
+
+/** One poll-first trigger. The polled tool SHOULD be read-scoped — the policy engine still governs it. */
+export interface TriggerDefinition {
+  /** Stable id; namespaces the persisted seen-state and the fired-event log. */
+  id: string;
+  /** Human label shown in the dashboard. */
+  name?: string;
+  /** Exposed tool name to poll (e.g. `github__list_issues`). Called at its inferred/configured scope. */
+  tool: string;
+  /** Arguments passed to the polled tool on every call. */
+  args?: Record<string, unknown>;
+  /** Per-trigger interval override in seconds. Falls back to `poll_interval_seconds`. */
+  interval_seconds?: number;
+  /**
+   * Dot-path to an array inside the tool's JSON result (e.g. `items` or `data.issues`). When set
+   * AND `item_key` resolves a unique field per element, change detection is ITEM-LEVEL: new keys
+   * fire. When omitted (or the path doesn't resolve to an array), detection falls back to a hash
+   * of the whole response — a fire on any change.
+   */
+  item_path?: string;
+  /** Field on each array element that uniquely identifies it (e.g. `id`, `number`, `url`). */
+  item_key?: string;
+  /** Whether this definition is polled. Default true (the master switch already gates the loop). */
+  enabled?: boolean;
 }
 
 /**

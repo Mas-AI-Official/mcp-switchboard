@@ -215,6 +215,57 @@ receiver would reject. The whole contract (off-by-default, per-decision `events`
 signature, metadata-only even under `capture_io`, drop-on-unresolvable-secret, non-blocking) is
 verified by a deterministic oracle: `npm run verify:webhook` — 25/25.
 
+### Poll-first triggers (turn any read tool into an event source)
+
+Hosted tool routers sell "triggers" as inbound webhooks you have to expose to the cloud. Switchboard
+does it the local-first way: it **polls** a read-scoped tool you already mounted on a schedule, diffs
+each result against the last poll, and fires an event the moment something new shows up — no inbound
+listener, no public URL, no third-party relay.
+
+```yaml
+# switchboard.config.yaml  (off by default)
+settings:
+  webhook:                                   # fires are delivered through your webhook…
+    enabled: true
+    url: "https://example.com/hooks/switchboard"
+    secret_ref: ${vault:webhook_secret}      # …and signed with this same secret
+  triggers:
+    enabled: true
+    poll_interval_seconds: 60                # default cadence (1..86400)
+    definitions:
+      - id: new-github-issues
+        name: New GitHub issues
+        tool: github__list_issues            # namespaced, READ-scoped upstream tool to poll
+        args: { state: open }                # passed to the tool on each poll (optional)
+        interval_seconds: 300                # per-trigger override (optional)
+        item_path: ""                        # dot path to the array in the result; blank = whole result
+        item_key: id                         # field uniquely identifying a row; new keys fire
+        enabled: true
+```
+
+The design keeps the same governance/honesty contract as everything else:
+
+- **The poll is a real governed call.** It runs through policy → approval → audit exactly like an
+  agent call, so a trigger whose `tool` isn't read-scoped is **denied by the read ceiling**, and every
+  poll lands in the Logs page. You cannot use triggers to smuggle a write past the policy engine.
+- **The fire is an observation, not a decision.** A detected new item is delivered as a distinct
+  `type: switchboard.trigger` webhook event — it is *never* written as an audit verdict, so the audit
+  log stays a faithful record of governed calls only. Fires carry
+  `{ type, ts, trigger_id, trigger_name?, tool, detection, new_count, sample_keys? }`, signed with the
+  **same** `x-switchboard-signature: sha256=<hmac>` header as decision webhooks, and they ignore the
+  webhook `events` filter (they always deliver when the webhook is on).
+- **New-item detection** uses `item_path` (dot path to the array, e.g. `items` or `data.records`) +
+  `item_key` (the unique field). Keys unseen since the last poll are "new"; baselines persist in
+  `~/.switchboard/triggers-state.json` so a restart doesn't replay history. Omit both to fire whenever
+  the raw result text changes.
+- **Off by default, fail-open delivery.** Nothing polls until `triggers.enabled: true`, and fires
+  inherit the webhook's non-blocking, drop-on-unresolvable-secret delivery. Drive a single poll on
+  demand from the **Triggers** dashboard page or `POST /api/triggers/:id/poll`.
+
+The whole contract — poll is audited, fire is not, fire bypasses the `events` filter, read ceiling
+denies a non-read trigger, baseline survives restart — is verified by a deterministic oracle:
+`npm run verify:triggers` — 36/36. (`npm run verify` runs the build + all three oracles.)
+
 ### Connecting claude.ai web (OAuth 2.1 + PKCE, Phase 5b)
 
 Claude Desktop, Claude Code, and ChatGPT dev-mode all reach a *local* `/mcp` endpoint with a plain
@@ -321,6 +372,11 @@ works end-to-end through the governed path.
   `approval_required`) to a URL as it happens, signed with an `x-switchboard-signature` HMAC. Payload
   is decision metadata only (never call I/O), fire-and-forget + fail-open, off by default. Verified by
   `npm run verify:webhook` — 25/25.
+- **Poll-first triggers** — `settings.triggers` polls a read-scoped tool on a schedule, diffs the
+  result by `item_key`, and fires a `switchboard.trigger` webhook on new items. The poll is a real
+  governed/audited call (read ceiling denies a non-read trigger); the fire is an observation, never an
+  audit verdict. Baselines persist across restarts; off by default. Verified by
+  `npm run verify:triggers` — 36/36.
 
 See **[docs/ROADMAP.md](docs/ROADMAP.md)** for the phase-by-phase detail.
 

@@ -10,7 +10,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { parse, stringify } from "yaml";
 import { z } from "zod";
-import type { SwitchboardConfig } from "./types.js";
+import type { SwitchboardConfig, TriggersConfig } from "./types.js";
 
 const scope = z.enum(["read", "write", "full"]);
 
@@ -112,6 +112,27 @@ const council = z
   })
   .strict();
 
+const triggerDefinition = z
+  .object({
+    id: z.string().min(1),
+    name: z.string().optional(),
+    tool: z.string().min(1),
+    args: z.record(z.string(), z.unknown()).optional(),
+    interval_seconds: z.number().int().positive().max(86400).optional(),
+    item_path: z.string().optional(),
+    item_key: z.string().optional(),
+    enabled: z.boolean().default(true),
+  })
+  .strict();
+
+const triggers = z
+  .object({
+    enabled: z.boolean().default(false),
+    poll_interval_seconds: z.number().int().positive().max(86400).default(60),
+    definitions: z.array(triggerDefinition).default([]),
+  })
+  .strict();
+
 const settings = z
   .object({
     general: z
@@ -162,6 +183,7 @@ const settings = z
         message: "settings.oauth_server.public_url is required when oauth_server.enabled is true",
       })
       .optional(),
+    triggers: triggers.optional(),
   })
   .strict()
   .optional();
@@ -194,6 +216,22 @@ export function loadConfig(path: string): SwitchboardConfig {
 /** Serialize a config back to YAML on disk. */
 export function writeConfig(path: string, cfg: SwitchboardConfig): void {
   writeFileSync(path, stringify(cfg));
+}
+
+/**
+ * Validate a raw triggers settings object (as sent by the dashboard's `/api/triggers` PUT)
+ * against the same strict schema used at startup, applying defaults. Throws a readable error
+ * on any violation so the HTTP layer can answer 400 instead of persisting a bad config.
+ */
+export function parseTriggersConfig(raw: unknown): TriggersConfig {
+  const result = triggers.safeParse(raw ?? {});
+  if (!result.success) {
+    const issues = result.error.issues
+      .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
+      .join("; ");
+    throw new Error(issues);
+  }
+  return result.data as TriggersConfig;
 }
 
 /** The config written by `switchboard init`. Intentionally minimal but runnable. */
