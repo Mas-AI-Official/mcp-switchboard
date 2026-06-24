@@ -65,13 +65,18 @@ servers:
     approval:
       require_for: [write, full]        # human approval gate on mutating calls
 
-  # --- app2mcp: generate an MCP server from your own OpenAPI spec (roadmap, Phase 4) ---
-  # Left disabled because the generator is not implemented yet; mounting it will fail closed.
+  # --- app2mcp: generate an MCP server in-process from your own OpenAPI/Swagger spec (Phase 4, shipped) ---
+  # `openapi` takes a local file path OR an http(s) URL. Each operation becomes a governed tool;
+  # scope is inferred from the HTTP verb (GET->read, POST/PUT/PATCH->write, DELETE->full).
+  # Disabled here only because `./specs/internal.yaml` doesn't exist in this repo — point it at a
+  # real spec and flip `enabled: true`. A reference without a resolvable spec still fails closed.
   - id: internal-api
     source: app2mcp
-    openapi: ./specs/internal.yaml
-    base_url: https://api.internal.example.com
+    openapi: ./specs/internal.yaml          # or e.g. https://petstore3.swagger.io/api/v3/openapi.json
+    base_url: https://api.internal.example.com  # override for relative / host-less specs
     enabled: false
-    policy: read
+    policy: read                            # ceiling: GET tools allowed, generated DELETE denied
+    credentials:
+      Authorization: ${vault:internal_api_token}  # resolved per call from the vault
     approval:
       require_for: [write, full]

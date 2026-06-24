@@ -49,6 +49,21 @@ combination is **local credentials + a governance layer + a usable dashboard**, 
 
 ## Quickstart
 
+### Fastest start — one click
+
+> One-time prerequisite: install **[Node 18.18+](https://nodejs.org)**.
+
+1. Get the code — `git clone https://github.com/Masoud-Masoori/switchboard.git`, or **Code ▸ Download ZIP** on GitHub and unzip it.
+2. **Windows:** double-click **`start-switchboard.bat`**.
+   **macOS / Linux:** run **`./start-switchboard.sh`** (`chmod +x start-switchboard.sh` once).
+3. That's it. The first run installs dependencies, builds, and writes a starter config for you; then the gateway starts and **the dashboard opens in your browser** automatically.
+
+To stop it: press **Ctrl+C** in the launcher window — or, if you closed the window and the port is still busy, double-click **`stop-switchboard.bat`** (`./stop-switchboard.sh` isn't needed on Unix; Ctrl+C is enough).
+
+The launcher runs Switchboard in **HTTP + dashboard** mode on `http://127.0.0.1:8088`. To wire a stdio client (`claude mcp add`, Cursor) or change the transport, edit `switchboard.config.yaml` or use the from-source commands below.
+
+### From source (manual)
+
 > Requires Node ≥ 18.18. Not yet on npm — run it from source.
 
 ```bash
