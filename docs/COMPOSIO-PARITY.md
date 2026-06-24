@@ -2,6 +2,29 @@
 
 > Design + build plan. Decision-grade synthesis of six grounded research reports + a read of the current Switchboard source. KNOWN vs INFERRED is called out throughout; low-confidence/post-cutoff items carry caveats verbatim.
 
+## 0. Build Status — ALL PHASES SHIPPED & VERIFIED
+
+The DO-set below is **fully built**, and several items the original plan marked "defer" (Triggers, Webhooks) were also delivered. Each feature is pinned by a zero-dep deterministic oracle; `npm run verify` runs the build + all ten and is **green (301 checks)**.
+
+| Phase / feature | Status | Oracle | Source |
+|---|---|---|---|
+| **0 — `/mcp` endpoint auth** (named API keys, fail-closed) | ✅ | `verify:auth` 13/13 | `apikeys.ts`, `dashboard.ts` |
+| **1 — Dashboard SPA + catalog grid + settings** | ✅ | `verify:dashboard` 43/43 | `dashboard.ts`, `catalog.ts` |
+| **2 — Catalog (multi-category, mounted-first ordering)** | ✅ | `verify:catalog` 20/20 | `catalog.ts` |
+| **3 — Playground + opt-in tool I/O capture / Logs** | ✅ | (dashboard) | `router.ts`, `audit.ts` |
+| **4 — `switchboard expose` (safe public tunnel)** | ✅ | — | `expose.ts`, `cli.ts` |
+| **5a — Council relay tools** (`council_consult`/`council_debate`) | ✅ | `verify:council` 34/34 | `council.ts` |
+| **5b — claude.ai-web / ChatGPT OAuth 2.1 + PKCE AS** | ✅ | `verify:oauth` 20/20 | `authserver.ts`, `dashboard.ts` |
+| **Triggers** (poll-first, pause/resume, templates) — *was "defer"* | ✅ | `verify:triggers` 60/60 | `triggers.ts`, `trigger-templates.ts` |
+| **Webhooks** (signed, Standard Webhooks) — *was "defer"* | ✅ | `verify:webhook` 33/33 | `webhook.ts` |
+| **Response modifiers** (drop_params/inject_args/redact_response) | ✅ | `verify:modifiers` 28/28 | `transforms.ts` |
+| **Auth schemes** (bearer/api_key/basic per server) | ✅ | (httptool/config) | `authscheme.ts` |
+| **HTTP-tool servers** (declare REST calls inline as MCP tools) | ✅ | `verify:httptool` 29/29 | `httptool.ts` |
+| **Offline local-LLM council provider** (Ollama/LM Studio/llama.cpp/vLLM) | ✅ | `verify:config` 21/21 | `council.ts`, `config.ts` |
+| **Shipped example config exercises every parity feature** | ✅ | `verify:config` 21/21 | `switchboard.config.example.yaml` |
+
+**Deliberately NOT built (out of scope, documented forks):** multi-user/per-end-user isolation (`?user_id=` carried, full isolation = L fork, §7.7); Composio-style per-end-user managed OAuth apps (we use the operator's own app, zero-custody, §3 Auth Screen); the catalog *ingest* pipeline at full registry scale (Adapters A+B designed in §4; the catalog UI + schema ship, bulk CC0 ingest is a maintainer-run sync, not a launch blocker). **Not published to npm** (v0.1.0 — publishing is an explicit, separate go-ahead). The sections below are the original plan, kept verbatim for provenance; where they say "defer/optional," see this table for what actually shipped.
+
 ## 1. Executive Summary
 
 **What Composio is.** A managed "tools-for-agents" platform: ~1000+ pre-built toolkits (Gmail/GitHub/Notion/Slack/Supabase/Linear/…), managed per-end-user OAuth/API-key auth, and a flagship **Tool Router** that mints a per-user pre-signed MCP URL so an agent uses a few meta-tools (search / execute / manage-connections) to discover and run tools just-in-time instead of loading thousands of schemas into context. Entity model: **Organization > Project (`proj_`) > Auth Config (`ac_`) > Connected Account (`ca_`) > Tools/Triggers**. Dashboard left-nav: Toolkits / Auth Configs / Connected Accounts / Triggers / MCP / Logs / Playground, plus Project + Org settings. Metered purely on **TOOL CALLS** (Free 20K → $29/200K → $229/2M → Enterprise). SDKs are open (MIT); the catalog pipeline, toolkit definitions, and managed OAuth apps are proprietary.
