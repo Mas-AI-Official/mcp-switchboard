@@ -82,6 +82,16 @@ settings:
     token_budget: 2048       # max_tokens cap applied to every provider call (cost guard)
     require_approval: false  # true -> every council call needs a human confirm
     providers:               # council_debate needs at least two configured
+      # The zero-cloud, zero-key option: point this at ANY OpenAI-compatible server you run
+      # yourself and the council/playground stay entirely on your machine — nothing leaves it.
+      #   Ollama     -> http://127.0.0.1:11434/v1   (`ollama pull llama3.1`)
+      #   LM Studio  -> http://127.0.0.1:1234/v1
+      #   llama.cpp  -> http://127.0.0.1:8080/v1    (`llama-server`)
+      #   vLLM       -> http://127.0.0.1:8000/v1
+      local:
+        base_url: http://127.0.0.1:11434/v1
+        default_model: llama3.1            # whatever model you've pulled locally
+        # api_key_ref: ${vault:local_llm_key}   # OPTIONAL — only if your local server enforces a token
       anthropic:
         api_key_ref: ${vault:anthropic_api_key}
         default_model: claude-opus-4-8   # per-call `model` arg overrides this; nothing hardcoded
@@ -110,7 +120,9 @@ settings:
   # `switchboard expose`, then paste its URL here. The canonical token audience is `<public_url>/mcp`.
   oauth_server:
     enabled: false
-    public_url: ""                  # e.g. https://abc123.trycloudflare.com  (REQUIRED when enabled)
+    # public_url MUST be a valid https origin and is REQUIRED only when enabled: true. Leave it
+    # commented while disabled — start a tunnel (`switchboard expose`) and paste its URL here first:
+    # public_url: https://abc123.trycloudflare.com
     access_token_ttl: 3600          # access-token lifetime in seconds (default 1h)
     refresh_token_ttl: 1209600      # refresh-token lifetime in seconds (default 14d; 0 disables refresh)
     consent: true                   # show the human approval screen on every authorization (governance-first)
@@ -146,6 +158,11 @@ settings:
         item_key: id                      # field uniquely identifying a row; new keys fire the trigger
         enabled: true
 
+  # Hard wall-clock timeout (ms) on EVERY upstream tool call. A hung or slow upstream is cut off
+  # and surfaced to the agent as `SB_UPSTREAM_TIMEOUT` instead of blocking it forever. Omit for no
+  # Switchboard-imposed timeout (the transport's own default still applies).
+  call_timeout_ms: 30000
+
 servers:
   # --- mount an existing MCP server from npm ---
   - id: github
@@ -155,10 +172,29 @@ servers:
     policy: write                       # this app may read + write, but not "full"
     credentials:
       GITHUB_TOKEN: ${vault:github_pat}  # resolved from the local vault at mount time
+
+    # --- schema shaping (optional): trim what the agent sees BEFORE the tool list reaches it ---
+    # schema_mode: required_only        # full (default) | required_only — drop optional params to shrink schemas
+    # schema_modifiers:                 # server-wide; per-tool schema_modifiers below override per field
+    #   hide_params: [per_page]         # remove these from the exposed input schema (and from `required`)
+    #   rename_params: { owner: org }   # agent sees `org`; gateway maps it back to `owner` upstream
+    #   trim_description: 280           # cap every tool description at N chars
+    # inject_args:                      # force values the agent can't override (upstream-named keys)
+    #   visibility: private             # e.g. pin new repos private; literal or ${vault:..}/${env:..}
+    # redact_response:                  # strip top-level fields from EVERY tool response on this server
+    #   fields: [node_id, url]
+    #   replace_with: "[redacted]"      # omit to delete the key entirely
+
     tools:                              # per-tool overrides (optional)
       delete_repo:  { enabled: false }  # hard-block the destructive one
-      create_issue: { policy: write }
-      get_repo:     { policy: read }
+      create_issue:
+        policy: write
+        description_override: "Open a GitHub issue. Title + body only."
+        drop_params: [milestone, assignees]   # hide noisy params from the agent
+        inject_args: { labels: triage }        # every issue this tool opens is auto-labelled
+      get_repo:
+        policy: read
+        redact_response: { fields: [private, permissions] }   # never surface these to the agent
 
   # --- a read-only server ---
   - id: notion
@@ -174,7 +210,13 @@ servers:
     source: remote
     url: https://example-slack-mcp.invalid/mcp
     enabled: false
-    auth: oauth
+    # `auth_scheme` is the declarative, per-call alternative to `auth:` — resolved fresh on every
+    # call and mapped to the right HTTP header. All `*_ref` fields take ${vault:..}/${env:..} only:
+    #   { kind: bearer,  ref: ${vault:slack_token} }                       -> Authorization: Bearer …
+    #   { kind: api_key, ref: ${vault:slack_key}, header: x-api-key }      -> custom header (or `query: api_key`)
+    #   { kind: basic,   username_ref: ${vault:u}, password_ref: ${vault:p} }
+    #   { kind: header,  name: x-tenant, ref: ${env:TENANT} }
+    auth_scheme: { kind: bearer, ref: "${vault:slack_token}" }
 
   # --- the bundled test server: real, no credentials, great for a first run ---
   - id: everything
@@ -200,3 +242,34 @@ servers:
       Authorization: ${vault:internal_api_token}  # resolved per call from the vault
     approval:
       require_for: [write, full]
+
+  # --- http-tool: hand-declare a few HTTP endpoints as governed MCP tools, no OpenAPI spec needed ---
+  # Each entry becomes one tool namespaced under the server id (e.g. `weather__get_forecast`). The
+  # scope ceiling is derived from the verb (GET/HEAD->read, DELETE->full, else write) and only
+  # TIGHTENED by an optional per-tool `scope`. `{name}` path segments are filled from same-named args.
+  - id: weather
+    source: http-tool
+    base_url: https://api.weather.example.com
+    enabled: false
+    policy: read
+    auth_scheme: { kind: api_key, ref: "${vault:weather_key}", header: x-api-key }
+    http_tools:
+      - name: get_forecast
+        description: Forecast for a city.
+        method: GET
+        path: /v1/forecast/{city}             # `city` arg fills the segment
+        inputSchema:
+          type: object
+          properties:
+            city: { type: string }
+          required: [city]
+      - name: get_current
+        description: Current conditions by coordinates.
+        method: GET
+        url: https://api.weather.example.com/v1/now   # absolute URL instead of base_url + path
+        inputSchema:
+          type: object
+          properties:
+            lat: { type: number }
+            lon: { type: number }
+          required: [lat, lon]
