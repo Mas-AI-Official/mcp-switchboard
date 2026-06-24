@@ -24,7 +24,7 @@ import type { Registry, MountedServer } from "./registry.js";
 import type { SwitchboardConfig } from "./types.js";
 import { evaluate } from "./policy.js";
 import { approve } from "./approval.js";
-import { audit } from "./audit.js";
+import { audit, sanitizeForAudit } from "./audit.js";
 import { log } from "./logger.js";
 
 const SEP = "__";
@@ -219,26 +219,60 @@ export class Router {
       return this.error(`denied by policy: ${verdict.reason}`);
     }
 
+    // Settle the approval gate before executing. A denied approval is the only path that
+    // audits without an execution; everything allowed audits ONCE after the call so the row
+    // can carry timing and (opt-in) request/response.
+    let reason = verdict.reason;
     if (verdict.decision === "approval_required") {
       const allowed = await approve(server.id, toolName, verdict.scope, verdict.reason);
+      if (!allowed) {
+        audit({ server: server.id, tool: toolName, scope: verdict.scope, decision: "deny", reason: "approval denied/unavailable" });
+        return this.error(`approval required and not granted for '${exposedName}'`);
+      }
+      reason = "approved";
+    }
+
+    const capture = this.cfg.settings?.logs?.capture_io === true;
+    const start = Date.now();
+    try {
+      const result = (await server.client.callTool({ name: toolName, arguments: args })) as CallToolResult;
       audit({
         server: server.id,
         tool: toolName,
         scope: verdict.scope,
-        decision: allowed ? "allow" : "deny",
-        reason: allowed ? "approved" : "approval denied/unavailable",
+        decision: "allow",
+        reason,
+        duration_ms: Date.now() - start,
+        ...(capture ? { request: sanitizeForAudit(args), response: sanitizeForAudit(result) } : {}),
+        ...(result.isError ? { error: this.resultErrorText(result) } : {}),
       });
-      if (!allowed) return this.error(`approval required and not granted for '${exposedName}'`);
-    } else {
-      audit({ server: server.id, tool: toolName, scope: verdict.scope, decision: "allow", reason: verdict.reason });
-    }
-
-    try {
-      return (await server.client.callTool({ name: toolName, arguments: args })) as CallToolResult;
+      return result;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      audit({
+        server: server.id,
+        tool: toolName,
+        scope: verdict.scope,
+        decision: "allow",
+        reason,
+        duration_ms: Date.now() - start,
+        ...(capture ? { request: sanitizeForAudit(args) } : {}),
+        error: msg,
+      });
       return this.error(`upstream '${server.id}' failed calling '${toolName}': ${msg}`);
     }
+  }
+
+  /** Best-effort extraction of an upstream error-result's text content for the audit row. */
+  private resultErrorText(result: CallToolResult): string {
+    const parts: string[] = [];
+    for (const c of result.content ?? []) {
+      if (c && typeof c === "object" && (c as { type?: string }).type === "text") {
+        const t = (c as { text?: unknown }).text;
+        if (typeof t === "string") parts.push(t);
+      }
+    }
+    return parts.join(" ").trim() || "upstream returned an error result";
   }
 
   private error(message: string): CallToolResult {

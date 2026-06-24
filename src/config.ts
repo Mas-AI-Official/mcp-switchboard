@@ -107,6 +107,14 @@ const settings = z
       })
       .strict()
       .optional(),
+    logs: z
+      .object({
+        // When true, allowed executions also record (redacted, size-capped) request args and
+        // upstream responses in the audit log. Off by default — duration is always recorded.
+        capture_io: z.boolean().optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict()
   .optional();

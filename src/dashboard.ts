@@ -141,6 +141,42 @@ export async function startDashboard(
   });
 
   // ====================================================================
+  // Playground: try any exposed tool against the live gateway. Listing reuses the
+  // router's governed tool surface (so `search` mode shows the two meta-tools, namespaced
+  // mode shows `server__tool`, etc.); execution routes through `router.callTool`, so policy
+  // + approval + audit all apply exactly as they would for a downstream agent. Running a
+  // tool is loopback-only — a tunnelled dashboard must never be able to drive real calls.
+  // ====================================================================
+  app.get("/api/playground/tools", (_req: Request, res: Response) => {
+    res.json({ tools: gateway.router.listTools(), tool_exposure: cfg.gateway.tool_exposure });
+  });
+
+  app.post("/api/playground/call", async (req: Request, res: Response) => {
+    if (!isLocalRequest(req)) {
+      res.status(403).json({ error: "the playground can only run tools from the local machine" });
+      return;
+    }
+    const name = typeof req.body?.name === "string" ? req.body.name : "";
+    if (!name) {
+      res.status(400).json({ error: "missing tool 'name'" });
+      return;
+    }
+    const args =
+      req.body?.arguments && typeof req.body.arguments === "object"
+        ? (req.body.arguments as Record<string, unknown>)
+        : {};
+    const start = Date.now();
+    try {
+      // The call self-audits (timing + opt-in I/O) and enforces policy/approval inside the router.
+      const result = await gateway.router.callTool(name, args);
+      res.json({ result, duration_ms: Date.now() - start });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  // ====================================================================
   // Toolkit catalog (the Composio-style "1000+ toolkits" grid)
   // ====================================================================
 

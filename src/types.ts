@@ -118,6 +118,11 @@ export interface SettingsConfig {
     /** `${vault:..}` reference to an HMAC-SHA256 signing secret (sent as `X-Switchboard-Signature`). */
     secret_ref?: string;
   };
+  /** `/settings/usage` (Logs) — audit-capture controls. */
+  logs?: {
+    /** Capture (redacted, size-capped) request args + responses for allowed calls. Off by default. */
+    capture_io?: boolean;
+  };
 }
 
 export interface SwitchboardConfig {

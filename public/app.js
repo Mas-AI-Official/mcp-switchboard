@@ -1025,12 +1025,177 @@ function showTokenModal(token, key) {
 }
 
 // ============================================================================
+// VIEW: Playground — run any exposed tool against the live gateway
+// ============================================================================
+let playgroundTools = [];
+
+/** Build a JSON arg stub from a tool's input schema so the form starts pre-filled. */
+function argSkeleton(schema) {
+  const props = (schema && schema.properties) || {};
+  const out = {};
+  for (const [key, def] of Object.entries(props)) {
+    const t = def && def.type;
+    out[key] =
+      t === "number" || t === "integer" ? 0
+      : t === "boolean" ? false
+      : t === "array" ? []
+      : t === "object" ? {}
+      : "";
+  }
+  return out;
+}
+
+function playgroundResultHtml(name, res) {
+  const result = (res && res.result) || {};
+  const isError = result.isError === true;
+  const text = (result.content || [])
+    .filter((c) => c && c.type === "text" && typeof c.text === "string")
+    .map((c) => c.text)
+    .join("\n");
+  const dur = typeof res.duration_ms === "number" ? `${res.duration_ms} ms` : "";
+  return `
+    <div class="panel" style="border-left:3px solid ${isError ? "var(--danger)" : "var(--ok)"}">
+      <div class="row" style="justify-content:space-between;align-items:flex-start">
+        <div class="panel-title" style="margin:0">${isError ? "Tool returned an error" : "Result"} · <code>${esc(name)}</code></div>
+        <span class="dim nowrap">${esc(dur)}</span>
+      </div>
+      ${text ? `<div class="token-box" style="white-space:pre-wrap;max-height:42vh;overflow:auto;color:var(--fg)">${esc(text)}</div>` : ""}
+      <details style="margin-top:6px">
+        <summary class="dim" style="cursor:pointer">Raw result JSON</summary>
+        <div class="token-box" style="white-space:pre-wrap;max-height:42vh;overflow:auto;color:var(--fg)">${esc(JSON.stringify(result, null, 2))}</div>
+      </details>
+    </div>`;
+}
+
+async function renderPlayground() {
+  loadingView("Loading exposed tools…");
+  let data;
+  try {
+    data = await api("/api/playground/tools");
+  } catch (e) {
+    view().innerHTML = pageHead("Playground") + errorBanner(e);
+    return;
+  }
+  playgroundTools = data.tools || [];
+  const exposure = data.tool_exposure || "namespaced";
+
+  const head = pageHead(
+    "Playground",
+    "Run any exposed tool against the live gateway. Calls take the exact governed path an agent uses — policy, approval gates, and the audit log all apply. Tools run only from this machine."
+  );
+
+  if (playgroundTools.length === 0) {
+    view().innerHTML =
+      head +
+      `<div class="empty">
+        <div class="empty-ico">▷</div>
+        <div class="empty-title">No tools are exposed</div>
+        <div>Enable a server under <a href="#/servers">Servers</a> to expose its tools here.</div>
+      </div>`;
+    return;
+  }
+
+  view().innerHTML =
+    head +
+    `<div class="panel">
+      <div class="row" style="justify-content:space-between;align-items:baseline;margin-bottom:6px">
+        <div class="panel-title" style="margin:0">Exposed tools</div>
+        <span class="dim">exposure: <code>${esc(exposure)}</code> · ${playgroundTools.length} tool${playgroundTools.length === 1 ? "" : "s"}</span>
+      </div>
+      <div class="field">
+        <label for="pg-tool">Tool</label>
+        <select id="pg-tool" class="select">
+          ${playgroundTools.map((t, i) => `<option value="${i}">${esc(t.name)}</option>`).join("")}
+        </select>
+      </div>
+      <div id="pg-desc" class="hint" style="margin:-8px 0 16px"></div>
+      <div class="field" style="max-width:none">
+        <label for="pg-args">Arguments (JSON)</label>
+        <textarea id="pg-args" class="input mono" rows="9" spellcheck="false"></textarea>
+        <div class="hint">Match the tool's input schema. <a href="#" id="pg-schema-link">View input schema</a> · <a href="#" id="pg-reset-link">reset to defaults</a>.</div>
+      </div>
+      <div class="row">
+        <button class="btn btn-primary" id="pg-run">Run tool</button>
+      </div>
+    </div>
+    <div id="pg-result"></div>`;
+
+  const sel = $("#pg-tool");
+  const argsBox = $("#pg-args");
+
+  const loadTool = (i) => {
+    const t = playgroundTools[i];
+    if (!t) return;
+    const required = (t.inputSchema && t.inputSchema.required) || [];
+    $("#pg-desc").innerHTML =
+      esc(t.description || "No description provided.") +
+      (required.length
+        ? ` <span class="dim">· required: ${required.map((r) => `<code>${esc(r)}</code>`).join(", ")}</span>`
+        : "");
+    argsBox.value = JSON.stringify(argSkeleton(t.inputSchema), null, 2);
+  };
+
+  sel.addEventListener("change", () => loadTool(Number(sel.value)));
+  $("#pg-reset-link").addEventListener("click", (e) => {
+    e.preventDefault();
+    loadTool(Number(sel.value));
+  });
+  $("#pg-schema-link").addEventListener("click", (e) => {
+    e.preventDefault();
+    const t = playgroundTools[Number(sel.value)];
+    if (!t) return;
+    openModal({
+      title: `Input schema · ${t.name}`,
+      body: `<div class="token-box" style="white-space:pre-wrap;max-height:52vh;overflow:auto;color:var(--fg)">${esc(JSON.stringify(t.inputSchema || {}, null, 2))}</div>`,
+      footer: `<button class="btn btn-primary" data-close="1">Close</button>`,
+    });
+  });
+
+  $("#pg-run").addEventListener("click", async () => {
+    const t = playgroundTools[Number(sel.value)];
+    if (!t) return;
+    let parsed;
+    try {
+      const raw = argsBox.value.trim();
+      parsed = raw ? JSON.parse(raw) : {};
+    } catch {
+      toast("Arguments are not valid JSON.", "error");
+      return;
+    }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      toast("Arguments must be a JSON object.", "error");
+      return;
+    }
+    const btn = $("#pg-run");
+    btn.disabled = true;
+    btn.innerHTML = `<span class="spinner"></span> Running…`;
+    const out = $("#pg-result");
+    out.innerHTML = `<div class="loading"><span class="spinner"></span> Calling <code>${esc(t.name)}</code>…</div>`;
+    try {
+      const res = await api("/api/playground/call", {
+        method: "POST",
+        body: JSON.stringify({ name: t.name, arguments: parsed }),
+      });
+      out.innerHTML = playgroundResultHtml(t.name, res);
+    } catch (e) {
+      out.innerHTML = `<div class="panel" style="border-left:3px solid var(--danger)">${errorBanner(e)}</div>`;
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = "Run tool";
+    }
+  });
+
+  loadTool(0);
+}
+
+// ============================================================================
 // Router
 // ============================================================================
 const routes = {
   "/catalog": renderCatalog,
   "/accounts": renderAccounts,
   "/servers": renderServers,
+  "/playground": renderPlayground,
   "/logs": renderLogs,
   "/usage": renderUsage,
   "/settings/general": renderSettingsGeneral,

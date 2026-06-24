@@ -16,12 +16,54 @@ export interface AuditEntry {
   scope: string;
   decision: "allow" | "deny" | "approval_required";
   reason?: string;
+  /** Wall-clock duration of the upstream call, milliseconds. Allowed executions only. */
+  duration_ms?: number;
+  /** Captured call arguments (opt-in via settings.logs.capture_io, redacted + size-capped). */
+  request?: unknown;
+  /** Captured upstream result (opt-in via settings.logs.capture_io, redacted + size-capped). */
+  response?: unknown;
+  /** Upstream error message when an allowed call threw. */
+  error?: string;
 }
 
 export function audit(entry: Omit<AuditEntry, "ts">): void {
   if (!existsSync(HOME_DIR)) mkdirSync(HOME_DIR, { recursive: true });
   const row: AuditEntry = { ts: new Date().toISOString(), ...entry };
   appendFileSync(AUDIT_PATH, JSON.stringify(row) + "\n");
+}
+
+/** Key names whose values are masked before anything is written to disk. */
+const SECRET_KEY = /token|secret|password|api[_-]?key|authorization/i;
+/** Hard ceiling on a captured value's serialized size, so a big payload can't bloat the log. */
+const CAPTURE_CAP_BYTES = 4096;
+
+/**
+ * Prepare a value for opt-in I/O capture: deep-clone with secret-looking keys masked, then
+ * cap the serialized size. Returns a truncation marker rather than a giant blob when over cap.
+ * Capture is OFF by default; this only runs when the operator sets settings.logs.capture_io.
+ */
+export function sanitizeForAudit(value: unknown): unknown {
+  const redacted = redact(value, 0);
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(redacted);
+  } catch {
+    return "[uncapturable]";
+  }
+  if (serialized !== undefined && serialized.length > CAPTURE_CAP_BYTES) {
+    return { _truncated: serialized.length, preview: serialized.slice(0, CAPTURE_CAP_BYTES) };
+  }
+  return redacted;
+}
+
+function redact(value: unknown, depth: number): unknown {
+  if (depth > 6 || value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map((v) => redact(v, depth + 1));
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    out[k] = SECRET_KEY.test(k) ? "[redacted]" : redact(v, depth + 1);
+  }
+  return out;
 }
 
 /** Most recent entries first. */

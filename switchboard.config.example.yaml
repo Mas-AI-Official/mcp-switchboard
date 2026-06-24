@@ -57,6 +57,14 @@ settings:
     events: [deny, approval_required]   # any of: allow | deny | approval_required
     secret_ref: ""                # vault key name, e.g. webhook_secret (set via `switchboard vault set`)
 
+  # Audit-capture controls (the Logs page). Duration is always recorded; this only
+  # governs whether the request args + upstream response are stored too.
+  logs:
+    # When true, allowed executions also record (redacted, size-capped to 4 KB) request
+    # arguments and upstream responses. Secret-looking keys are masked before write.
+    # Off by default — turn it on only when you need to inspect tool I/O.
+    capture_io: false
+
 servers:
   # --- mount an existing MCP server from npm ---
   - id: github
