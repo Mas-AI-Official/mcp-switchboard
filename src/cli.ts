@@ -25,6 +25,7 @@ import { Command } from "commander";
 import { loadConfig, writeConfig, starterConfig } from "./config.js";
 import { createGateway } from "./gateway.js";
 import { startDashboard } from "./dashboard.js";
+import { runExpose, TUNNEL_KINDS, type TunnelKind } from "./expose.js";
 import { Vault, HOME_DIR } from "./vault.js";
 import { OAuthStore } from "./oauth.js";
 import { ApiKeyStore } from "./apikeys.js";
@@ -98,6 +99,39 @@ program
     const gateway = await createGateway(cfg);
     const handle = await startDashboard(gateway, cfg, path);
     out(`Open ${handle.url}`);
+  });
+
+program
+  .command("expose")
+  .description("expose /mcp to the public internet through a tunnel (for ChatGPT / remote MCP clients)")
+  .option("-t, --tunnel <kind>", `tunnel provider: ${TUNNEL_KINDS.join(" | ")}`, "cloudflared")
+  .option("-p, --port <n>", "local port for the exposed /mcp listener (default: dashboard port + 1)")
+  .option("--new-token", "mint a fresh API key for this session even if keys already exist", false)
+  .action(async (opts: { tunnel: string; port?: string; newToken?: boolean }) => {
+    if (!TUNNEL_KINDS.includes(opts.tunnel as TunnelKind)) {
+      log.error(`unknown tunnel '${opts.tunnel}' — choose one of: ${TUNNEL_KINDS.join(", ")}`);
+      process.exitCode = 1;
+      return;
+    }
+    const tunnel = opts.tunnel as TunnelKind;
+    const cfg = loadConfig(configPath());
+    const port = opts.port ? Number(opts.port) : cfg.gateway.http.port + 1;
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      log.error(`invalid --port '${opts.port}' — expected an integer 1–65535`);
+      process.exitCode = 1;
+      return;
+    }
+
+    // Refuse to expose without auth: ensure at least one key exists. Mint+print one if the
+    // store is empty (or the operator asked for a fresh one); otherwise reuse what's there.
+    const apiKeys = new ApiKeyStore();
+    let issuedToken: string | null = null;
+    if (opts.newToken || apiKeys.count === 0) {
+      issuedToken = apiKeys.issue("expose").token;
+    }
+
+    const gateway = await createGateway(cfg);
+    await runExpose(gateway, cfg, apiKeys, { tunnel, port, issuedToken });
   });
 
 program

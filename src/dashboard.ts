@@ -59,6 +59,56 @@ function isLocalRequest(req: Request): boolean {
   return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1" || ip.startsWith("127.");
 }
 
+export interface McpEndpointOptions {
+  /**
+   * Re-evaluated per request so a live settings change to `require_auth` takes effect
+   * without a restart. Return true to demand a valid bearer key.
+   */
+  requireAuth: () => boolean;
+  /** The key store the bearer token is verified against. */
+  apiKeys: ApiKeyStore;
+  /**
+   * Respond with plain JSON instead of an SSE stream. Needed behind tunnels that do not
+   * support Server-Sent Events (e.g. cloudflared quick tunnels). Safe for the stateless
+   * server pattern, where each `/mcp` POST is a single request/response.
+   */
+  enableJsonResponse?: boolean;
+}
+
+/**
+ * Register the MCP Streamable HTTP endpoint (`/mcp`) on an express app. This is the single
+ * source of truth for the endpoint's auth gate, so the dashboard and `switchboard expose`
+ * enforce bearer auth identically. Stateless: a fresh Server + transport per request.
+ */
+export function mountMcpEndpoint(app: express.Express, gateway: Gateway, opts: McpEndpointOptions): void {
+  app.all("/mcp", async (req: Request, res: Response) => {
+    // Gate before doing any work. Fail closed: a missing/invalid key is a 401, and we
+    // never echo or log the presented token.
+    if (opts.requireAuth()) {
+      const token = presentedToken(req);
+      if (!token || !opts.apiKeys.verify(token)) {
+        res.set("WWW-Authenticate", 'Bearer realm="switchboard"');
+        res.status(401).json({ error: "unauthorized: missing or invalid API key" });
+        return;
+      }
+    }
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+      ...(opts.enableJsonResponse ? { enableJsonResponse: true } : {}),
+    });
+    res.on("close", () => void transport.close());
+    try {
+      const server = gateway.buildServer();
+      await server.connect(transport);
+      await transport.handleRequest(req, res, req.body);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error(`/mcp request failed: ${msg}`);
+      if (!res.headersSent) res.status(500).json({ error: msg });
+    }
+  });
+}
+
 /**
  * Start the HTTP server. `configPath` is where settings/toggles are persisted so
  * they survive a restart; pass undefined to keep changes in-memory only.
@@ -81,29 +131,8 @@ export async function startDashboard(
   let catalog: CatalogSnapshot = loadCatalog();
 
   // --- MCP Streamable HTTP endpoint (stateless) ---
-  app.all("/mcp", async (req: Request, res: Response) => {
-    // Gate before doing any work. Fail closed: a missing/invalid key is a 401, and we
-    // never echo or log the presented token.
-    if (requireAuth) {
-      const token = presentedToken(req);
-      if (!token || !apiKeys.verify(token)) {
-        res.set("WWW-Authenticate", 'Bearer realm="switchboard"');
-        res.status(401).json({ error: "unauthorized: missing or invalid API key" });
-        return;
-      }
-    }
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-    res.on("close", () => void transport.close());
-    try {
-      const server = gateway.buildServer();
-      await server.connect(transport);
-      await transport.handleRequest(req, res, req.body);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      log.error(`/mcp request failed: ${msg}`);
-      if (!res.headersSent) res.status(500).json({ error: msg });
-    }
-  });
+  // `() => requireAuth` is re-read per request so a live settings change takes effect.
+  mountMcpEndpoint(app, gateway, { requireAuth: () => requireAuth, apiKeys });
 
   // ====================================================================
   // JSON API for the dashboard
