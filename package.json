@@ -77,7 +77,8 @@
     "verify:health": "node scripts/verify-health.mjs",
     "verify:retry": "node scripts/verify-retry.mjs",
     "verify:doctor": "node scripts/verify-doctor.mjs",
-    "verify": "npm run build && npm run verify:oauth && npm run verify:webhook && npm run verify:triggers && npm run verify:modifiers && npm run verify:httptool && npm run verify:auth && npm run verify:council && npm run verify:catalog && npm run verify:search && npm run verify:install && npm run verify:local-llm && npm run verify:dashboard && npm run verify:profiles && npm run verify:limits && npm run verify:breaker && npm run verify:config && npm run verify:audit && npm run verify:resources-prompts && npm run verify:health && npm run verify:retry && npm run verify:doctor",
+    "verify:vault": "node scripts/verify-vault.mjs",
+    "verify": "npm run build && npm run verify:oauth && npm run verify:webhook && npm run verify:triggers && npm run verify:modifiers && npm run verify:httptool && npm run verify:auth && npm run verify:council && npm run verify:catalog && npm run verify:search && npm run verify:install && npm run verify:local-llm && npm run verify:dashboard && npm run verify:profiles && npm run verify:limits && npm run verify:breaker && npm run verify:config && npm run verify:audit && npm run verify:resources-prompts && npm run verify:health && npm run verify:retry && npm run verify:doctor && npm run verify:vault",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
