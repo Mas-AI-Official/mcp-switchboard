@@ -20,7 +20,15 @@
  */
 
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
+import type {
+  CallToolResult,
+  Tool,
+  Resource,
+  ResourceTemplate,
+  Prompt,
+  ReadResourceResult,
+  GetPromptResult,
+} from "@modelcontextprotocol/sdk/types.js";
 import type { Registry, MountedServer } from "./registry.js";
 import type { SwitchboardConfig } from "./types.js";
 import { evaluate } from "./policy.js";
@@ -532,6 +540,164 @@ export class Router {
       const verb = timedOut ? `timed out after ${timeoutMs}ms calling` : `failed calling`;
       return this.error(`upstream '${server.id}' ${verb} '${toolName}': ${msg}`, code);
     }
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Resources & prompts passthrough — the other two MCP content surfaces, aggregated across every
+  // visible upstream so a full MCP client (Claude Desktop, Cursor) sees them through the one
+  // endpoint, not just tools. Profiles + the per-server `enabled` flag gate visibility exactly as
+  // for tools; read access is audited. (Subscriptions are intentionally out of scope — no
+  // `subscribe` capability is advertised; an operator hides sensitive data by disabling the server.)
+  // ---------------------------------------------------------------------------------------------
+
+  /** A server is visible iff it is enabled AND not hidden by the active profile (profiles can only
+   *  HIDE — never reveal a disabled server). `active` is threaded in so a sweep resolves it once. */
+  private isVisible(server: MountedServer, active = getActiveProfile(this.cfg)?.profile): boolean {
+    return server.config.enabled !== false && profileAllowsServer(active, server.config.id);
+  }
+
+  /** Every mounted server that is enabled and not hidden by the active profile. */
+  private visibleServers(): MountedServer[] {
+    const active = getActiveProfile(this.cfg)?.profile;
+    return this.registry.list().filter((s) => this.isVisible(s, active));
+  }
+
+  /** URI → owning serverId, rebuilt on every listResources() so readResource() routes correctly.
+   *  Resources are NOT namespaced: a URI is an opaque, globally-meaningful identity the agent
+   *  passes back verbatim, so we can't rewrite it the way we namespace tool/prompt names. */
+  private readonly resourceOwner = new Map<string, string>();
+
+  /** Aggregate resources across every visible, resource-capable server. Rebuilds the URI→owner
+   *  map; a URI collision is first-wins + logged (we never silently shadow one resource with
+   *  another). A per-server list failure is isolated — it never sinks the whole aggregation. */
+  async listResources(): Promise<Resource[]> {
+    this.resourceOwner.clear();
+    const out: Resource[] = [];
+    for (const server of this.visibleServers()) {
+      if (!server.client.getServerCapabilities()?.resources) continue;
+      try {
+        const { resources } = await server.client.listResources();
+        for (const resource of resources ?? []) {
+          if (this.resourceOwner.has(resource.uri)) {
+            log.warn(
+              `resource URI collision on '${resource.uri}' — keeping '${this.resourceOwner.get(resource.uri)}', dropping the copy from '${server.id}'`,
+            );
+            continue;
+          }
+          this.resourceOwner.set(resource.uri, server.id);
+          out.push(resource);
+        }
+      } catch (err) {
+        log.warn(`listResources failed for '${server.id}': ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    return out;
+  }
+
+  /** Aggregate resource templates across every visible, resource-capable server. Templates are
+   *  parameterized URIs (never concrete identities), so there is no owner map to maintain — a read
+   *  of a template-expanded URI resolves via readResource()'s try-each fallback. */
+  async listResourceTemplates(): Promise<ResourceTemplate[]> {
+    const out: ResourceTemplate[] = [];
+    for (const server of this.visibleServers()) {
+      if (!server.client.getServerCapabilities()?.resources) continue;
+      try {
+        const { resourceTemplates } = await server.client.listResourceTemplates();
+        for (const tpl of resourceTemplates ?? []) out.push(tpl);
+      } catch (err) {
+        log.warn(`listResourceTemplates failed for '${server.id}': ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    return out;
+  }
+
+  /** Read a resource by URI, routing to the server that listed it. A cold/stale owner map is
+   *  rebuilt once via listResources(); a URI that was never listed (e.g. expanded from a template)
+   *  is tried against every visible resource-capable server. Audited at read scope. An unresolved
+   *  URI throws McpError(InvalidParams) so the SDK emits a proper JSON-RPC error (resources/read
+   *  is result-or-error, unlike tools which return an isError result). */
+  async readResource(uri: string): Promise<ReadResourceResult> {
+    let ownerId = this.resourceOwner.get(uri);
+    if (!ownerId) {
+      await this.listResources();
+      ownerId = this.resourceOwner.get(uri);
+    }
+    if (ownerId) {
+      const server = this.registry.get(ownerId);
+      if (server && this.isVisible(server)) {
+        const result = (await server.client.readResource({ uri })) as ReadResourceResult;
+        this.record({ server: server.id, tool: "resources/read", scope: "read", decision: "allow", reason: uri });
+        return result;
+      }
+    }
+    // Try-each fallback for a URI that was never listed (template-expanded, or owner since gone).
+    for (const server of this.visibleServers()) {
+      if (!server.client.getServerCapabilities()?.resources) continue;
+      try {
+        const result = (await server.client.readResource({ uri })) as ReadResourceResult;
+        this.record({ server: server.id, tool: "resources/read", scope: "read", decision: "allow", reason: uri });
+        return result;
+      } catch {
+        /* not this server — keep trying */
+      }
+    }
+    throw new McpError(ErrorCode.InvalidParams, `[switchboard] unknown resource '${uri}'`);
+  }
+
+  /** Aggregate prompts across every visible, prompt-capable server, namespaced `serverId__name`.
+   *  Prompts ARE namespaced (like tools) because a prompt name is a short, collision-prone label
+   *  (many servers expose a "summarize"); getPrompt() strips the prefix before routing. */
+  async listPrompts(): Promise<Prompt[]> {
+    const out: Prompt[] = [];
+    for (const server of this.visibleServers()) {
+      if (!server.client.getServerCapabilities()?.prompts) continue;
+      try {
+        const { prompts } = await server.client.listPrompts();
+        for (const prompt of prompts ?? []) {
+          out.push({ ...prompt, name: `${server.config.id}${SEP}${prompt.name}` });
+        }
+      } catch (err) {
+        log.warn(`listPrompts failed for '${server.id}': ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    return out;
+  }
+
+  /** Get a prompt by its exposed (namespaced) name, stripping the `serverId__` prefix before
+   *  routing. A bare (un-prefixed) name is matched against every visible prompt-capable server.
+   *  Audited at read scope; an unresolved name throws McpError(InvalidParams). */
+  async getPrompt(name: string, args?: Record<string, string>): Promise<GetPromptResult> {
+    const idx = name.indexOf(SEP);
+    if (idx !== -1) {
+      const serverId = name.slice(0, idx);
+      const promptName = name.slice(idx + SEP.length);
+      const server = this.registry.get(serverId);
+      if (server && this.isVisible(server) && server.client.getServerCapabilities()?.prompts) {
+        const result = (await server.client.getPrompt({
+          name: promptName,
+          ...(args ? { arguments: args } : {}),
+        })) as GetPromptResult;
+        this.record({ server: server.id, tool: "prompts/get", scope: "read", decision: "allow", reason: promptName });
+        return result;
+      }
+    }
+    // Fallback: treat `name` as a bare prompt name and find the first visible server that has it.
+    for (const server of this.visibleServers()) {
+      if (!server.client.getServerCapabilities()?.prompts) continue;
+      try {
+        const { prompts } = await server.client.listPrompts();
+        if (!prompts?.some((p) => p.name === name)) continue;
+        const result = (await server.client.getPrompt({
+          name,
+          ...(args ? { arguments: args } : {}),
+        })) as GetPromptResult;
+        this.record({ server: server.id, tool: "prompts/get", scope: "read", decision: "allow", reason: name });
+        return result;
+      } catch {
+        /* not this server — keep trying */
+      }
+    }
+    throw new McpError(ErrorCode.InvalidParams, `[switchboard] unknown prompt '${name}'`);
   }
 
   /** Write one finalized verdict to the audit log AND notify the webhook. Every terminal

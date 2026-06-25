@@ -17,6 +17,11 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  ListResourcesRequestSchema,
+  ListResourceTemplatesRequestSchema,
+  ReadResourceRequestSchema,
+  ListPromptsRequestSchema,
+  GetPromptRequestSchema,
   type CallToolResult,
 } from "@modelcontextprotocol/sdk/types.js";
 import type { ServerConfig, SwitchboardConfig } from "./types.js";
@@ -90,9 +95,16 @@ export class Gateway {
     }
   }
 
-  /** A fresh downstream MCP Server wired to the router. One per stdio session / HTTP request. */
+  /** A fresh downstream MCP Server wired to the router. One per stdio session / HTTP request.
+   *  Declares all three content capabilities — tools, resources, prompts — so a full MCP client
+   *  (Claude Desktop, Cursor) discovers every governed upstream surface through the one endpoint,
+   *  not just tools. (The SDK refuses to register a resources/* or prompts/* handler unless the
+   *  matching capability is declared here.) */
   buildServer(): Server {
-    const server = new Server({ name: NAME, version: VERSION }, { capabilities: { tools: {} } });
+    const server = new Server(
+      { name: NAME, version: VERSION },
+      { capabilities: { tools: {}, resources: {}, prompts: {} } },
+    );
 
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
       tools: this.router.listTools(),
@@ -102,6 +114,28 @@ export class Gateway {
       const { name, arguments: args } = req.params;
       return this.router.callTool(name, args ?? {});
     });
+
+    // Resources — opaque URIs, aggregated across upstreams and read back by URI (not namespaced).
+    server.setRequestHandler(ListResourcesRequestSchema, async () => ({
+      resources: await this.router.listResources(),
+    }));
+
+    server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({
+      resourceTemplates: await this.router.listResourceTemplates(),
+    }));
+
+    server.setRequestHandler(ReadResourceRequestSchema, async (req) =>
+      this.router.readResource(req.params.uri),
+    );
+
+    // Prompts — namespaced `serverId__name`, aggregated across upstreams.
+    server.setRequestHandler(ListPromptsRequestSchema, async () => ({
+      prompts: await this.router.listPrompts(),
+    }));
+
+    server.setRequestHandler(GetPromptRequestSchema, async (req) =>
+      this.router.getPrompt(req.params.name, req.params.arguments),
+    );
 
     return server;
   }
