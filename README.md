@@ -9,7 +9,9 @@ through one governed control plane on your machine.**
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-2dd4bf.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/Model_Context_Protocol-1.29-2dd4bf.svg)](https://modelcontextprotocol.io)
 [![Node](https://img.shields.io/badge/node-%E2%89%A518.18-2dd4bf.svg)](https://nodejs.org)
+[![Verified](https://img.shields.io/badge/deterministic_oracles-619_checks-2dd4bf.svg)](#everything-is-verified-by-a-deterministic-oracle)
 [![Status](https://img.shields.io/badge/status-working_alpha-D4A843.svg)](#project-status)
+[![Zero native deps](https://img.shields.io/badge/native_deps-0-D4A843.svg)](#security)
 
 </div>
 
@@ -27,6 +29,12 @@ servers behind **one governed endpoint**. You add that endpoint **once** as a co
 and **once** in ChatGPT — and now *both* assistants reach the same tools, through the **same
 encrypted vault, the same on/off + read/write/full policy, the same approval gates, and the same
 audit log**. One control plane. Your machine. No "us" in the middle.
+
+Think of it as **your own private "Connectors" page** — the kind ChatGPT and Claude each ship as a
+walled garden — except it lives on *your* box, mounts the *whole* MCP ecosystem instead of a curated
+shortlist, and serves **every** assistant at once. Browse a catalog of thousands of toolkits in the
+dashboard, flip one on, and `switchboard install claude-code` wires it into your client in a single
+command. No tokens handed to a vendor, no per-call meter, no treadmill.
 
 ```
      Claude Desktop ─┐                            ┌─ Gmail        (read)
@@ -59,8 +67,10 @@ app. Two corrections worth making:
 
 Adoption shouldn't require an API bill. Point Switchboard's **council** at a **local LLM** — Ollama,
 LM Studio, llama.cpp, or vLLM — and you get a second-opinion / debate model with **zero cloud, zero
-keys, zero data leaving the box**. Download a model, set one `base_url`, and the whole stack (vault,
-policy, audit, council) runs on your hardware. See **[Cross-provider council](#cross-provider-council-phase-5)**.
+keys, zero data leaving the box**. You don't even have to find the URL: `switchboard local-llm`
+**auto-detects** a running OpenAI-compatible server on the usual ports, and `switchboard local-llm wire`
+writes the provider block for you. Download a model, run two commands, and the whole stack (vault,
+policy, audit, council) runs on your hardware. See **[Run it fully offline with a local LLM](#run-it-fully-offline-with-a-local-llm-auto-detected)**.
 
 ## Why it's different
 
@@ -69,14 +79,21 @@ policy, audit, council) runs on your hardware. See **[Cross-provider council](#c
 | **One connector, every assistant** | Add it once; **Claude *and* ChatGPT** share the same governed tools | Per-vendor, per-app setup |
 | **Where your tokens live** | A local AES-256 vault on **your** machine | Their cloud |
 | **Integrations** | **Mounts existing MCP servers** — no treadmill | Hand-built, must be maintained |
+| **One-command setup** | `switchboard install claude-code` wires it into 5 clients | Copy-paste JSON per client |
+| **Browse & connect** | A local catalog of thousands of toolkits (MCP Registry + APIs.guru) | A curated vendor shortlist |
 | **Governance** | Per-tool `read/write/full` + approval gates + audit log | Usually all-or-nothing |
-| **Works offline** | Council runs against a **local LLM** — no account required | Cloud-only |
+| **Profiles** | Named views — a locked-down "demo" vs a full "dev" surface, one switch | None |
+| **Rate limits + spend budgets** | Per-minute/hour/day call **and cost** ceilings, fail-closed | Pay the overage |
+| **Resilience** | Per-server **circuit breaker** trips a flapping upstream, fast-fails | Hangs propagate |
+| **Works offline** | Council runs against an **auto-detected local LLM** — no account required | Cloud-only |
 | **Context blow-up** | `search` mode → 2 meta-tools no matter how many servers | Dump every tool into context |
-| **Cost** | Free, Apache-2.0, self-hosted | Metered SaaS |
+| **Cost** | Free, Apache-2.0, self-hosted, **no per-call meter** | Metered SaaS |
 
 The catalog is **not** the moat — hosted players already have bigger ones. The defensible
 combination is **local credentials + a governance layer + a usable dashboard**, built as an
-**aggregator** that rides the existing MCP ecosystem instead of re-implementing it.
+**aggregator** that rides the existing MCP ecosystem instead of re-implementing it — then pushed
+*past* parity with the three things a metered cloud can't sell you: **profiles, spend budgets, and a
+circuit breaker, all running on your own hardware.**
 
 ## Quickstart
 
@@ -114,7 +131,21 @@ node dist/cli.js list
 node dist/cli.js serve
 ```
 
-Open the dashboard at **http://127.0.0.1:8088**, then point an agent at the MCP endpoint:
+Open the dashboard at **http://127.0.0.1:8088**, then point an agent at the MCP endpoint.
+
+### Wire it into your client — one command
+
+`switchboard install <client>` writes the right config block, in the right file, for the client you
+name — Claude Desktop, Claude Code, Cursor, VS Code, or Codex — so you never hand-edit a JSON config:
+
+```bash
+node dist/cli.js install claude-code        # project-local config in the current dir
+node dist/cli.js install claude-desktop --global   # the client's user/global config
+node dist/cli.js install cursor --print     # preview the exact block without writing it
+```
+
+It is **non-destructive** — it merges into the client's existing servers, never clobbers them — and
+`--print` shows you exactly what it would write first. Prefer to wire it by hand? The endpoints are:
 
 ```bash
 # Claude Code / Claude Desktop, stdio transport:
@@ -218,6 +249,34 @@ config/param-driven, so nothing breaks when a provider renames a model. A local 
 Claude Code client can use the council with zero tunnel; reaching **claude.ai *web*** additionally
 needs the OAuth layer below.
 
+### Run it fully offline with a local LLM (auto-detected)
+
+The council's third provider is **`local`** — any OpenAI-compatible server: Ollama, LM Studio,
+llama.cpp's `llama-server`, or vLLM. No cloud, no key, nothing leaves the box. You don't have to know
+the URL or the model id — Switchboard probes for you:
+
+```bash
+node dist/cli.js local-llm          # scan the usual ports; print what's running + a ready-to-paste block
+node dist/cli.js local-llm wire     # write the detected server into settings.council.providers.local
+node dist/cli.js local-llm wire --base-url http://127.0.0.1:11434/v1 --model llama3.1   # or pin it
+```
+
+`local-llm` **only reads** — it auto-detects a server you started yourself and never downloads or runs
+a model for you (that's your call, by design). `wire --print` previews the block without touching your
+config. The resulting provider needs no `api_key_ref` at all (the zero-key path), so an offline
+council is genuinely keyless:
+
+```yaml
+settings:
+  council:
+    enabled: true
+    providers:
+      local: { base_url: "http://127.0.0.1:11434/v1", default_model: "llama3.1" }   # no api_key_ref
+```
+
+The detection, the keyless wiring, and the "never auto-download" contract are pinned by a deterministic
+oracle: `npm run verify:local-llm` — 71/71.
+
 ### Streaming decisions to a webhook (real-time governance feed)
 
 Every policy verdict can be POSTed to a URL of your choosing the instant it happens — wire your agents'
@@ -244,7 +303,7 @@ delays, or alters a governance decision (8s timeout, detached). It fails *closed
 a promised-but-unresolvable signing secret drops the delivery rather than send an unsigned event a
 receiver would reject. The whole contract (off-by-default, per-decision `events` filtering, valid
 signature, metadata-only even under `capture_io`, drop-on-unresolvable-secret, non-blocking) is
-verified by a deterministic oracle: `npm run verify:webhook` — 25/25.
+verified by a deterministic oracle: `npm run verify:webhook` — 33/33.
 
 ### Poll-first triggers (turn any read tool into an event source)
 
@@ -295,7 +354,105 @@ The design keeps the same governance/honesty contract as everything else:
 
 The whole contract — poll is audited, fire is not, fire bypasses the `events` filter, read ceiling
 denies a non-read trigger, baseline survives restart — is verified by a deterministic oracle:
-`npm run verify:triggers` — 36/36. (`npm run verify` runs the build + all three oracles.)
+`npm run verify:triggers` — 60/60. (`npm run verify` runs the build + **all 16 oracles, 619 checks**.)
+
+### Profiles — one switch between a locked-down view and the full surface
+
+A single config can expose very different tool surfaces depending on *who's* driving. A **profile** is a
+named view that can **hide** servers/tools and **lower** scope — never reveal a disabled tool or raise a
+ceiling (it can only ever be *more* restrictive than your base config, which is the safe direction).
+
+```yaml
+settings:
+  active_profile: demo            # must name a profile defined below
+  profiles:
+    demo:
+      description: "Safe surface for a screen-share — read-only, no Slack"
+      servers: [github, notion]   # only these mount; everything else is hidden
+      exclude_tools: [github__delete_repo]
+      policy: read                # cap the whole profile at read, whatever the servers allow
+    dev:
+      description: "Everything, full power"
+```
+
+```bash
+node dist/cli.js profile list          # show defined profiles + which is active
+node dist/cli.js profile show demo     # what it exposes vs hides, plus the raw definition
+node dist/cli.js profile use demo      # activate (writes settings.active_profile)
+node dist/cli.js profile clear         # expose every enabled tool again
+```
+
+The "a profile can only narrow, never widen" invariant — hidden stays hidden, scope only drops — is
+pinned by a deterministic oracle: `npm run verify:profiles` — 61/61. *(Beyond hosted routers — a metered
+cloud has no equivalent.)*
+
+### Rate limits + spend budgets — fail-closed ceilings on calls *and* cost
+
+Cap how often — and how *expensively* — your agents act. A `limits` block sets count ceilings
+(`per_minute`/`per_hour`/`per_day`) and/or **cost** budgets (`cost_per_minute`/`cost_per_hour`/
+`cost_per_day`), at the **global**, **server**, or **tool** level. They **fail closed**: hit the ceiling
+and the call is denied — logged, never silently dropped — and a typo'd field name is rejected at load
+rather than quietly disabling the limit it was meant to set.
+
+```yaml
+settings:
+  limits:                       # global: applies to every tool call
+    per_minute: 60
+    cost_per_day: 5.00          # stop the day at $5 of metered spend
+servers:
+  - id: openai-tools
+    source: npx
+    package: "@example/openai-mcp"
+    limits: { per_hour: 200 }   # server-level ceiling
+    tools:
+      expensive_call:
+        cost: 0.02              # declared per-call cost, counted toward cost_per_* budgets
+        limits: { per_minute: 5 }   # tool-level ceiling, the tightest wins
+```
+
+Every level stacks (global ∧ server ∧ tool), each requiring at least one ceiling. Enforcement is pinned
+by a deterministic oracle: `npm run verify:limits` — 61/61. *(Beyond hosted routers — they bill the
+overage; Switchboard stops it.)*
+
+### Circuit breaker — a flapping upstream fails fast instead of hanging
+
+When an upstream MCP server starts throwing or timing out, you don't want every agent call to sit on a
+30-second wall-clock timeout. Turn on **resilience** and Switchboard trips a per-server circuit after N
+consecutive **transport** failures (a thrown error or a timeout — *not* a well-formed tool error, which
+is a valid answer). While open, calls fast-fail with `SB_UPSTREAM_UNAVAILABLE`; after a cooldown it
+auto-probes and closes on the first success.
+
+```yaml
+settings:
+  call_timeout_ms: 30000        # hard wall-clock cap on every upstream call
+  resilience:
+    enabled: true
+    failure_threshold: 5        # consecutive transport failures before the circuit opens
+    cooldown_seconds: 30        # how long to fast-fail before probing again
+servers:
+  - id: flaky-remote
+    source: remote
+    url: https://example.com/mcp
+    resilience: { failure_threshold: 2 }   # per-server override — trip this one sooner
+```
+
+Off by default; opt in globally and override per server. The open/half-open/closed transitions, the
+"tool error doesn't trip the breaker" distinction, and the cooldown probe are pinned by a deterministic
+oracle: `npm run verify:breaker` — 47/47. *(Beyond hosted routers — your gateway, your failure policy.)*
+
+### Browse & connect from the catalog (your local "Connectors" page)
+
+The dashboard ships a **toolkit grid** — a browsable catalog of thousands of MCP servers and HTTP
+toolkits, built from the open **[MCP Registry](https://github.com/modelcontextprotocol/registry)** and
+**[APIs.guru](https://apis.guru)** (both CC0). It's the local-first answer to a vendor's curated
+"Connectors" page: search it, see what's available, and wire one in — no account, no allowlist.
+
+```bash
+node dist/cli.js toolkits sync     # rebuild data/catalog.json from the public indexes
+node dist/cli.js toolkits stats    # counts from the on-disk snapshot
+```
+
+The snapshot is plain JSON on disk, so the grid renders instantly and works offline once synced.
 
 ### Connecting cloud clients — claude.ai web & ChatGPT (OAuth 2.1 + PKCE, Phase 5b)
 
@@ -346,12 +503,16 @@ is verified end-to-end by a deterministic oracle: `npm run verify:oauth` (20/20)
 | `switchboard init` | Scaffold `switchboard.config.yaml` + the `~/.switchboard` home |
 | `switchboard serve` | Run the gateway (stdio and/or HTTP, per config) |
 | `switchboard dashboard` | Run only the HTTP endpoint + web console |
-| `switchboard expose` | Open an HTTPS tunnel to the local endpoint (for claude.ai web / remote clients) |
+| `switchboard install <client>` | Wire Switchboard into a client (`claude-desktop`, `claude-code`, `cursor`, `vscode`, `codex`) — `--global` / `--dir` / `--name` / `--print` |
+| `switchboard expose` | Open an HTTPS tunnel to the local endpoint (for claude.ai web / ChatGPT / remote clients) |
 | `switchboard list` | Mount everything and print the governed tool list, then exit |
 | `switchboard doctor` | Check Node, config, transports, and that every secret resolves |
 | `switchboard catalog` | List the OAuth providers and their connection status |
 | `switchboard connect <provider>` | Authorize a provider locally (loopback OAuth → token sealed in the vault) |
-| `switchboard apikey new <name>\|list\|rm <id>` | Manage `/mcp` bearer API keys for local clients |
+| `switchboard toolkits sync\|stats` | Rebuild / inspect the browsable integration catalog (MCP Registry + APIs.guru) |
+| `switchboard local-llm [wire]` | Auto-detect an offline OpenAI-compatible LLM; `wire` writes it into the council |
+| `switchboard profile list\|show <name>\|use <name>\|clear` | Manage named, switchable views over your servers/tools |
+| `switchboard apikey new <name>\|list\|rm <id>` | Manage `/mcp` bearer API keys for local & cloud clients |
 | `switchboard vault set\|list\|rm <name>` | Manage locally-stored secrets |
 
 Global flag: `-c, --config <path>` (default `switchboard.config.yaml`).
@@ -385,10 +546,11 @@ collapses, tokens explode. Switchboard offers three modes via `gateway.tool_expo
 
 ## Project status
 
-**Working alpha — all five phases shipped.** Real and verified today: the aggregating gateway
-(stdio + Streamable HTTP), the policy engine, all three tool-exposure modes, the encrypted vault, the
-approval gate, the audit log, the dashboard, and the CLI. The full `find_tools → call_tool` round-trip
-works end-to-end through the governed path.
+**Working alpha — every phase shipped, plus a tier of governance hosted routers don't offer.** Real
+and verified today: the aggregating gateway (stdio + Streamable HTTP), the policy engine, all three
+tool-exposure modes, the encrypted vault, the approval gate, the audit log, the dashboard, the CLI, and
+one-command `install` into five clients. The full `find_tools → call_tool` round-trip works end-to-end
+through the governed path.
 
 - **Managed OAuth (Phase 3)** — local OAuth for **5 providers** (Google, GitHub, Slack, Notion, Linear)
   via the catalog UI or `switchboard connect <provider>`; tokens are sealed in the same local vault as
@@ -410,14 +572,66 @@ works end-to-end through the governed path.
 - **Decision webhooks** — `settings.webhook` streams each policy verdict (`allow`/`deny`/
   `approval_required`) to a URL as it happens, signed with an `x-switchboard-signature` HMAC. Payload
   is decision metadata only (never call I/O), fire-and-forget + fail-open, off by default. Verified by
-  `npm run verify:webhook` — 25/25.
+  `npm run verify:webhook` — 33/33.
 - **Poll-first triggers** — `settings.triggers` polls a read-scoped tool on a schedule, diffs the
   result by `item_key`, and fires a `switchboard.trigger` webhook on new items. The poll is a real
   governed/audited call (read ceiling denies a non-read trigger); the fire is an observation, never an
   audit verdict. Baselines persist across restarts; off by default. Verified by
-  `npm run verify:triggers` — 36/36.
+  `npm run verify:triggers` — 60/60.
 
-See **[docs/ROADMAP.md](docs/ROADMAP.md)** for the phase-by-phase detail.
+**Beyond hosted parity — the net-new tier:**
+
+- **One-command install** — `switchboard install <client>` non-destructively wires Switchboard into
+  Claude Desktop, Claude Code, Cursor, VS Code, or Codex (`--global` / `--dir` / `--name` / `--print`).
+  Verified by `npm run verify:install` — 57/57.
+- **Offline local-LLM auto-detect** — `switchboard local-llm` probes for a running Ollama/LM Studio/
+  llama.cpp/vLLM server and `local-llm wire` writes the keyless council provider; never auto-downloads.
+  Verified by `npm run verify:local-llm` — 71/71.
+- **Profiles** — `settings.profiles` + `active_profile` expose a narrow-only named view (hide servers/
+  tools, lower scope, never widen). Verified by `npm run verify:profiles` — 61/61.
+- **Rate limits + spend budgets** — `limits` blocks set fail-closed call **and cost** ceilings at the
+  global/server/tool level. Verified by `npm run verify:limits` — 61/61.
+- **Per-server circuit breaker** — `settings.resilience` trips a flapping upstream after N transport
+  failures and auto-probes after a cooldown; off by default. Verified by `npm run verify:breaker` — 47/47.
+- **Browsable toolkit catalog** — `toolkits sync`/`stats` builds a local grid of thousands of MCP +
+  HTTP toolkits from the MCP Registry + APIs.guru (CC0). Verified by `npm run verify:catalog` — 20/20.
+- **BM25F semantic search mode** — `find_tools(query)` ranks across thousands of mounted tools so the
+  agent's context never blows up. Verified by `npm run verify:search` — 21/21.
+
+See **[docs/ROADMAP.md](docs/ROADMAP.md)** for the phase-by-phase detail and
+**[docs/COMPOSIO-PARITY.md](docs/COMPOSIO-PARITY.md)** for the feature-by-feature comparison vs Composio.
+
+### Everything is verified by a deterministic oracle
+
+Switchboard makes a lot of governance and honesty claims — "fails closed", "never auto-downloads",
+"metadata only", "a profile can only narrow". None of them are taken on faith. Every one is pinned by a
+**deterministic oracle**: a zero-dependency Node script that imports the *compiled* code, exercises the
+contract, and prints `N/N checks passed` — no model tokens, no flakiness, just code checking code. One
+command runs the build plus all sixteen:
+
+```bash
+npm run verify     # build + 16 oracles = 619 checks, all green
+```
+
+| Area | Oracle | Checks |
+|---|---|---|
+| OAuth 2.1 + PKCE auth server | `verify:oauth` | 20 |
+| Decision webhooks | `verify:webhook` | 33 |
+| Poll-first triggers | `verify:triggers` | 60 |
+| Schema / response modifiers | `verify:modifiers` | 28 |
+| HTTP-tool servers | `verify:httptool` | 29 |
+| Auth schemes (bearer/api_key/basic/header) | `verify:auth` | 13 |
+| Cross-provider council | `verify:council` | 34 |
+| Toolkit catalog ingest | `verify:catalog` | 20 |
+| BM25F `find_tools` search | `verify:search` | 21 |
+| One-command `install` | `verify:install` | 57 |
+| Offline local-LLM detect + wire | `verify:local-llm` | 71 |
+| Dashboard API | `verify:dashboard` | 43 |
+| Profiles (narrow-only) | `verify:profiles` | 61 |
+| Rate limits + spend budgets | `verify:limits` | 61 |
+| Per-server circuit breaker | `verify:breaker` | 47 |
+| Example config strict-loads | `verify:config` | 21 |
+| **Total** | **`npm run verify`** | **619** |
 
 ## Docs
 
@@ -425,7 +639,7 @@ See **[docs/ROADMAP.md](docs/ROADMAP.md)** for the phase-by-phase detail.
 - [Vision & positioning](docs/VISION.md)
 - [Architecture overview](docs/ARCHITECTURE.md)
 - [Roadmap](docs/ROADMAP.md)
-- [Competitive landscape](docs/COMPETITIVE.md)
+- [Competitive landscape](docs/COMPETITIVE.md) · [Composio parity, feature by feature](docs/COMPOSIO-PARITY.md)
 - [Example config](switchboard.config.example.yaml) · [search-mode example](examples/switchboard.config.yaml)
 
 ## Security

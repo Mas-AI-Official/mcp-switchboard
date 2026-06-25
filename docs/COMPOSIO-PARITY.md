@@ -4,7 +4,7 @@
 
 ## 0. Build Status — ALL PHASES SHIPPED & VERIFIED
 
-The DO-set below is **fully built**, and several items the original plan marked "defer" (Triggers, Webhooks) were also delivered. Each feature is pinned by a zero-dep deterministic oracle; `npm run verify` runs the build + all ten and is **green (301 checks)**.
+The DO-set below is **fully built**, and several items the original plan marked "defer" (Triggers, Webhooks) were also delivered, plus net-new resilience/governance features (Profiles, Rate-limits + spend-budgets, per-server circuit breaker) that go *beyond* Composio. Each feature is pinned by a zero-dep deterministic oracle; `npm run verify` runs the build + **all sixteen** and is **green (619 checks)**.
 
 | Phase / feature | Status | Oracle | Source |
 |---|---|---|---|
@@ -20,7 +20,12 @@ The DO-set below is **fully built**, and several items the original plan marked 
 | **Response modifiers** (drop_params/inject_args/redact_response) | ✅ | `verify:modifiers` 28/28 | `transforms.ts` |
 | **Auth schemes** (bearer/api_key/basic per server) | ✅ | (httptool/config) | `authscheme.ts` |
 | **HTTP-tool servers** (declare REST calls inline as MCP tools) | ✅ | `verify:httptool` 29/29 | `httptool.ts` |
-| **Offline local-LLM council provider** (Ollama/LM Studio/llama.cpp/vLLM) | ✅ | `verify:config` 21/21 | `council.ts`, `config.ts` |
+| **BM25F semantic `find_tools` search** (Tool-Router context-economy) | ✅ | `verify:search` 21/21 | `search.ts`, `router.ts` |
+| **One-command `install` into Claude/Cursor/VS Code/Codex** | ✅ | `verify:install` 57/57 | `clients.ts`, `cli.ts` |
+| **Offline local-LLM council** (auto-detect + `local-llm wire`) | ✅ | `verify:local-llm` 71/71 | `local-llm.ts`, `council.ts` |
+| **Profiles** (named switchable views — hide servers/tools, lower scope) | ✅ *beyond Composio* | `verify:profiles` 61/61 | `profiles.ts`, `router.ts` |
+| **Rate-limits + spend-budgets** (per-tool/server/global, fail-closed) | ✅ *beyond Composio* | `verify:limits` 61/61 | `governor.ts`, `router.ts` |
+| **Circuit breaker** (per-server fail-fast on a dead/wedged upstream) | ✅ *beyond Composio* | `verify:breaker` 47/47 | `breaker.ts`, `router.ts` |
 | **Shipped example config exercises every parity feature** | ✅ | `verify:config` 21/21 | `switchboard.config.example.yaml` |
 
 **Deliberately NOT built (out of scope, documented forks):** multi-user/per-end-user isolation (`?user_id=` carried, full isolation = L fork, §7.7); Composio-style per-end-user managed OAuth apps (we use the operator's own app, zero-custody, §3 Auth Screen); the catalog *ingest* pipeline at full registry scale (Adapters A+B designed in §4; the catalog UI + schema ship, bulk CC0 ingest is a maintainer-run sync, not a launch blocker). **Not published to npm** (v0.1.0 — publishing is an explicit, separate go-ahead). The sections below are the original plan, kept verbatim for provenance; where they say "defer/optional," see this table for what actually shipped.
