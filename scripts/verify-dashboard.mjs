@@ -20,8 +20,17 @@
 //                           getTriggerTemplate resolves/΄misses, and templateToDefinition stamps a
 //                           ready definition (args merge, name/interval override, hash recipes carry
 //                           no item wiring, unknown id throws).
+//   isLocalRequest        — the loopback predicate every state-mutating endpoint gates on: IPv4/IPv6
+//                           loopback (incl. the IPv4-mapped form and the 127/8 block) is local; public
+//                           addresses are not; it falls back to socket.remoteAddress when req.ip is unset.
+//   mutator gating (wiring)— a STATIC scan of the compiled dist/dashboard.js proves every state-mutating
+//                           route handler contains an isLocalRequest guard, while read endpoints and the
+//                           deliberately tunnel-reachable OAuth-flow endpoints (/oauth/consent, /oauth/
+//                           callback — protected by pending_id/state, not loopback) carry none. This is
+//                           the regression guard against a new mutator shipping ungated.
 // Zero deps (node stdlib + the package's compiled output). Build first.
-import { correlateMountedSlugs, pageCount, councilSummary } from "../dist/dashboard.js";
+import { readFileSync } from "node:fs";
+import { correlateMountedSlugs, pageCount, councilSummary, isLocalRequest } from "../dist/dashboard.js";
 import { listTriggerTemplates, getTriggerTemplate, templateToDefinition } from "../dist/trigger-templates.js";
 import { loadCatalog, queryCatalog } from "../dist/catalog.js";
 
@@ -202,6 +211,93 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   let threw = false;
   try { templateToDefinition("__nope__", { id: "z", tool: "y" }); } catch { threw = true; }
   assert("templateToDefinition(unknown) throws", threw);
+}
+
+// --- 9. isLocalRequest: the loopback verdict every mutating endpoint gates on ---------------------
+{
+  // Synthesize the minimal request shape isLocalRequest reads: req.ip first, then socket.remoteAddress.
+  const reqOf = (ip, remoteAddress = undefined) => ({ ip, socket: { remoteAddress } });
+
+  assert("127.0.0.1 (IPv4 loopback) is local", isLocalRequest(reqOf("127.0.0.1")) === true);
+  assert("::1 (IPv6 loopback) is local", isLocalRequest(reqOf("::1")) === true);
+  assert("::ffff:127.0.0.1 (IPv4-mapped loopback) is local", isLocalRequest(reqOf("::ffff:127.0.0.1")) === true);
+  assert("127.5.9.1 (anywhere in 127/8) is local", isLocalRequest(reqOf("127.5.9.1")) === true);
+
+  assert("203.0.113.7 (public IPv4) is NOT local", isLocalRequest(reqOf("203.0.113.7")) === false);
+  assert("2001:db8::1 (public IPv6) is NOT local", isLocalRequest(reqOf("2001:db8::1")) === false);
+  // A near-miss that must NOT pass the 127. prefix test (it's a different /8).
+  assert("12.7.0.0.1-style 12.x is NOT local", isLocalRequest(reqOf("12.7.0.1")) === false);
+
+  // Falls back to socket.remoteAddress when Express hasn't populated req.ip (e.g. trust-proxy off).
+  assert("falls back to socket.remoteAddress when req.ip is undefined", isLocalRequest(reqOf(undefined, "127.0.0.1")) === true);
+  assert("public socket.remoteAddress (no req.ip) is NOT local", isLocalRequest(reqOf(undefined, "8.8.8.8")) === false);
+  // No peer information at all → never treated as local (fail closed).
+  assert("an empty peer (no ip, no remoteAddress) is NOT local", isLocalRequest(reqOf(undefined, undefined)) === false);
+}
+
+// --- 10. mutator gating (static wiring scan of compiled dist/dashboard.js) ------------------------
+{
+  // tsc emits readable JS (no minification/renaming), so the loopback guard survives verbatim as
+  // `isLocalRequest(`. We scan every route registration in source order, slice each handler up to the
+  // NEXT registration, and assert the guard is present exactly where it must be. This is the
+  // regression guard: a freshly-added mutating endpoint that forgets the guard fails this oracle.
+  const src = readFileSync(new URL("../dist/dashboard.js", import.meta.url), "utf8");
+
+  // Every `app.<verb>("<path>", ...)` registration, in file order. (app.use(express.json()) etc. have
+  // no string-literal path as the first arg and are correctly skipped.)
+  const routeRe = /app\.(get|post|put|delete)\(\s*(["'`])([^"'`]+)\2/g;
+  const routes = [];
+  let m;
+  while ((m = routeRe.exec(src)) !== null) routes.push({ verb: m[1], path: m[3], index: m.index });
+  assert("route scan found the dashboard's registrations", routes.length >= 14, `found=${routes.length}`);
+
+  // Map each route to its handler body (slice to the next registration) and whether it's guarded.
+  const gatedOf = (verb, path) => {
+    const i = routes.findIndex((r) => r.verb === verb && r.path === path);
+    if (i === -1) return null; // not found — caller asserts on null to surface the miss
+    const start = routes[i].index;
+    const end = i + 1 < routes.length ? routes[i + 1].index : src.length;
+    return src.slice(start, end).includes("isLocalRequest(");
+  };
+
+  // Every state-mutating endpoint MUST carry the loopback guard.
+  const MUST_GATE = [
+    ["post", "/api/playground/call"],
+    ["post", "/api/toolkits/:slug/add"],
+    ["post", "/api/apikeys"],
+    ["delete", "/api/apikeys/:id"],
+    ["put", "/api/settings"],
+    ["post", "/api/webhook/test"],
+    ["put", "/api/triggers"],
+    ["post", "/api/triggers/:id/poll"],
+    ["post", "/api/triggers/:id/pause"],
+    ["post", "/api/triggers/:id/resume"],
+    ["post", "/api/connect/:provider"],
+    ["post", "/api/servers/:id/toggle"],
+    ["delete", "/api/servers/:id"],
+  ];
+  for (const [verb, path] of MUST_GATE) {
+    assert(`mutator ${verb.toUpperCase()} ${path} is loopback-gated`, gatedOf(verb, path) === true, gatedOf(verb, path) === null ? "ROUTE NOT FOUND" : "");
+  }
+
+  // Read endpoints are intentionally ungated (no isLocalRequest) — proves the scan discriminates and
+  // that we didn't over-gate read traffic a tunnelled dashboard legitimately serves.
+  const MUST_NOT_GATE = [
+    ["get", "/api/state"],
+    ["get", "/api/audit"],
+    ["get", "/api/usage"],
+    ["get", "/api/catalog"],
+    ["get", "/api/apikeys"], // listing keys (metadata only) is intentionally readable
+  ];
+  for (const [verb, path] of MUST_NOT_GATE) {
+    assert(`read ${verb.toUpperCase()} ${path} is intentionally NOT loopback-gated`, gatedOf(verb, path) === false, gatedOf(verb, path) === null ? "ROUTE NOT FOUND" : "");
+  }
+
+  // The OAuth authorization-server flow MUST be tunnel-reachable (a remote agent completes consent),
+  // so it deliberately carries NO loopback guard — it's protected by pending_id/state validation
+  // instead. Asserting the absence documents the design decision and prevents an accidental gate that
+  // would break the OAuth handshake.
+  assert("OAuth POST /oauth/consent is deliberately NOT loopback-gated (state-protected, tunnel-reachable)", gatedOf("post", "/oauth/consent") === false, gatedOf("post", "/oauth/consent") === null ? "ROUTE NOT FOUND" : "");
 }
 
 const failed = checks.filter((c) => !c.ok);

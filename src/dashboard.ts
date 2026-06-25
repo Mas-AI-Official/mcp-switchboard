@@ -58,8 +58,13 @@ function presentedToken(req: Request): string | null {
   return null;
 }
 
-/** True if the request originated from the local machine (loopback peer address). */
-function isLocalRequest(req: Request): boolean {
+/**
+ * True if the request originated from the local machine (loopback peer address). Every state-mutating
+ * dashboard endpoint gates on this so a tunnelled/exposed dashboard can't mint a key, connect an
+ * account, toggle/remove a server, or rewrite settings from off-box. Exported so the deterministic
+ * oracle can prove the loopback verdict without a live server.
+ */
+export function isLocalRequest(req: Request): boolean {
   const ip = req.ip ?? req.socket.remoteAddress ?? "";
   return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1" || ip.startsWith("127.");
 }
@@ -702,6 +707,10 @@ export async function startDashboard(
   });
 
   app.post("/api/connect/:provider", (req: Request, res: Response) => {
+    if (!isLocalRequest(req)) {
+      res.status(403).json({ error: "accounts can only be connected from the local machine" });
+      return;
+    }
     try {
       const { authorizeUrl } = gateway.oauth.beginAuth(String(req.params.provider), redirectUri);
       res.json({ authorizeUrl });
@@ -736,6 +745,10 @@ export async function startDashboard(
   });
 
   app.post("/api/servers/:id/toggle", async (req: Request, res: Response) => {
+    if (!isLocalRequest(req)) {
+      res.status(403).json({ error: "servers can only be toggled from the local machine" });
+      return;
+    }
     const id = req.params.id;
     const server = cfg.servers.find((s) => s.id === id);
     if (!server) {
