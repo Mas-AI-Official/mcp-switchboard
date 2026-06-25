@@ -10,6 +10,8 @@
  *   switchboard catalog              list OAuth providers + connection status
  *   switchboard connect <provider>   authorize a provider via local loopback OAuth
  *   switchboard install <client>     wire Switchboard into an MCP client's config
+ *   switchboard local-llm            detect a local LLM server for the offline council
+ *   switchboard local-llm wire       wire a detected local server into the council
  *   switchboard toolkits sync        rebuild the integration catalog from open indexes
  *   switchboard toolkits stats       print catalog counts
  *   switchboard vault set <name>     store a secret (value read from stdin)
@@ -39,6 +41,15 @@ import {
   defaultCatalogPath,
 } from "./catalog.js";
 import { SUPPORTED_CLIENTS, buildPlan, writePlan, type ClientId } from "./clients.js";
+import {
+  KNOWN_RUNTIMES,
+  probeRuntime,
+  probeAll,
+  pickDefaultModel,
+  buildLocalProvider,
+  withLocalProvider,
+  installGuide,
+} from "./localllm.js";
 import { log, out } from "./logger.js";
 
 const DEFAULT_CONFIG = "switchboard.config.yaml";
@@ -355,6 +366,95 @@ program
         log.ok(`${plan.existed ? "updated" : "wrote"} ${plan.target.label} config → ${plan.target.path}`);
       }
       for (const note of plan.notes) out(`  → ${note}`);
+    },
+  );
+
+const llmCmd = program
+  .command("local-llm")
+  .description("detect a local OpenAI-compatible LLM server (Ollama/LM Studio/llama.cpp/vLLM) for the offline council")
+  .action(async () => {
+    out("\nProbing localhost for OpenAI-compatible model servers…");
+    const results = await probeAll();
+    const live = results.filter((r) => r.reachable);
+    if (live.length === 0) {
+      log.warn("no local model server reachable on the usual ports.");
+      out("\nRun a model locally — Switchboard never downloads or runs anything for you, so copy/paste these:\n");
+      for (const step of installGuide()) out(`  • ${step}`);
+      return;
+    }
+    out("");
+    for (const r of live) {
+      const n = r.models.length;
+      out(`  ${r.runtime.label.padEnd(26)} ${r.runtime.baseUrl}  (${n} model${n === 1 ? "" : "s"})`);
+      for (const m of r.models.slice(0, 8)) out(`      - ${m}`);
+      if (r.models.length > 8) out(`      … and ${r.models.length - 8} more`);
+    }
+    out("\nWire one into the council: `switchboard local-llm wire` (uses the first reachable server + a sensible model).");
+  });
+
+llmCmd
+  .command("wire")
+  .description("write the detected local server into settings.council.providers.local")
+  .option("--runtime <id>", `which runtime to wire (${KNOWN_RUNTIMES.map((r) => r.id).join(", ")})`)
+  .option("--base-url <url>", "override the OpenAI-compatible base URL (skips probing)")
+  .option("--model <id>", "force a specific model id")
+  .option("--print", "print the resulting provider block without writing it")
+  .action(
+    async (opts: { runtime?: string; baseUrl?: string; model?: string; print?: boolean }) => {
+      const cfgPath = configPath();
+      const cfg = loadConfig(cfgPath);
+
+      let baseUrl: string;
+      let model: string | undefined = opts.model;
+
+      if (opts.baseUrl) {
+        baseUrl = opts.baseUrl;
+        if (!model) {
+          const trimmed = opts.baseUrl.replace(/\/$/, "");
+          const probe = await probeRuntime({ id: "custom", label: "custom", baseUrl: trimmed, modelsUrl: `${trimmed}/models` });
+          model = pickDefaultModel(probe.models);
+        }
+      } else {
+        const results = await probeAll();
+        const live = results.filter((r) => r.reachable && r.models.length > 0);
+        const chosen = opts.runtime ? live.find((r) => r.runtime.id === opts.runtime) : live[0];
+        if (!chosen) {
+          log.error(
+            opts.runtime
+              ? `runtime '${opts.runtime}' is not reachable with a loaded model.`
+              : "no local model server with a loaded model was reachable.",
+          );
+          out("Run `switchboard local-llm` for setup steps, or pass --base-url to wire one manually.");
+          process.exitCode = 1;
+          return;
+        }
+        baseUrl = chosen.runtime.baseUrl;
+        if (!model) model = pickDefaultModel(chosen.models);
+      }
+
+      if (!model) {
+        log.error("no model id available — load a model first (e.g. `ollama pull llama3.1`) or pass --model.");
+        process.exitCode = 1;
+        return;
+      }
+
+      const provider = buildLocalProvider(baseUrl, model);
+      const { config, changed, enabled, note } = withLocalProvider(cfg, provider);
+
+      if (opts.print) {
+        out("\n# settings.council.providers.local\n");
+        out(JSON.stringify(provider, null, 2));
+        if (note) out(`\nnote: ${note}`);
+        return;
+      }
+      if (!changed) {
+        log.ok(`council already wired to ${baseUrl} (${model}) — no change`);
+      } else {
+        writeConfig(cfgPath, config);
+        log.ok(`wired local council provider → ${baseUrl} (model: ${model})`);
+      }
+      if (note) out(`  → ${note}`);
+      else if (enabled) out("  → council is enabled; run `switchboard serve`, then call `council_consult` / `council_debate`.");
     },
   );
 
