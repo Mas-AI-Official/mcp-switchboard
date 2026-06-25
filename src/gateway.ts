@@ -32,6 +32,7 @@ import { Router } from "./router.js";
 import { TriggerManager } from "./triggers.js";
 import { setStdioActive } from "./approval.js";
 import { buildCouncilServer, COUNCIL_SERVER_ID } from "./council.js";
+import { retryDelay, resolveMountRetry } from "./retry.js";
 import { log } from "./logger.js";
 
 const NAME = "switchboard";
@@ -44,6 +45,11 @@ export class Gateway {
   readonly registry: Registry;
   readonly router: Router;
   readonly triggers: TriggerManager;
+
+  /** Pending background remount timers, tracked so `shutdown()` can cancel every one — a
+   *  scheduled retry must never resurrect a server after the gateway has been torn down. */
+  private readonly pendingRetries = new Set<NodeJS.Timeout>();
+  private shuttingDown = false;
 
   constructor(private readonly cfg: SwitchboardConfig) {
     this.vault = new Vault(cfg.vault.backend);
@@ -64,9 +70,53 @@ export class Gateway {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         log.error(`failed to mount '${server.id}': ${msg}`);
+        // Self-heal: a transient failure (slow upstream, DNS blip, child still warming up)
+        // is retried in the background on a capped backoff instead of staying dead-until-restart.
+        this.scheduleRemount(server, 1);
       }
     }
     await this.mountCouncil();
+  }
+
+  /**
+   * Schedule the `attempt`-th background remount of a server that failed to mount, on the capped
+   * exponential backoff from `retry.ts`. Returns silently when retry is disabled, and logs one
+   * give-up line when the attempts are spent. The timer is `unref()`'d so a pending retry can
+   * never keep the process alive, and tracked in `pendingRetries` so `shutdown()` can cancel it.
+   */
+  private scheduleRemount(server: ServerConfig, attempt: number): void {
+    if (this.shuttingDown) return;
+    const policy = resolveMountRetry(this.cfg.settings?.mount_retry);
+    if (!policy.enabled || policy.max_attempts <= 0) return; // retry off — dead-until-restart
+    const delay = retryDelay(attempt, policy);
+    if (delay === null) {
+      log.error(
+        `gave up mounting '${server.id}' after ${policy.max_attempts} ` +
+          `${policy.max_attempts === 1 ? "retry" : "retries"}`,
+      );
+      return;
+    }
+    log.info(`will retry mount of '${server.id}' in ${delay}ms (attempt ${attempt}/${policy.max_attempts})`);
+    const timer = setTimeout(() => {
+      this.pendingRetries.delete(timer);
+      void this.attemptRemount(server, attempt);
+    }, delay);
+    timer.unref();
+    this.pendingRetries.add(timer);
+  }
+
+  /** One background mount attempt; reschedules the next on failure. Idempotent via the registry
+   *  (a mount that has since succeeded by another path is a no-op). */
+  private async attemptRemount(server: ServerConfig, attempt: number): Promise<void> {
+    if (this.shuttingDown) return;
+    try {
+      await this.registry.mount(server);
+      log.ok(`recovered '${server.id}' on retry ${attempt}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error(`retry ${attempt} to mount '${server.id}' failed: ${msg}`);
+      this.scheduleRemount(server, attempt + 1);
+    }
   }
 
   /**
@@ -150,6 +200,10 @@ export class Gateway {
   }
 
   async shutdown(): Promise<void> {
+    this.shuttingDown = true;
+    // Cancel every pending background remount so a dead server can't resurrect after shutdown.
+    for (const timer of this.pendingRetries) clearTimeout(timer);
+    this.pendingRetries.clear();
     // Stop pollers before unmounting so an in-flight poll can't hit a torn-down upstream.
     this.triggers.stop();
     await this.registry.unmountAll();

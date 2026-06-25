@@ -93,6 +93,17 @@ const resilience = z
   })
   .strict();
 
+const mountRetry = z
+  .object({
+    enabled: z.boolean().optional(),
+    // 0 disables retry; cap the count so a misconfig can't schedule an unbounded chain.
+    max_attempts: z.number().int().min(0).max(100).optional(),
+    base_ms: z.number().int().positive().max(3600000).optional(),
+    factor: z.number().positive().max(60).optional(),
+    max_ms: z.number().int().positive().max(3600000).optional(),
+  })
+  .strict();
+
 const toolOverride = z
   .object({
     enabled: z.boolean().optional(),
@@ -311,6 +322,8 @@ const settings = z
     limits: limitSpec.optional(),
     // Gateway-wide circuit-breaker default; per-server override via server.resilience.
     resilience: resilience.optional(),
+    // Self-healing mounts: retry a server that fails to mount at boot, on a capped backoff.
+    mount_retry: mountRetry.optional(),
   })
   .strict()
   .refine((s) => !s.active_profile || (s.profiles !== undefined && s.active_profile in s.profiles), {

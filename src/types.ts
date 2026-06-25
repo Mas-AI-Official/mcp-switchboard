@@ -78,6 +78,24 @@ export interface ResilienceConfig {
   cooldown_seconds?: number;
 }
 
+/**
+ * Self-healing mount policy. When an upstream fails to mount at boot, the Gateway retries it in
+ * the background on a capped exponential backoff (computed in `retry.ts`) rather than leaving it
+ * dead until restart. Opt-out via `enabled: false`; every field defaults (see `DEFAULT_MOUNT_RETRY`).
+ */
+export interface MountRetryConfig {
+  /** Master switch. Default true — a failed mount self-heals unless explicitly disabled. */
+  enabled?: boolean;
+  /** Total background attempts after the initial failure. 0 disables retry. Default 5. */
+  max_attempts?: number;
+  /** Delay before the first retry, in ms. Default 1000. */
+  base_ms?: number;
+  /** Multiplier applied to the delay each subsequent attempt. Default 2. */
+  factor?: number;
+  /** Ceiling on any single delay, in ms — backoff never grows past this. Default 30000. */
+  max_ms?: number;
+}
+
 /** Schema-shaping rules applied to a tool's exposed input schema before agents see it. */
 export interface SchemaModifier {
   /** Parameters removed from the exposed schema (and from `required`). */
@@ -314,6 +332,13 @@ export interface SettingsConfig {
    * instead of hanging on a dead server. Override or exempt individual servers via `server.resilience`.
    */
   resilience?: ResilienceConfig;
+  /**
+   * Self-healing mounts. When a server fails to mount at boot (transient DNS, an upstream still
+   * warming up, a stdio-child race), Switchboard retries it in the background on a capped
+   * exponential backoff instead of leaving it dead until restart. On by default; set
+   * `enabled: false` to disable, or tune the schedule. See `MountRetryConfig`.
+   */
+  mount_retry?: MountRetryConfig;
 }
 
 /**
