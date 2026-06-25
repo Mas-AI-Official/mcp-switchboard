@@ -34,9 +34,27 @@ import {
   removedRequiredNotInjected,
 } from "./transforms.js";
 import { SB_ERR, SB_HINTS, type SbErrorCode } from "./errors.js";
+import { rankBm25, type RankDoc } from "./search-index.js";
 import { log } from "./logger.js";
 
 const SEP = "__";
+
+/**
+ * Per-field weights + length-normalization for the BM25F tool ranker (see search-index.ts).
+ * Intent: a query term landing in the tool *name* outranks the same term in a *tag*, which
+ * outranks an input *property*, which outranks a mention deep in the *description*. Keyword-ish
+ * fields (name/tags/props) use b=0 (length is meaningless for a 2-word name or a tag list);
+ * the prose description uses full length normalization so a terse, on-point description isn't
+ * beaten by a sprawling one that merely happens to contain the term.
+ */
+const SEARCH_FIELDS = {
+  name: { weight: 6, b: 0 },
+  tags: { weight: 4, b: 0 },
+  props: { weight: 2, b: 0 },
+  description: { weight: 1, b: 0.75 },
+} as const;
+/** Multiplier applied to an operator-flagged (`important`) tool's BM25F score. */
+const IMPORTANT_BOOST = 1.5;
 
 /** Meta-tool names exposed in `search` mode. Bare names — they cannot collide with a
  *  namespaced upstream tool, which always contains the `__` separator. */
@@ -226,7 +244,7 @@ export class Router {
     return out;
   }
 
-  /** Rank the exposed tools against a free-text query. Dependency-free keyword scoring, with
+  /** Rank the exposed tools against a free-text query with BM25F (see search-index.ts), with
    *  optional pre-filtering by server id and by annotation tag. A tool passes the tag filter
    *  only if it POSITIVELY asserts every requested hint (`annotations[tag] === true`). */
   private search(
@@ -235,8 +253,7 @@ export class Router {
     serverFilter?: Set<string>,
     tagFilter?: Set<string>,
   ): Tool[] {
-    const lcQuery = query.toLowerCase();
-    const tokens = lcQuery.split(/[^a-z0-9]+/).filter(Boolean);
+    const lcQuery = query.trim().toLowerCase();
 
     let pool = this.exposed();
     if (serverFilter && serverFilter.size) pool = pool.filter((e) => serverFilter.has(e.server.id));
@@ -247,31 +264,30 @@ export class Router {
       });
     }
 
-    const scored = pool.map(({ exposedName, server, tool }) => {
-      const name = exposedName.toLowerCase();
-      const desc = (tool.description ?? "").toLowerCase();
+    // Build one BM25F document per exposed tool: name / tags / input-property names / description.
+    const docs: RankDoc[] = pool.map(({ exposedName, server, tool }) => {
       const override = server.config.tools?.[tool.name];
-      const propNames = this.schemaPropNames(tool).map((p) => p.toLowerCase());
-      const toolTags = (override?.tags ?? []).map((t) => t.toLowerCase());
-      let score = 0;
-      if (name === lcQuery) score += 10; // exact tool-name match jumps to the top
-      for (const t of tokens) {
-        if (name.includes(t)) score += 3;
-        if (desc.includes(t)) score += 1;
-        if (propNames.some((p) => p.includes(t))) score += 1; // input-property token
-        if (toolTags.includes(t)) score += 2; // operator-assigned tag token
-      }
-      // Phrase bonus: the whole query landing in the description is a strong signal.
-      if (tokens.length > 1 && desc.includes(lcQuery)) score += 2;
-      if (override?.important) score += 5; // operator-flagged important tool
-      return { score, tool: { ...tool, name: exposedName } as Tool };
+      return {
+        id: exposedName,
+        boost: override?.important ? IMPORTANT_BOOST : 1,
+        exact: exposedName.toLowerCase() === lcQuery,
+        fields: [
+          { key: "name", text: exposedName, weight: SEARCH_FIELDS.name.weight, b: SEARCH_FIELDS.name.b },
+          { key: "tags", text: (override?.tags ?? []).join(" "), weight: SEARCH_FIELDS.tags.weight, b: SEARCH_FIELDS.tags.b },
+          { key: "props", text: this.schemaPropNames(tool).join(" "), weight: SEARCH_FIELDS.props.weight, b: SEARCH_FIELDS.props.b },
+          { key: "description", text: tool.description ?? "", weight: SEARCH_FIELDS.description.weight, b: SEARCH_FIELDS.description.b },
+        ],
+      };
     });
 
-    const ranked = scored.filter((s) => s.score > 0).sort((a, b) => b.score - a.score);
-    // No keyword hits → fall back to the first N tools (already server/tag-filtered) so the
+    const ranked = rankBm25(docs, query, { limit });
+    if (ranked.length > 0) {
+      const byId = new Map(pool.map((e) => [e.exposedName, e.tool]));
+      return ranked.map((r) => ({ ...byId.get(r.id)!, name: r.id }) as Tool);
+    }
+    // No term matched → fall back to the first N tools (already server/tag-filtered) so the
     // agent still gets a catalogue narrowed to what it asked for.
-    const result = ranked.length > 0 ? ranked.map((s) => s.tool) : scored.map((s) => s.tool);
-    return result.slice(0, limit);
+    return pool.slice(0, limit).map(({ exposedName, tool }) => ({ ...tool, name: exposedName }) as Tool);
   }
 
   /** Resolve a downstream tool name back to its upstream (server, realToolName). */
