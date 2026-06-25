@@ -9,6 +9,7 @@
  *   switchboard doctor               check the environment + config
  *   switchboard catalog              list OAuth providers + connection status
  *   switchboard connect <provider>   authorize a provider via local loopback OAuth
+ *   switchboard install <client>     wire Switchboard into an MCP client's config
  *   switchboard toolkits sync        rebuild the integration catalog from open indexes
  *   switchboard toolkits stats       print catalog counts
  *   switchboard vault set <name>     store a secret (value read from stdin)
@@ -21,6 +22,7 @@ import { existsSync } from "node:fs";
 import { createServer } from "node:http";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline";
+import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import { loadConfig, writeConfig, starterConfig } from "./config.js";
 import { createGateway } from "./gateway.js";
@@ -36,6 +38,7 @@ import {
   writeCatalog,
   defaultCatalogPath,
 } from "./catalog.js";
+import { SUPPORTED_CLIENTS, buildPlan, writePlan, type ClientId } from "./clients.js";
 import { log, out } from "./logger.js";
 
 const DEFAULT_CONFIG = "switchboard.config.yaml";
@@ -305,6 +308,55 @@ program
       });
     });
   });
+
+program
+  .command("install <client>")
+  .description(`wire Switchboard into an MCP client's config (${SUPPORTED_CLIENTS.join(", ")})`)
+  .option("--global", "write the client's user/global config instead of a project-local one")
+  .option("--dir <path>", "project directory for project-local configs (default: cwd)")
+  .option("--name <name>", "server name to register under", "switchboard")
+  .option("--print", "print the resulting config without writing it")
+  .action(
+    (
+      client: string,
+      opts: { global?: boolean; dir?: string; name: string; print?: boolean },
+    ) => {
+      if (!SUPPORTED_CLIENTS.includes(client as ClientId)) {
+        log.error(`unknown client '${client}' — supported: ${SUPPORTED_CLIENTS.join(", ")}`);
+        process.exitCode = 1;
+        return;
+      }
+      const cfgPath = configPath();
+      const cfg = loadConfig(cfgPath);
+      // import.meta.url is dist/cli.js at runtime — exactly what a stdio launcher must exec.
+      const cliPath = fileURLToPath(import.meta.url);
+      const plan = buildPlan(client as ClientId, {
+        name: opts.name,
+        endpoint: {
+          host: cfg.gateway.http.host,
+          port: cfg.gateway.http.port,
+          requireAuth: cfg.gateway.http.require_auth,
+        },
+        launcher: { command: process.execPath, cliPath, configPath: cfgPath },
+        global: opts.global,
+        baseDir: opts.dir ? resolve(opts.dir) : undefined,
+      });
+
+      if (opts.print) {
+        out(`\n# ${plan.target.label} — ${plan.target.path}\n`);
+        out(plan.content);
+        for (const note of plan.notes) out(`note: ${note}`);
+        return;
+      }
+      if (plan.existed && !plan.changed) {
+        log.ok(`${plan.target.label} already points at this Switchboard (${plan.target.path}) — no change`);
+      } else {
+        writePlan(plan);
+        log.ok(`${plan.existed ? "updated" : "wrote"} ${plan.target.label} config → ${plan.target.path}`);
+      }
+      for (const note of plan.notes) out(`  → ${note}`);
+    },
+  );
 
 const vaultCmd = program.command("vault").description("manage locally-stored secrets");
 
