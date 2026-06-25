@@ -16,6 +16,9 @@
 //   depth/size/uncapturable guards    — depth>6 cap, 4096-byte truncation marker, circular → "[uncapturable]".
 //   audit/recentAudit/usageStats      — append-only write under an isolated SWITCHBOARD_HOME, newest-first
 //                                       read, and allow/deny/approval + by_day/top_tools/by_server aggregation.
+//   classifyOutcome + outcome tally   — OUTCOME (what happened) is kept distinct from DECISION (did we
+//                                       allow it): an allowed-but-failed call counts as `error`, not a
+//                                       win, and the SB_* error-code taxonomy is tallied. success+error===allow.
 // Zero deps (node stdlib + the package's own compiled output). Run `npm run build` first.
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -25,7 +28,7 @@ import { join } from "node:path";
 // (vault.ts reads SWITCHBOARD_HOME there), so this redirects every write away from the real ~/.switchboard.
 process.env.SWITCHBOARD_HOME = mkdtempSync(join(tmpdir(), "sb-audit-"));
 
-const { sanitizeForAudit, audit, recentAudit, usageStats } = await import("../dist/audit.js");
+const { sanitizeForAudit, audit, recentAudit, usageStats, classifyOutcome } = await import("../dist/audit.js");
 const { injectedArgKeys, applyArgTransforms } = await import("../dist/transforms.js");
 
 const checks = [];
@@ -200,6 +203,45 @@ const SECRET = "SUPERSECRET-7f3a";
   const srv = Object.fromEntries(u.by_server.map((s) => [s.server, s.count]));
   assert("usageStats by_server totals per server", srv.gmail === 3 && srv.slack === 1, JSON.stringify(srv));
   assert("usageStats by_server is descending", u.by_server[0].count >= u.by_server[u.by_server.length - 1].count);
+}
+
+// --- 11. OUTCOME vs DECISION: an allowed-but-failed call is NOT a success ---------------------------
+{
+  // classifyOutcome is a pure function of (decision, error, error_code) — pin every branch directly,
+  // independent of any disk state. This is the contract usageStats relies on.
+  assert("classify: deny → denied", classifyOutcome({ decision: "deny" }) === "denied");
+  assert("classify: approval_required → approval_required", classifyOutcome({ decision: "approval_required" }) === "approval_required");
+  assert("classify: clean allow → success", classifyOutcome({ decision: "allow" }) === "success");
+  assert("classify: allow + error string → error", classifyOutcome({ decision: "allow", error: "boom" }) === "error");
+  assert("classify: allow + error_code only → error", classifyOutcome({ decision: "allow", error_code: "SB_UPSTREAM_TIMEOUT" }) === "error");
+
+  // Seed three MORE rows into the same isolated log: allowed calls that FAILED upstream. The decision
+  // tally still counts them as `allow` (governance DID permit them) — the honesty is in the outcome split.
+  const before = usageStats(); // { total:4, allow:2, ... } from sections 9–10
+  audit({ server: "gmail", tool: "send", scope: "write", decision: "allow", reason: "permitted", error: "upstream 500", error_code: "SB_UPSTREAM_ERROR" });
+  audit({ server: "gmail", tool: "send", scope: "write", decision: "allow", reason: "permitted", error_code: "SB_UPSTREAM_TIMEOUT" });
+  audit({ server: "weather", tool: "get", scope: "read", decision: "allow", reason: "permitted", error: "nope", error_code: "SB_UPSTREAM_ERROR" });
+
+  const u = usageStats();
+  assert("decision tally still counts allowed-but-failed as allow", u.allow === before.allow + 3, `allow=${u.allow}`);
+  assert("total grew by exactly the 3 new rows", u.total === before.total + 3, `total=${u.total}`);
+
+  // The core invariant: outcomes partition the decisions. success+error === allow; the other two match 1:1.
+  assert("outcomes.success + outcomes.error === allow", u.outcomes.success + u.outcomes.error === u.allow, JSON.stringify(u.outcomes));
+  assert("outcomes.denied === deny", u.outcomes.denied === u.deny);
+  assert("outcomes.approval_required === approval_required", u.outcomes.approval_required === u.approval_required);
+  assert("every row lands in exactly one outcome bucket", u.outcomes.success + u.outcomes.error + u.outcomes.denied + u.outcomes.approval_required === u.total, JSON.stringify(u.outcomes));
+
+  // The lie this fixes: the 2 clean sends stay `success`, the 3 failed allows become `error` (NOT counted as wins).
+  assert("clean allows counted as success (the 2 from §9)", u.outcomes.success === 2, `success=${u.outcomes.success}`);
+  assert("allowed-but-failed counted as error, not success", u.outcomes.error === 3, `error=${u.outcomes.error}`);
+
+  // error_codes taxonomy is tallied and sorted descending; the deny row (no error_code) is absent.
+  const codes = Object.fromEntries(u.error_codes.map((c) => [c.code, c.count]));
+  assert("error_codes tallies SB_UPSTREAM_ERROR (×2)", codes.SB_UPSTREAM_ERROR === 2, JSON.stringify(u.error_codes));
+  assert("error_codes tallies SB_UPSTREAM_TIMEOUT (×1)", codes.SB_UPSTREAM_TIMEOUT === 1, JSON.stringify(u.error_codes));
+  assert("error_codes excludes rows with no code (the deny row)", u.error_codes.reduce((s, c) => s + c.count, 0) === u.outcomes.error, JSON.stringify(u.error_codes));
+  assert("error_codes is sorted descending by count", u.error_codes[0].count >= u.error_codes[u.error_codes.length - 1].count, JSON.stringify(u.error_codes));
 }
 
 const failed = checks.filter((c) => !c.ok);

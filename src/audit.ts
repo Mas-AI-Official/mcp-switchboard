@@ -73,6 +73,25 @@ function redact(value: unknown, depth: number, secretKeys?: ReadonlySet<string>)
   return out;
 }
 
+/**
+ * The OUTCOME of a row, distinct from its governance `decision`.
+ *
+ * `decision` answers "did governance allow it?"; `outcome` answers "what actually happened?".
+ * They are NOT the same: an allowed call can still fail upstream (an error result, a throw, a
+ * timeout). Counting every `allow` as a success — which the raw decision tally does — overstates
+ * health, so the Usage aggregation derives outcome here instead. Outcome is computed, never
+ * persisted, so it can never drift from the `error`/`error_code` already on the row (the single
+ * source of truth). Both the aggregator and any row-level consumer call this one function.
+ */
+export type AuditOutcome = "success" | "error" | "denied" | "approval_required";
+
+export function classifyOutcome(entry: Pick<AuditEntry, "decision" | "error" | "error_code">): AuditOutcome {
+  if (entry.decision === "deny") return "denied";
+  if (entry.decision === "approval_required") return "approval_required";
+  // decision === "allow": governance permitted it — but the call itself may have failed.
+  return entry.error || entry.error_code ? "error" : "success";
+}
+
 /** Most recent entries first. */
 export function recentAudit(limit = 100): AuditEntry[] {
   if (!existsSync(AUDIT_PATH)) return [];
@@ -93,9 +112,15 @@ export function recentAudit(limit = 100): AuditEntry[] {
 /** Aggregated tool-call usage for the Usage page. Composio meters on tool calls; so do we. */
 export interface UsageStats {
   total: number;
+  /** Governance-decision tally (did we allow / deny / hold it?). `allow` = success + error. */
   allow: number;
   deny: number;
   approval_required: number;
+  /** OUTCOME tally — what actually happened — so an allowed-but-failed call isn't counted as a
+   *  win. `success + error === allow`; `denied === deny`; `approval_required` matches the decision. */
+  outcomes: { success: number; error: number; denied: number; approval_required: number };
+  /** Why failures happened: `SB_*` error-code counts, descending. Empty when nothing failed. */
+  error_codes: { code: string; count: number }[];
   /** Tool-call counts per UTC day (YYYY-MM-DD), oldest first. */
   by_day: { day: string; count: number }[];
   /** Busiest tools, descending, capped. */
@@ -109,16 +134,22 @@ export interface UsageStats {
  * full read cheap; we cap the scan to the last `cap` lines as a runaway guard.
  */
 export function usageStats(cap = 50_000): UsageStats {
-  const empty: UsageStats = { total: 0, allow: 0, deny: 0, approval_required: 0, by_day: [], top_tools: [], by_server: [] };
+  const empty: UsageStats = {
+    total: 0, allow: 0, deny: 0, approval_required: 0,
+    outcomes: { success: 0, error: 0, denied: 0, approval_required: 0 },
+    error_codes: [], by_day: [], top_tools: [], by_server: [],
+  };
   if (!existsSync(AUDIT_PATH)) return empty;
   const lines = readFileSync(AUDIT_PATH, "utf8").trim().split("\n").filter(Boolean).slice(-cap);
 
   let allow = 0,
     deny = 0,
     approval = 0;
+  const outcomes = { success: 0, error: 0, denied: 0, approval_required: 0 };
   const byDay = new Map<string, number>();
   const byTool = new Map<string, { server: string; count: number }>();
   const byServer = new Map<string, number>();
+  const byErrorCode = new Map<string, number>();
 
   for (const line of lines) {
     let e: AuditEntry;
@@ -130,6 +161,10 @@ export function usageStats(cap = 50_000): UsageStats {
     if (e.decision === "allow") allow++;
     else if (e.decision === "deny") deny++;
     else if (e.decision === "approval_required") approval++;
+
+    // Outcome is derived (decision + error), so an allowed-but-failed call lands in `error`, not `success`.
+    outcomes[classifyOutcome(e)]++;
+    if (e.error_code) byErrorCode.set(e.error_code, (byErrorCode.get(e.error_code) ?? 0) + 1);
 
     const day = (e.ts || "").slice(0, 10);
     if (day) byDay.set(day, (byDay.get(day) ?? 0) + 1);
@@ -146,6 +181,8 @@ export function usageStats(cap = 50_000): UsageStats {
     allow,
     deny,
     approval_required: approval,
+    outcomes,
+    error_codes: [...byErrorCode.entries()].map(([code, count]) => ({ code, count })).sort((a, b) => b.count - a.count),
     by_day: [...byDay.entries()].map(([day, count]) => ({ day, count })).sort((a, b) => a.day.localeCompare(b.day)),
     top_tools: [...byTool.entries()]
       .map(([key, v]) => ({ tool: key.includes("__") ? key.slice(key.indexOf("__") + 2) : key, server: v.server, count: v.count }))
