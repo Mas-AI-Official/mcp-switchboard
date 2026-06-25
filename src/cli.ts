@@ -27,6 +27,12 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import { loadConfig, writeConfig, starterConfig } from "./config.js";
+import type { SwitchboardConfig } from "./types.js";
+import {
+  applyProfileEnvOverride,
+  describeProfile,
+  withActiveProfile,
+} from "./profiles.js";
 import { createGateway } from "./gateway.js";
 import { startDashboard } from "./dashboard.js";
 import { runExpose, TUNNEL_KINDS, type TunnelKind } from "./expose.js";
@@ -65,6 +71,17 @@ function configPath(): string {
   return resolve(program.opts().config as string);
 }
 
+/**
+ * Load the config AND fold the `SWITCHBOARD_PROFILE` env var into the active profile, so every
+ * runtime boot path (serve/dashboard/expose/list) sees the same effective view. A bad env value
+ * warns but never aborts — a typo in an env var must not stop the server from booting.
+ */
+function bootConfig(path: string): SwitchboardConfig {
+  const { config, note } = applyProfileEnvOverride(loadConfig(path));
+  if (note) log.warn(note);
+  return config;
+}
+
 program
   .command("init")
   .description("create a starter config and home directory")
@@ -85,7 +102,7 @@ program
   .description("run the gateway (transports come from config)")
   .action(async () => {
     const path = configPath();
-    const cfg = loadConfig(path);
+    const cfg = bootConfig(path);
     const gateway = await createGateway(cfg);
 
     const wantsHttp = cfg.gateway.transport.includes("http");
@@ -109,7 +126,7 @@ program
   .description("run only the HTTP endpoint + web console")
   .action(async () => {
     const path = configPath();
-    const cfg = loadConfig(path);
+    const cfg = bootConfig(path);
     const gateway = await createGateway(cfg);
     const handle = await startDashboard(gateway, cfg, path);
     out(`Open ${handle.url}`);
@@ -128,7 +145,7 @@ program
       return;
     }
     const tunnel = opts.tunnel as TunnelKind;
-    const cfg = loadConfig(configPath());
+    const cfg = bootConfig(configPath());
     const port = opts.port ? Number(opts.port) : cfg.gateway.http.port + 1;
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
       log.error(`invalid --port '${opts.port}' — expected an integer 1–65535`);
@@ -152,7 +169,7 @@ program
   .command("list")
   .description("mount every server and print the governed tool list, then exit")
   .action(async () => {
-    const cfg = loadConfig(configPath());
+    const cfg = bootConfig(configPath());
     const gateway = await createGateway(cfg);
     const tools = gateway.router.listTools();
     out(`\n${tools.length} tools exposed:\n`);
@@ -457,6 +474,85 @@ llmCmd
       else if (enabled) out("  → council is enabled; run `switchboard serve`, then call `council_consult` / `council_debate`.");
     },
   );
+
+const profileCmd = program
+  .command("profile")
+  .description("manage named, switchable views over your servers/tools (visibility + optional scope cap)");
+
+profileCmd
+  .command("list")
+  .description("list defined profiles and show which one is active")
+  .action(() => {
+    const cfg = loadConfig(configPath());
+    const profiles = cfg.settings?.profiles ?? {};
+    const names = Object.keys(profiles);
+    if (!names.length) {
+      out("no profiles defined — add them under settings.profiles in your config.");
+      out("a profile can only HIDE servers/tools and LOWER scope, never reveal a disabled tool.");
+      return;
+    }
+    const fileActive = cfg.settings?.active_profile;
+    const { active: effective, note } = applyProfileEnvOverride(cfg);
+    out("");
+    for (const name of names) {
+      const mark = name === effective ? "● " : "  ";
+      out(`${mark}${describeProfile(name, profiles[name]!)}`);
+    }
+    out("");
+    if (effective) out(`active: ${effective}${effective !== fileActive ? " (via SWITCHBOARD_PROFILE)" : ""}`);
+    else out("active: none (every enabled tool is exposed)");
+    if (note) log.warn(note);
+  });
+
+profileCmd
+  .command("show <name>")
+  .description("print a profile's effect and its raw definition")
+  .action((name: string) => {
+    const cfg = loadConfig(configPath());
+    const profile = cfg.settings?.profiles?.[name];
+    if (!profile) {
+      const defined = Object.keys(cfg.settings?.profiles ?? {});
+      log.error(`no profile named '${name}'${defined.length ? ` (defined: ${defined.join(", ")})` : " (none defined)"}`);
+      process.exitCode = 1;
+      return;
+    }
+    out(`\n${describeProfile(name, profile)}\n`);
+    out(JSON.stringify(profile, null, 2));
+  });
+
+profileCmd
+  .command("use <name>")
+  .description("activate a profile (writes settings.active_profile)")
+  .action((name: string) => {
+    const cfgPath = configPath();
+    const cfg = loadConfig(cfgPath);
+    let next: SwitchboardConfig;
+    try {
+      next = withActiveProfile(cfg, name);
+    } catch (err) {
+      log.error(err instanceof Error ? err.message : String(err));
+      process.exitCode = 1;
+      return;
+    }
+    writeConfig(cfgPath, next);
+    log.ok(`active profile → '${name}'`);
+    out(`  ${describeProfile(name, cfg.settings!.profiles![name]!)}`);
+    out("  restart `switchboard serve` for it to take effect.");
+  });
+
+profileCmd
+  .command("clear")
+  .description("deactivate any profile (expose every enabled tool again)")
+  .action(() => {
+    const cfgPath = configPath();
+    const cfg = loadConfig(cfgPath);
+    if (!cfg.settings?.active_profile) {
+      log.ok("no active profile — nothing to clear");
+      return;
+    }
+    writeConfig(cfgPath, withActiveProfile(cfg, undefined));
+    log.ok("active profile cleared — every enabled tool is exposed");
+  });
 
 const vaultCmd = program.command("vault").description("manage locally-stored secrets");
 

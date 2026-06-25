@@ -212,6 +212,16 @@ const triggers = z
   })
   .strict();
 
+const profile = z
+  .object({
+    description: z.string().optional(),
+    servers: z.array(z.string()).optional(),
+    tools: z.array(z.string()).optional(),
+    exclude_tools: z.array(z.string()).optional(),
+    policy: scope.optional(),
+  })
+  .strict();
+
 const settings = z
   .object({
     general: z
@@ -265,8 +275,15 @@ const settings = z
     triggers: triggers.optional(),
     // Hard wall-clock timeout (ms) applied to every upstream tool call. Cap at 10 min.
     call_timeout_ms: z.number().int().positive().max(600000).optional(),
+    // Named switchable views over the configured servers/tools (visibility + optional scope cap).
+    profiles: z.record(z.string(), profile).optional(),
+    active_profile: z.string().optional(),
   })
   .strict()
+  .refine((s) => !s.active_profile || (s.profiles !== undefined && s.active_profile in s.profiles), {
+    message: "settings.active_profile must name a profile defined in settings.profiles",
+    path: ["active_profile"],
+  })
   .optional();
 
 const configSchema = z

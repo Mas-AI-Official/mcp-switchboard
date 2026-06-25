@@ -238,6 +238,55 @@ export interface SettingsConfig {
    * Omitted = no Switchboard-imposed timeout (the transport's own default applies).
    */
   call_timeout_ms?: number;
+  /**
+   * Named, switchable VIEWS over the configured servers/tools. A profile is NOT a new server —
+   * it narrows which already-configured tools are exposed (e.g. a "read-only" profile, a
+   * "coding" profile that hides email tools) and can cap the maximum scope every tool runs at.
+   * Switch with the `SWITCHBOARD_PROFILE` env var or `active_profile`; omit both = no profile
+   * (every enabled tool is exposed, fully backward compatible). See `ProfileConfig`.
+   */
+  profiles?: Record<string, ProfileConfig>;
+  /**
+   * The profile applied when `SWITCHBOARD_PROFILE` is unset. Must name a key in `profiles`.
+   * Omitted = no profile is active. The env var always wins over this.
+   */
+  active_profile?: string;
+}
+
+/**
+ * A profile is a named filter over the already-configured servers/tools — a saved "view" the
+ * operator can switch between without editing server blocks. It controls visibility (which
+ * servers/tools are exposed) and an optional scope ceiling (the hardest scope any tool may run
+ * at while this profile is active). It never grants access a server block didn't already allow:
+ * a profile can only ever HIDE tools and LOWER scope, never reveal a disabled tool or raise a
+ * server's policy. Resolution order for the active profile: `SWITCHBOARD_PROFILE` env var, then
+ * `settings.active_profile`, then none.
+ */
+export interface ProfileConfig {
+  /** Human-readable note shown in `switchboard profile list` and the dashboard. */
+  description?: string;
+  /**
+   * Server-id allowlist. When present, ONLY these servers are exposed (others are hidden
+   * wholesale). Omitted/empty = every enabled server is in scope (subject to `tools`).
+   */
+  servers?: string[];
+  /**
+   * Exposed-tool allowlist, matched against the EXPOSED name (`serverId__toolName` in
+   * namespaced mode, the bare tool name in flat mode). When present, ONLY tools whose exposed
+   * name is listed are visible. Omitted/empty = all tools of the in-scope servers are visible.
+   */
+  tools?: string[];
+  /**
+   * Exposed-tool denylist. Tools whose exposed name is listed are hidden even if `tools`/`servers`
+   * would otherwise expose them. Denylist beats allowlist.
+   */
+  exclude_tools?: string[];
+  /**
+   * Scope ceiling for this profile. Every tool runs at the TIGHTER of its server ceiling and
+   * this value, so a `read` profile forces read-only across the board regardless of server policy.
+   * Omitted = no extra cap (the server/gateway ceiling stands).
+   */
+  policy?: Scope;
 }
 
 /**

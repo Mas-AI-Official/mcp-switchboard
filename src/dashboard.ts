@@ -18,6 +18,7 @@ import type { SwitchboardConfig, SettingsConfig, ServerConfig, CouncilConfig } f
 import { writeConfig, parseTriggersConfig } from "./config.js";
 import { recentAudit, usageStats } from "./audit.js";
 import { inferScope } from "./policy.js";
+import { activeProfileName, describeProfile } from "./profiles.js";
 import { ApiKeyStore } from "./apikeys.js";
 import { loadCatalog, queryCatalog, type CatalogSnapshot, type Toolkit } from "./catalog.js";
 import { listTriggerTemplates } from "./trigger-templates.js";
@@ -301,12 +302,24 @@ export async function startDashboard(
       }));
       return { id: s.id, source: s.source, policy, enabled: s.enabled !== false, tools };
     });
+    // Profiles are named, switchable views (visibility + optional scope cap). The active one is
+    // already folded into `cfg` at boot (env > file), so the dashboard reports the EFFECTIVE view.
+    const definedProfiles = cfg.settings?.profiles ?? {};
+    const profiles = Object.entries(definedProfiles).map(([name, p]) => ({
+      name,
+      description: p.description ?? null,
+      summary: describeProfile(name, p),
+      servers: p.servers ?? null,
+      scope_cap: p.policy ?? null,
+    }));
     res.json({
       endpoint,
       organization: cfg.settings?.general?.organization_name ?? "Local",
       project: cfg.settings?.general?.project_name ?? "default",
       tool_exposure: cfg.gateway.tool_exposure,
       default_policy: cfg.gateway.default_policy,
+      active_profile: activeProfileName(cfg) ?? null,
+      profiles,
       servers,
     });
   });

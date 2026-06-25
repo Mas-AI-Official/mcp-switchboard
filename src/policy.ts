@@ -38,6 +38,7 @@ export function evaluate(
   toolName: string,
   cfg: SwitchboardConfig,
   scopeHint?: Scope,
+  profileCeiling?: Scope,
 ): PolicyDecision {
   const override = server.tools?.[toolName];
 
@@ -49,13 +50,21 @@ export function evaluate(
   // name-based inference. The hint lets OpenAPI HTTP verbs drive scope when the tool name alone
   // (e.g. `findPetsByStatus`) would otherwise be misread.
   const scope: Scope = override?.policy ?? scopeHint ?? inferScope(toolName);
-  const ceiling: Scope = server.policy ?? cfg.gateway.default_policy;
+  // The effective ceiling is the TIGHTEST of the server/gateway cap and the active profile's cap.
+  // A profile can only ever LOWER the ceiling (read < write < full), never raise it — so a
+  // `read` profile forces read-only even on a server configured for `full`.
+  const serverCeiling: Scope = server.policy ?? cfg.gateway.default_policy;
+  const ceiling: Scope =
+    profileCeiling !== undefined && SCOPE_RANK[profileCeiling] < SCOPE_RANK[serverCeiling]
+      ? profileCeiling
+      : serverCeiling;
 
   if (SCOPE_RANK[scope] > SCOPE_RANK[ceiling]) {
+    const cappedBy = ceiling === profileCeiling && ceiling !== serverCeiling ? "active profile" : `server '${server.id}'`;
     return {
       decision: "deny",
       scope,
-      reason: `'${toolName}' needs '${scope}' but server '${server.id}' is capped at '${ceiling}'`,
+      reason: `'${toolName}' needs '${scope}' but ${cappedBy} is capped at '${ceiling}'`,
     };
   }
 

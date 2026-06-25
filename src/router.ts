@@ -24,6 +24,12 @@ import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { Registry, MountedServer } from "./registry.js";
 import type { SwitchboardConfig } from "./types.js";
 import { evaluate } from "./policy.js";
+import {
+  getActiveProfile,
+  profileAllowsServer,
+  profileAllowsTool,
+  profileScopeCeiling,
+} from "./profiles.js";
 import { approve } from "./approval.js";
 import { audit, sanitizeForAudit, type AuditEntry } from "./audit.js";
 import { deliverWebhook, type SecretResolver, type WebhookEvent } from "./webhook.js";
@@ -210,15 +216,22 @@ export class Router {
     const flat = this.mode === "flat";
     const out: ExposedTool[] = [];
     const claimed = new Set<string>();
+    // The active profile (if any) is a VIEW: it can only HIDE servers/tools, never reveal a
+    // disabled one. Resolved once here so listTools()/search() inherit the same filter for free.
+    const active = getActiveProfile(this.cfg)?.profile;
 
     for (const server of this.registry.list()) {
       if (server.config.enabled === false) continue;
+      // A profile's server allowlist hides whole servers before we ever shape their tools.
+      if (!profileAllowsServer(active, server.config.id)) continue;
       for (const tool of server.tools) {
         const override = server.config.tools?.[tool.name];
         // A tool explicitly disabled in config is never exposed at all.
         if (override?.enabled === false) continue;
 
         const exposedName = flat ? tool.name : `${server.config.id}${SEP}${tool.name}`;
+        // A profile's tool allow/deny list hides individual tools by their EXPOSED name.
+        if (!profileAllowsTool(active, exposedName)) continue;
         if (claimed.has(exposedName)) {
           log.warn(`tool name collision on '${exposedName}' — dropping the copy from '${server.id}'`);
           continue;
@@ -385,7 +398,17 @@ export class Router {
 
     const { server, toolName } = target;
     const override = server.config.tools?.[toolName];
-    const verdict = evaluate(server.config, toolName, this.cfg, server.scopeHints?.[toolName]);
+    const active = getActiveProfile(this.cfg)?.profile;
+    const verdict = evaluate(server.config, toolName, this.cfg, server.scopeHints?.[toolName], profileScopeCeiling(active));
+
+    // Defense in depth: a tool hidden by the active profile must also be UNCALLABLE, not merely
+    // absent from the listing. resolve() works off raw upstream names, so a client that names a
+    // hidden tool directly would otherwise bypass the view. Deny it with the same audit trail.
+    const exposedForProfile = this.mode === "flat" ? toolName : `${server.config.id}${SEP}${toolName}`;
+    if (!profileAllowsServer(active, server.config.id) || !profileAllowsTool(active, exposedForProfile)) {
+      this.record({ server: server.id, tool: toolName, scope: verdict.scope, decision: "deny", reason: "hidden by active profile", error_code: SB_ERR.POLICY_DENY });
+      return this.error(`denied by policy: '${exposedName}' is not available in the active profile`, SB_ERR.POLICY_DENY);
+    }
 
     if (verdict.decision === "deny") {
       this.record({ server: server.id, tool: toolName, scope: verdict.scope, decision: "deny", reason: verdict.reason, error_code: SB_ERR.POLICY_DENY });
