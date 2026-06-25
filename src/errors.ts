@@ -18,6 +18,8 @@ export const SB_ERR = {
   UPSTREAM_ERROR: "SB_UPSTREAM_ERROR",
   /** The upstream call exceeded `settings.call_timeout_ms`. */
   UPSTREAM_TIMEOUT: "SB_UPSTREAM_TIMEOUT",
+  /** The server's circuit breaker is open after repeated failures — failing fast instead of hanging. */
+  UPSTREAM_UNAVAILABLE: "SB_UPSTREAM_UNAVAILABLE",
   /** The request itself was malformed (bad/missing arguments). */
   BAD_REQUEST: "SB_BAD_REQUEST",
   /** The call hit a configured rate limit or spend budget (global/server/tool). Fails closed. */
@@ -38,6 +40,8 @@ export const SB_HINTS: Record<SbErrorCode, string> = {
     "The upstream MCP server returned an error. Check that server's credentials and the Logs page for the underlying message.",
   [SB_ERR.UPSTREAM_TIMEOUT]:
     "The upstream call exceeded settings.call_timeout_ms. Raise the timeout, or check whether the upstream server is reachable and responsive.",
+  [SB_ERR.UPSTREAM_UNAVAILABLE]:
+    "This server's circuit breaker is open after repeated transport failures — Switchboard is failing fast instead of hanging on a dead upstream. Wait for the retry window, then it auto-probes; check the upstream server's health and credentials in the meantime. Tune via settings.resilience / server.resilience.",
   [SB_ERR.BAD_REQUEST]:
     "The request was malformed. Check the tool's input schema and that all required arguments are present.",
   [SB_ERR.RATE_LIMITED]:

@@ -61,6 +61,23 @@ export interface LimitSpec {
   cost_per_day?: number;
 }
 
+/**
+ * Per-server circuit-breaker tuning. A reliability control that watches each upstream's TRANSPORT
+ * health (timeouts/throws, NOT well-formed tool error results) and, after repeated failures, fails
+ * fast with an honest `SB_UPSTREAM_UNAVAILABLE` instead of paying a full `call_timeout_ms` on every
+ * call to a dead server. Opt-in: set at `settings.resilience` for a gateway-wide default and/or per
+ * `server.resilience` to override or disable. Off unless `enabled` resolves true.
+ */
+export interface ResilienceConfig {
+  /** Master switch. At `settings.resilience` it defaults the whole gateway; per server it overrides
+   *  (set `false` to exempt one server from a global default). */
+  enabled?: boolean;
+  /** Consecutive transport failures before the breaker opens. Default 5. */
+  failure_threshold?: number;
+  /** Seconds the breaker stays open before it releases one probe call. Default 30. */
+  cooldown_seconds?: number;
+}
+
 /** Schema-shaping rules applied to a tool's exposed input schema before agents see it. */
 export interface SchemaModifier {
   /** Parameters removed from the exposed schema (and from `required`). */
@@ -190,6 +207,9 @@ export interface ServerConfig {
   /** Server-wide rate limits + spend budgets. Stacks under `settings.limits` and over each tool's
    *  `limits` — a call must pass the tool, server, and global ceilings it touches. */
   limits?: LimitSpec;
+  /** Per-server circuit-breaker override. Overrides (or, with `enabled:false`, opts out of) the
+   *  gateway-wide `settings.resilience` default for this server only. */
+  resilience?: ResilienceConfig;
 }
 
 export interface GatewayConfig {
@@ -288,6 +308,12 @@ export interface SettingsConfig {
    * a blast-radius cap on a runaway agent loop or total cross-provider council spend.
    */
   limits?: LimitSpec;
+  /**
+   * Gateway-wide circuit-breaker default. Set `enabled: true` to give every upstream a per-server
+   * breaker that fails fast (with `SB_UPSTREAM_UNAVAILABLE`) after repeated transport failures
+   * instead of hanging on a dead server. Override or exempt individual servers via `server.resilience`.
+   */
+  resilience?: ResilienceConfig;
 }
 
 /**

@@ -42,6 +42,7 @@ import {
 import { SB_ERR, SB_HINTS, type SbErrorCode } from "./errors.js";
 import { rankBm25, type RankDoc } from "./search-index.js";
 import { Governor } from "./governor.js";
+import { Breaker } from "./breaker.js";
 import { log } from "./logger.js";
 
 const SEP = "__";
@@ -85,6 +86,8 @@ interface ExposedTool {
 export class Router {
   /** Rate-limit + spend-budget enforcement, built once from the immutable config for this Router. */
   private readonly governor: Governor;
+  /** Per-server circuit breaker — fails fast on a wedged/dead upstream instead of hanging. */
+  private readonly breaker: Breaker;
 
   constructor(
     private readonly registry: Registry,
@@ -92,6 +95,12 @@ export class Router {
     private readonly resolveSecret: SecretResolver,
   ) {
     this.governor = new Governor(cfg);
+    this.breaker = new Breaker(cfg);
+  }
+
+  /** Read-only health of every server's circuit breaker — for an observability endpoint/dashboard. */
+  serverHealth() {
+    return this.breaker.snapshot(Date.now());
   }
 
   /** Tool keys we've already warned about (shaping removed a required param with no injected
@@ -431,6 +440,17 @@ export class Router {
       return this.error(`rate limited: ${gov.reason}${retry}`, SB_ERR.RATE_LIMITED);
     }
 
+    // Circuit breaker — an AVAILABILITY check after the security controls (policy/scope/limits) and
+    // before the approval gate, so a call to a known-dead upstream fails fast instead of paying the
+    // full call timeout AND never wakes a human for a server that can't answer. Opt-in via
+    // settings.resilience / server.resilience; inert (constant-true) when unconfigured.
+    const health = this.breaker.allow(server.id, Date.now());
+    if (!health.ok) {
+      this.record({ server: server.id, tool: toolName, scope: verdict.scope, decision: "deny", reason: health.reason, error_code: SB_ERR.UPSTREAM_UNAVAILABLE });
+      const retry = health.retryAfterMs && isFinite(health.retryAfterMs) ? ` (retry after ~${Math.ceil(health.retryAfterMs / 1000)}s)` : "";
+      return this.error(`upstream '${server.id}' is unavailable (circuit open)${retry}: ${health.reason}`, SB_ERR.UPSTREAM_UNAVAILABLE);
+    }
+
     // Settle the approval gate before executing. A denied approval is the only path that
     // audits without an execution; everything allowed audits ONCE after the call so the row
     // can carry timing and (opt-in) request/response.
@@ -469,6 +489,9 @@ export class Router {
     const start = Date.now();
     try {
       const raw = (await server.client.callTool({ name: toolName, arguments: finalArgs }, undefined, callOpts)) as CallToolResult;
+      // The server responded — transport is healthy even if the tool returned an error *result*
+      // (a logical "not found" is not an outage). Closes the breaker / clears the failure count.
+      this.breaker.record(server.id, true, Date.now());
       // Redact configured top-level response fields before the agent (or the audit row) sees them.
       const result = applyResponseRedaction(raw, server.config, override);
       this.record({
@@ -483,6 +506,9 @@ export class Router {
       });
       return result;
     } catch (err) {
+      // A throw or timeout is a TRANSPORT failure — count it toward opening the breaker so a
+      // wedged/dead upstream trips fast after N in a row, rather than every call hanging.
+      this.breaker.record(server.id, false, Date.now());
       const timedOut = err instanceof McpError && err.code === ErrorCode.RequestTimeout;
       const code: SbErrorCode = timedOut ? SB_ERR.UPSTREAM_TIMEOUT : SB_ERR.UPSTREAM_ERROR;
       const msg = err instanceof Error ? err.message : String(err);

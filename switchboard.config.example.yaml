@@ -163,6 +163,18 @@ settings:
   # Switchboard-imposed timeout (the transport's own default still applies).
   call_timeout_ms: 30000
 
+  # Circuit breaker — the upstream-resilience a hosted router gives you for free. After N consecutive
+  # TRANSPORT failures (a throw or a timeout — NOT a well-formed tool error result, which means the
+  # server is alive), a server's circuit OPENS: further calls fail FAST with `SB_UPSTREAM_UNAVAILABLE`
+  # ("unavailable, retry in ~Ts") instead of each one paying the full call_timeout_ms. After the
+  # cooldown it auto-probes; one success closes it, a failure re-opens it. Off by default (opt-in).
+  # resilience:
+  #   enabled: true            # gateway-wide default for every server (off unless true)
+  #   failure_threshold: 5     # consecutive transport failures before the circuit opens (default 5)
+  #   cooldown_seconds: 30     # how long it stays open before releasing one probe (default 30)
+  # Per server, override or exempt under `server.resilience` (e.g. `{ enabled: false }` to never trip,
+  # or a tighter `{ failure_threshold: 2 }` for a flaky upstream).
+
 servers:
   # --- mount an existing MCP server from npm ---
   - id: github

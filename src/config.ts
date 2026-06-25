@@ -85,6 +85,14 @@ const limitSpec = z
     message: "a limits block must set at least one ceiling (per_minute/per_hour/per_day or cost_per_*)",
   });
 
+const resilience = z
+  .object({
+    enabled: z.boolean().optional(),
+    failure_threshold: z.number().int().positive().max(1000).optional(),
+    cooldown_seconds: z.number().int().positive().max(86400).optional(),
+  })
+  .strict();
+
 const toolOverride = z
   .object({
     enabled: z.boolean().optional(),
@@ -131,6 +139,7 @@ const serverConfig = z
     tools: z.record(z.string(), toolOverride).optional(),
     approval: approval.optional(),
     limits: limitSpec.optional(),
+    resilience: resilience.optional(),
   })
   .strict();
 
@@ -300,6 +309,8 @@ const settings = z
     active_profile: z.string().optional(),
     // Global rate limits + spend budgets applied to every tool call across all servers.
     limits: limitSpec.optional(),
+    // Gateway-wide circuit-breaker default; per-server override via server.resilience.
+    resilience: resilience.optional(),
   })
   .strict()
   .refine((s) => !s.active_profile || (s.profiles !== undefined && s.active_profile in s.profiles), {

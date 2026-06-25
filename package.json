@@ -70,8 +70,9 @@
     "verify:dashboard": "node scripts/verify-dashboard.mjs",
     "verify:profiles": "node scripts/verify-profiles.mjs",
     "verify:limits": "node scripts/verify-limits.mjs",
+    "verify:breaker": "node scripts/verify-breaker.mjs",
     "verify:config": "node scripts/verify-config.mjs",
-    "verify": "npm run build && npm run verify:oauth && npm run verify:webhook && npm run verify:triggers && npm run verify:modifiers && npm run verify:httptool && npm run verify:auth && npm run verify:council && npm run verify:catalog && npm run verify:search && npm run verify:install && npm run verify:local-llm && npm run verify:dashboard && npm run verify:profiles && npm run verify:limits && npm run verify:config",
+    "verify": "npm run build && npm run verify:oauth && npm run verify:webhook && npm run verify:triggers && npm run verify:modifiers && npm run verify:httptool && npm run verify:auth && npm run verify:council && npm run verify:catalog && npm run verify:search && npm run verify:install && npm run verify:local-llm && npm run verify:dashboard && npm run verify:profiles && npm run verify:limits && npm run verify:breaker && npm run verify:config",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
