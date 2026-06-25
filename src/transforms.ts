@@ -134,6 +134,21 @@ export function removedRequiredNotInjected(
 }
 
 /**
+ * The argument names `applyArgTransforms` overlays with an injected value (server-level merged with
+ * per-tool, tool wins). An injected value is almost always a resolved `${vault:..}`/`${oauth:..}`/
+ * `${env:..}` secret, and the operator chooses the key it lands under — which may look perfectly
+ * benign (`q`, `query`, `id`). Audit I/O capture redacts secret-LOOKING key names by regex, so a
+ * secret injected under a non-secret-looking key would slip into `audit.log` in cleartext. This set
+ * is the exact, name-agnostic redaction list for the capture path. Pure.
+ */
+export function injectedArgKeys(serverCfg: ServerConfig, override?: ToolOverride): Set<string> {
+  return new Set<string>([
+    ...Object.keys(serverCfg.inject_args ?? {}),
+    ...Object.keys(override?.inject_args ?? {}),
+  ]);
+}
+
+/**
  * Transform agent-supplied arguments into what is actually sent upstream: first reverse-map renamed
  * keys back to their upstream names, then overlay injected values (server then tool, tool wins).
  * Injected values resolve `${vault:..}`/`${env:..}` refs (or pass a literal through) and ALWAYS win

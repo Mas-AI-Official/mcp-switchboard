@@ -38,6 +38,7 @@ import {
   applyArgTransforms,
   applyResponseRedaction,
   removedRequiredNotInjected,
+  injectedArgKeys,
 } from "./transforms.js";
 import { SB_ERR, SB_HINTS, type SbErrorCode } from "./errors.js";
 import { rankBm25, type RankDoc } from "./search-index.js";
@@ -480,6 +481,11 @@ export class Router {
       return this.error(`could not prepare arguments for '${exposedName}': ${msg}`, SB_ERR.BAD_REQUEST);
     }
 
+    // The names applyArgTransforms injected a value under — these hold resolved secrets even when the
+    // operator chose a benign key (`q`, `id`), which the SECRET_KEY name regex would miss. Redact them
+    // by exact name in every capture below so a vault/oauth secret never lands in audit.log cleartext.
+    const injectedKeys = injectedArgKeys(server.config, override);
+
     // Native per-call timeout (ms) — the SDK throws an McpError with ErrorCode.RequestTimeout
     // when it elapses, which we map to a distinct SB_UPSTREAM_TIMEOUT below.
     const timeoutMs = this.cfg.settings?.call_timeout_ms;
@@ -501,7 +507,7 @@ export class Router {
         decision: "allow",
         reason,
         duration_ms: Date.now() - start,
-        ...(capture ? { request: sanitizeForAudit(finalArgs), response: sanitizeForAudit(result) } : {}),
+        ...(capture ? { request: sanitizeForAudit(finalArgs, injectedKeys), response: sanitizeForAudit(result) } : {}),
         ...(result.isError ? { error: this.resultErrorText(result), error_code: SB_ERR.UPSTREAM_ERROR } : {}),
       });
       return result;
@@ -519,7 +525,7 @@ export class Router {
         decision: "allow",
         reason,
         duration_ms: Date.now() - start,
-        ...(capture ? { request: sanitizeForAudit(finalArgs) } : {}),
+        ...(capture ? { request: sanitizeForAudit(finalArgs, injectedKeys) } : {}),
         error: msg,
         error_code: code,
       });

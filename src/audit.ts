@@ -43,9 +43,14 @@ const CAPTURE_CAP_BYTES = 4096;
  * Prepare a value for opt-in I/O capture: deep-clone with secret-looking keys masked, then
  * cap the serialized size. Returns a truncation marker rather than a giant blob when over cap.
  * Capture is OFF by default; this only runs when the operator sets settings.logs.capture_io.
+ *
+ * `secretKeys` is an exact-match set of key names that MUST be redacted regardless of how they
+ * look — the router passes the injected-arg key names so a `${vault:..}`/`${oauth:..}` secret that
+ * was injected under an innocuous param name (e.g. `q`) never reaches the log in cleartext. The
+ * name-pattern heuristic (SECRET_KEY) still covers conventionally-named secrets in untouched args.
  */
-export function sanitizeForAudit(value: unknown): unknown {
-  const redacted = redact(value, 0);
+export function sanitizeForAudit(value: unknown, secretKeys?: ReadonlySet<string>): unknown {
+  const redacted = redact(value, 0, secretKeys);
   let serialized: string;
   try {
     serialized = JSON.stringify(redacted);
@@ -58,12 +63,12 @@ export function sanitizeForAudit(value: unknown): unknown {
   return redacted;
 }
 
-function redact(value: unknown, depth: number): unknown {
+function redact(value: unknown, depth: number, secretKeys?: ReadonlySet<string>): unknown {
   if (depth > 6 || value === null || typeof value !== "object") return value;
-  if (Array.isArray(value)) return value.map((v) => redact(v, depth + 1));
+  if (Array.isArray(value)) return value.map((v) => redact(v, depth + 1, secretKeys));
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-    out[k] = SECRET_KEY.test(k) ? "[redacted]" : redact(v, depth + 1);
+    out[k] = SECRET_KEY.test(k) || secretKeys?.has(k) ? "[redacted]" : redact(v, depth + 1, secretKeys);
   }
   return out;
 }
