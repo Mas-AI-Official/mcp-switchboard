@@ -39,7 +39,8 @@ import { runExpose, TUNNEL_KINDS, type TunnelKind } from "./expose.js";
 import { Vault, HOME_DIR } from "./vault.js";
 import { OAuthStore } from "./oauth.js";
 import { ApiKeyStore } from "./apikeys.js";
-import { inferScope, evaluate } from "./policy.js";
+import { inferScope } from "./policy.js";
+import { buildDoctorReport } from "./doctor.js";
 import {
   ingestCatalogVerbose,
   loadCatalog,
@@ -191,40 +192,36 @@ program
     out(`  config:      ${path} ${existsSync(path) ? "(found)" : "(missing — run `switchboard init`)"}`);
     if (!existsSync(path)) return;
 
-    let ok = true;
+    let cfg: SwitchboardConfig;
     try {
-      const cfg = loadConfig(path);
-      out(`  vault:       ${cfg.vault.backend}`);
-      out(`  transports:  ${cfg.gateway.transport.join(", ")}`);
-      out(`  endpoint:    http://${cfg.gateway.http.host}:${cfg.gateway.http.port}/mcp`);
-      out(`\n  servers (${cfg.servers.length}):`);
-      const vault = new Vault(cfg.vault.backend);
-      for (const s of cfg.servers) {
-        const policy = s.policy ?? cfg.gateway.default_policy;
-        out(`    - ${s.id} [${s.source}, ${policy}] ${s.enabled === false ? "(disabled)" : ""}`);
-        // Verify referenced secrets resolve without printing their values.
-        for (const v of Object.values({ ...(s.env ?? {}), ...(s.credentials ?? {}) })) {
-          try {
-            vault.resolve(v);
-          } catch (err) {
-            ok = false;
-            log.error(`      unresolved: ${err instanceof Error ? err.message : String(err)}`);
-          }
-        }
-        // Surface obvious policy traps: a write/full tool under a read ceiling.
-        for (const name of Object.keys(s.tools ?? {})) {
-          const d = evaluate(s, name, cfg);
-          if (d.decision === "deny") log.warn(`      '${name}' -> ${d.reason}`);
-        }
-      }
+      cfg = loadConfig(path);
     } catch (err) {
-      ok = false;
       log.error(err instanceof Error ? err.message : String(err));
+      process.exitCode = 1;
+      return;
     }
+
+    const vault = new Vault(cfg.vault.backend);
+    const oauthClientIds = new Set(new OAuthStore(vault).catalog().filter((p) => p.hasClientId).map((p) => p.id));
+    const report = buildDoctorReport({ cfg, resolve: (v) => vault.resolve(v), oauthClientIds });
+
+    if (!report.node.ok) log.warn(`  node ${report.node.version} is below the supported floor ${report.node.floor}`);
+    out(`  vault:       ${report.vaultBackend}`);
+    out(`  transports:  ${report.transports.join(", ")}`);
+    out(`  endpoint:    ${report.endpoint}`);
+    out(`\n  servers (${report.servers.length}):`);
+    for (const s of report.servers) {
+      const flags = [s.enabled ? "" : "(disabled)", s.duplicateId ? "(DUPLICATE ID)" : ""].filter(Boolean).join(" ");
+      out(`    - ${s.id} [${s.source}, ${s.policy}] ${flags}`);
+      for (const msg of s.unresolved) log.error(`      unresolved: ${msg}`);
+      for (const provider of s.oauthUnconfigured) log.warn(`      oauth '${provider}' has no client id — run \`switchboard connect ${provider}\``);
+      for (const trap of s.policyTraps) log.warn(`      '${trap.tool}' -> ${trap.reason}`);
+    }
+
     out("");
-    if (ok) log.ok("config looks healthy");
-    else log.error("issues found (see above)");
-    process.exitCode = ok ? 0 : 1;
+    if (report.ok) log.ok("config looks healthy");
+    else log.error(`${report.problems.length} issue(s) found (see above)`);
+    process.exitCode = report.ok ? 0 : 1;
   });
 
 program
