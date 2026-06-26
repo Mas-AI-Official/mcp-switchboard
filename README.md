@@ -9,7 +9,7 @@ through one governed control plane on your machine.**
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-2dd4bf.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/Model_Context_Protocol-1.29-2dd4bf.svg)](https://modelcontextprotocol.io)
 [![Node](https://img.shields.io/badge/node-%E2%89%A518.18-2dd4bf.svg)](https://nodejs.org)
-[![Verified](https://img.shields.io/badge/deterministic_oracles-619_checks-2dd4bf.svg)](#everything-is-verified-by-a-deterministic-oracle)
+[![Verified](https://img.shields.io/badge/deterministic_oracles-1153_checks-2dd4bf.svg)](#everything-is-verified-by-a-deterministic-oracle)
 [![Status](https://img.shields.io/badge/status-working_alpha-D4A843.svg)](#project-status)
 [![Zero native deps](https://img.shields.io/badge/native_deps-0-D4A843.svg)](#security)
 
@@ -275,7 +275,7 @@ settings:
 ```
 
 The detection, the keyless wiring, and the "never auto-download" contract are pinned by a deterministic
-oracle: `npm run verify:local-llm` — 71/71.
+oracle: `npm run verify:local-llm` — 107/107.
 
 ### Streaming decisions to a webhook (real-time governance feed)
 
@@ -354,7 +354,7 @@ The design keeps the same governance/honesty contract as everything else:
 
 The whole contract — poll is audited, fire is not, fire bypasses the `events` filter, read ceiling
 denies a non-read trigger, baseline survives restart — is verified by a deterministic oracle:
-`npm run verify:triggers` — 60/60. (`npm run verify` runs the build + **all 16 oracles, 619 checks**.)
+`npm run verify:triggers` — 60/60. (`npm run verify` runs the build + **all 25 oracles, 1153 checks**.)
 
 ### Profiles — one switch between a locked-down view and the full surface
 
@@ -586,7 +586,8 @@ through the governed path.
   Verified by `npm run verify:install` — 57/57.
 - **Offline local-LLM auto-detect** — `switchboard local-llm` probes for a running Ollama/LM Studio/
   llama.cpp/vLLM server and `local-llm wire` writes the keyless council provider; never auto-downloads.
-  Verified by `npm run verify:local-llm` — 71/71.
+  It also **guards against wiring a non-chat model** (an embedding/rerank/speech model) as the council
+  voice. Verified by `npm run verify:local-llm` — 107/107.
 - **Profiles** — `settings.profiles` + `active_profile` expose a narrow-only named view (hide servers/
   tools, lower scope, never widen). Verified by `npm run verify:profiles` — 61/61.
 - **Rate limits + spend budgets** — `limits` blocks set fail-closed call **and cost** ceilings at the
@@ -607,10 +608,10 @@ Switchboard makes a lot of governance and honesty claims — "fails closed", "ne
 "metadata only", "a profile can only narrow". None of them are taken on faith. Every one is pinned by a
 **deterministic oracle**: a zero-dependency Node script that imports the *compiled* code, exercises the
 contract, and prints `N/N checks passed` — no model tokens, no flakiness, just code checking code. One
-command runs the build plus all sixteen:
+command runs the build plus all twenty-five:
 
 ```bash
-npm run verify     # build + 16 oracles = 619 checks, all green
+npm run verify     # build + 25 oracles = 1153 checks, all green
 ```
 
 | Area | Oracle | Checks |
@@ -620,18 +621,27 @@ npm run verify     # build + 16 oracles = 619 checks, all green
 | Poll-first triggers | `verify:triggers` | 60 |
 | Schema / response modifiers | `verify:modifiers` | 28 |
 | HTTP-tool servers | `verify:httptool` | 29 |
+| OpenAPI→MCP (`app2mcp`) | `verify:openapi` | 66 |
 | Auth schemes (bearer/api_key/basic/header) | `verify:auth` | 13 |
 | Cross-provider council | `verify:council` | 34 |
 | Toolkit catalog ingest | `verify:catalog` | 20 |
 | BM25F `find_tools` search | `verify:search` | 21 |
+| Resources + prompts pass-through | `verify:resources-prompts` | 34 |
 | One-command `install` | `verify:install` | 57 |
-| Offline local-LLM detect + wire | `verify:local-llm` | 71 |
-| Dashboard API | `verify:dashboard` | 43 |
+| Offline local-LLM detect + wire | `verify:local-llm` | 107 |
+| Local AES-256-GCM vault | `verify:vault` | 43 |
+| Dashboard API | `verify:dashboard` | 73 |
+| Logs + I/O capture / redaction | `verify:audit` | 61 |
+| Governed call path (router) | `verify:router` | 29 |
 | Profiles (narrow-only) | `verify:profiles` | 61 |
 | Rate limits + spend budgets | `verify:limits` | 61 |
 | Per-server circuit breaker | `verify:breaker` | 47 |
+| Retry / backoff | `verify:retry` | 54 |
+| Health endpoint (`/healthz`) | `verify:health` | 47 |
+| `switchboard doctor` preflight | `verify:doctor` | 51 |
+| `switchboard expose` tunnel | `verify:expose` | 83 |
 | Example config strict-loads | `verify:config` | 21 |
-| **Total** | **`npm run verify`** | **619** |
+| **Total** | **`npm run verify`** | **1153** |
 
 ## Docs
 
