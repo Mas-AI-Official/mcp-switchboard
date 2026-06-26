@@ -75,7 +75,7 @@ export interface CatalogSnapshot {
 
 const MCP_REGISTRY_URL = "https://registry.modelcontextprotocol.io/v0/servers?limit=100";
 const APIS_GURU_URL = "https://api.apis.guru/v2/list.json";
-const USER_AGENT = "switchboard-mcp catalog sync (+https://github.com/Masoud-Masoori/switchboard)";
+const USER_AGENT = "mcp-switchboard catalog sync (+https://github.com/Masoud-Masoori/switchboard)";
 
 /** Resolve `data/catalog.json` relative to the package root (one level above dist/ or src/). */
 export function defaultCatalogPath(): string {

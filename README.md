@@ -109,7 +109,26 @@ circuit breaker, all running on your own hardware.**
 
 ## Quickstart
 
-### Fastest start — one click
+### Install from npm — recommended
+
+> One-time prerequisite: install **[Node 18.18+](https://nodejs.org)**.
+
+```bash
+npm install -g mcp-switchboard   # installs the `switchboard` command globally
+switchboard init                 # scaffold a config + the ~/.switchboard home directory
+switchboard serve                # stdio for local clients + HTTP endpoint & dashboard
+```
+
+Prefer not to install anything globally? Run it on demand with npx:
+
+```bash
+npx mcp-switchboard serve
+```
+
+Open the dashboard at **http://127.0.0.1:8088**, then point an agent at the MCP endpoint. Wire a
+client in one command with `switchboard install <client>` (see [below](#wire-it-into-your-client--one-command)).
+
+### Fastest start — one click (no terminal)
 
 > One-time prerequisite: install **[Node 18.18+](https://nodejs.org)**.
 
@@ -124,7 +143,7 @@ The launcher runs Switchboard in **HTTP + dashboard** mode on `http://127.0.0.1:
 
 ### From source (manual)
 
-> Requires Node ≥ 18.18. Not yet on npm — run it from source.
+> Requires Node ≥ 18.18. Prefer this if you want to hack on Switchboard or pin a specific commit.
 
 ```bash
 git clone https://github.com/Masoud-Masoori/switchboard.git

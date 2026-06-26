@@ -1,5 +1,5 @@
 {
-  "name": "switchboard-mcp",
+  "name": "mcp-switchboard",
   "version": "0.1.0",
   "description": "Local-first governed MCP aggregator — connect every MCP server to your agent through one endpoint, with on/off toggles, read/write/full scopes, an encrypted local credential vault, and an audit log. A free, self-hosted alternative to hosted tool routers.",
   "type": "module",
