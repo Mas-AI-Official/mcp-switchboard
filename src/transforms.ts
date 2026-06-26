@@ -1,5 +1,5 @@
 /**
- * Tool-shaping transforms — Switchboard's answer to Composio's "modifiers".
+ * Tool-shaping transforms — MCP Switchboard's answer to Composio's "modifiers".
  *
  * Three pure functions sit on the request/response path:
  *   - shapeExposedTool   : rewrite the tool AS AGENTS SEE IT (description, dropped/hidden/renamed

@@ -1,4 +1,4 @@
-# Switchboard — Architecture
+# MCP Switchboard — Architecture
 
 > Conceptual overview of the seven components and the single tool-call data flow. For the
 > **as-built**, module-by-module breakdown (every file in `src/`, the exact config contract, and
@@ -67,7 +67,7 @@ selection accuracy collapses + tokens explode. Three configurable modes (`gatewa
 - **`namespaced`** (default) — tools prefixed `github__create_issue`; only ENABLED servers exposed.
 - **`flat`** — raw passthrough (small setups only).
 - **`search`** — expose two meta-tools, **`find_tools(query)`** + **`call_tool(name, arguments)`**;
-  the agent searches, Switchboard returns only the relevant handful. The endgame for large catalogs.
+  the agent searches, MCP Switchboard returns only the relevant handful. The endgame for large catalogs.
 
 ### 6. Dashboard (`src/dashboard.ts` + `src/console.ts`)
 Local web UI (the "operator console"). Lists servers, **ON/OFF** toggles (mount/unmount live + persist

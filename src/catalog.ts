@@ -12,7 +12,7 @@
  * `switchboard toolkits sync` regenerates the snapshot at `data/catalog.json`,
  * which ships with the package so the dashboard works offline on first run.
  * Each toolkit carries a `mount` block that maps 1:1 onto a `ServerConfig`, so
- * "Add to Switchboard" can turn a catalog entry into a real mounted server.
+ * "Add to MCP Switchboard" can turn a catalog entry into a real mounted server.
  *
  * Zero dependencies — global `fetch` (Node >=18.18) and the standard library only.
  */
@@ -75,7 +75,7 @@ export interface CatalogSnapshot {
 
 const MCP_REGISTRY_URL = "https://registry.modelcontextprotocol.io/v0/servers?limit=100";
 const APIS_GURU_URL = "https://api.apis.guru/v2/list.json";
-const USER_AGENT = "mcp-switchboard catalog sync (+https://github.com/Masoud-Masoori/switchboard)";
+const USER_AGENT = "mcp-switchboard catalog sync (+https://github.com/Mas-AI-Official/mcp-switchboard)";
 
 /** Resolve `data/catalog.json` relative to the package root (one level above dist/ or src/). */
 export function defaultCatalogPath(): string {

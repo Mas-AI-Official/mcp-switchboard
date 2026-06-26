@@ -3,7 +3,7 @@ Both Claude AND ChatGPT can drive your real tools — Gmail, GitHub, Notion, you
 
 But wiring every client to every app by hand is N×M pain, and the "easy" hosted shortcut parks your OAuth tokens on someone else's server.
 
-Switchboard collapses N×M into N×1. 🧵
+MCP Switchboard collapses N×M into N×1. 🧵
 
 **2/**
 The idea: run ONE local process that re-exposes all your MCP servers behind ONE governed endpoint.
@@ -62,6 +62,6 @@ switchboard init && switchboard serve
 # or zero-install: npx mcp-switchboard serve
 ```
 
-Repo (Node ≥ 18.18): https://github.com/Masoud-Masoori/switchboard
+Repo (Node ≥ 18.18): https://github.com/Mas-AI-Official/mcp-switchboard
 
 Star it, try it, tell me what breaks. 🔌

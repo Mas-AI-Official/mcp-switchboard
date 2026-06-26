@@ -3,7 +3,7 @@
 #
 # When you mount a dozen MCP servers, exposing every tool can mean thousands of
 # tokens of schemas in the agent's context — and tool-selection accuracy drops
-# sharply past ~30-50 tools. `search` mode fixes this: Switchboard exposes just
+# sharply past ~30-50 tools. `search` mode fixes this: MCP Switchboard exposes just
 # two meta-tools — `find_tools` (keyword search across everything) and
 # `call_tool` (invoke a discovered tool by name) — so the surface stays flat
 # no matter how many servers you mount.

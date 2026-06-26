@@ -1,7 +1,7 @@
 /**
  * authserver.ts — a local OAuth 2.1 + PKCE Authorization Server.
  *
- * claude.ai (web) and other hosted MCP clients can only reach a Switchboard that is
+ * claude.ai (web) and other hosted MCP clients can only reach an MCP Switchboard that is
  * fronted by a public HTTPS tunnel (see `switchboard expose`), and they REQUIRE OAuth
  * 2.1 with PKCE + Dynamic Client Registration before they will call `/mcp`. This module
  * implements the SDK's `OAuthServerProvider` so the same process is both the
@@ -127,7 +127,7 @@ const emptyState = (): AuthServerState => ({ clients: {}, accessTokens: {}, refr
 /** Resolved, validated OAuth-server runtime options (or null when the feature is off). */
 export interface ResolvedOAuthOptions {
   issuerUrl: URL;
-  /** Public HTTPS origin+path of this Switchboard, no trailing slash. */
+  /** Public HTTPS origin+path of this MCP Switchboard, no trailing slash. */
   publicUrl: string;
   /** RFC 8707 canonical audience every token is bound to: `${publicUrl}/mcp`. */
   canonicalResource: string;
@@ -517,7 +517,7 @@ button{flex:1;padding:12px;border-radius:9px;font-size:14px;font-weight:600;curs
 <form class="card" method="post" action="/oauth/consent">
 ${logo}
 <h1>${title}</h1>
-<p class="sub"><span class="client">${clientName}</span> wants to connect to your local Switchboard.</p>
+<p class="sub"><span class="client">${clientName}</span> wants to connect to your local MCP Switchboard.</p>
 <ul>${scopeList}</ul>
 <p class="res">Audience: ${esc(resource)}</p>
 <input type="hidden" name="pending_id" value="${esc(pendingId)}"/>

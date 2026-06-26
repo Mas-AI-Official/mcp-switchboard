@@ -1,4 +1,4 @@
-# Switchboard — Launch Marketing Pack
+# MCP Switchboard — Launch Marketing Pack
 
 Ready-to-post launch artifacts for **mcp-switchboard**. Every file was adversarially fact-checked
 against the repo `README.md` before landing here — no fabricated metrics, no "production-ready" claims.
@@ -7,7 +7,7 @@ Status everywhere is **working alpha** (zero stars, zero known production users 
 **Ground facts (do not drift):**
 - npm package: `mcp-switchboard` · CLI command after install: `switchboard`
 - Install: `npm install -g mcp-switchboard` → `switchboard init && switchboard serve` (or `npx mcp-switchboard serve`, Node ≥ 18.18)
-- Repo / "the address": https://github.com/Masoud-Masoori/switchboard
+- Repo / "the address": https://github.com/Mas-AI-Official/mcp-switchboard
 - License Apache-2.0 · by MAS-AI Technologies · dashboard at http://127.0.0.1:8088
 - Catalog: real count is 4,776 toolkits → say **"4,700+"** in copy
 
@@ -40,7 +40,7 @@ Status everywhere is **working alpha** (zero stars, zero known production users 
 
 - It's a **working alpha**, just launched. Never "production-ready", "battle-tested", or "enterprise-grade".
 - Zero stars, zero known users, no benchmarks against named competitors — never invent metrics, downloads, testimonials, or funding.
-- Composio/Pipedream are positioned as *good SaaS that custodies tokens + meters calls*, not "bad" — Switchboard is the self-hosted, governed alternative.
+- Composio/Pipedream are positioned as *good SaaS that custodies tokens + meters calls*, not "bad" — MCP Switchboard is the self-hosted, governed alternative.
 - Every feature mentioned is in the README; don't add features that aren't.
 
 > **Posting is outward-facing** — these go out under your identity to your accounts. Nothing here is auto-posted;

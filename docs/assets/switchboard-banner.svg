@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 470" role="img"
-     aria-label="Switchboard — one governed MCP endpoint for every tool. Your assistants (Claude, ChatGPT, Cursor, agents) connect through one control plane (vault, policy, audit, gates) to your apps (Gmail, GitHub, Notion, Slack, your REST API).">
+     aria-label="MCP Switchboard — one governed MCP endpoint for every tool. Your assistants (Claude, ChatGPT, Cursor, agents) connect through one control plane (vault, policy, audit, gates) to your apps (Gmail, GitHub, Notion, Slack, your REST API).">
   <defs>
     <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
       <stop offset="0" stop-color="#2dd4bf"/>
@@ -45,10 +45,10 @@
   <rect x="1" y="1" width="1278" height="468" rx="22" fill="none" stroke="#2a3340" stroke-width="1.5"/>
 
   <!-- Title lockup -->
-  <g transform="translate(466,30)">
+  <g transform="translate(422,30)">
     <use href="#mark" transform="scale(1.375)"/>
     <text x="60" y="38" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
-          font-size="46" font-weight="750" letter-spacing="-0.5" fill="#e6edf3">Switchboard</text>
+          font-size="46" font-weight="750" letter-spacing="-0.5" fill="#e6edf3">MCP Switchboard</text>
   </g>
 
   <text x="640" y="100" text-anchor="middle"
@@ -122,7 +122,7 @@
   <rect x="512" y="272" width="256" height="96" rx="17" fill="#11171f" stroke="#2dd4bf" stroke-width="1.6"/>
   <g transform="translate(546,300)"><use href="#mark" transform="scale(0.875)"/></g>
   <text x="584" y="318" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
-        font-size="17" font-weight="720" letter-spacing="0.5" fill="#e6edf3">SWITCHBOARD</text>
+        font-size="14" font-weight="720" letter-spacing="0.4" fill="#e6edf3">MCP SWITCHBOARD</text>
   <text x="640" y="346" text-anchor="middle"
         font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
         font-size="11.5" letter-spacing="0.6" fill="#1d8b7f">vault · policy · audit · gates</text>

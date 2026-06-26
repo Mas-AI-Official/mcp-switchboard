@@ -1,6 +1,6 @@
 ## Title
 
-Show HN: Switchboard – one governed MCP endpoint shared by Claude and ChatGPT
+Show HN: MCP Switchboard – one governed MCP endpoint shared by Claude and ChatGPT
 
 ## Body
 
@@ -10,7 +10,7 @@ First, the N×M wiring. Every client (Claude Desktop, Claude Code, Cursor, VS Co
 
 Second, the "easy" shortcut. Hosted tool routers solve the wiring, but they do it by parking your OAuth tokens on their server and metering your calls. For a lot of us that trade isn't acceptable.
 
-Switchboard is a local-first, governed MCP aggregator that tries to fix both. You run one local process that re-exposes all your MCP servers behind one governed endpoint. You add that endpoint once in Claude and once in ChatGPT, and now both reach the same tools through the same encrypted local vault, the same on/off + read/write/full policy, the same approval gates, and the same audit log. It collapses N×M wiring into N×1.
+MCP Switchboard is a local-first, governed MCP aggregator that tries to fix both. You run one local process that re-exposes all your MCP servers behind one governed endpoint. You add that endpoint once in Claude and once in ChatGPT, and now both reach the same tools through the same encrypted local vault, the same on/off + read/write/full policy, the same approval gates, and the same audit log. It collapses N×M wiring into N×1.
 
 How it works, concretely:
 
@@ -24,7 +24,7 @@ There's also a tier of stuff hosted routers don't really give you on your own ha
 
 Honesty up front: this is a working alpha, not production-ready. It just launched — zero GitHub stars, zero known production users, no benchmarks against named competitors. It's pure TypeScript/Node ESM with exactly 5 runtime dependencies and zero native dependencies, and every feature is backed by deterministic verification oracles (~1,150 automated checks). But "verified by oracles" is not the same as "battle-tested in your environment" — it hasn't been. Treat the cloud-exposure path (expose + OAuth + tunnel) as alpha and run it knowingly. Expect rough edges; I'd rather you find them now.
 
-Positioning, to be fair about it: hosted routers like Composio and Pipedream are good products. The difference is they custody your tokens and meter your calls; Switchboard keeps keys, governance, and audit on your machine and is free / Apache-2.0. It's the self-hosted, governed alternative, not a claim that they're bad.
+Positioning, to be fair about it: hosted routers like Composio and Pipedream are good products. The difference is they custody your tokens and meter your calls; MCP Switchboard keeps keys, governance, and audit on your machine and is free / Apache-2.0. It's the self-hosted, governed alternative, not a claim that they're bad.
 
 Install:
 
@@ -33,7 +33,7 @@ Install:
 
 or zero-install: `npx mcp-switchboard serve` (requires Node >= 18.18).
 
-Repo: https://github.com/Masoud-Masoori/switchboard
+Repo: https://github.com/Mas-AI-Official/mcp-switchboard
 
 I'd genuinely like criticism — on the threat model, the governance design, and whether the local-first trade-offs are worth it. Tear into it.
 
@@ -54,4 +54,4 @@ Specific feedback I'm after:
 - Whether the fail-open design for webhooks and triggers (a down webhook never blocks a governance decision) is the right call, or a footgun.
 - The 5-runtime-dependency, zero-native-dependency constraint — is it worth the friction it occasionally causes, and where would you relax it?
 
-Apache-2.0, free, self-hosted, no per-call meter. Repo: https://github.com/Masoud-Masoori/switchboard — issues and PRs welcome, and harsh reviews especially.
+Apache-2.0, free, self-hosted, no per-call meter. Repo: https://github.com/Mas-AI-Official/mcp-switchboard — issues and PRs welcome, and harsh reviews especially.

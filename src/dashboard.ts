@@ -327,7 +327,7 @@ export async function startDashboard(
         // protected-resource metadata pointing back at this issuer.
         resourceServerUrl: new URL(oauthOpts.canonicalResource),
         scopesSupported: [...OAUTH_SCOPES_SUPPORTED],
-        resourceName: "Switchboard",
+        resourceName: "MCP Switchboard",
         // Public clients (claude.ai) register without a secret; any issued secret never expires.
         clientRegistrationOptions: { clientSecretExpirySeconds: 0 },
       }),
@@ -619,7 +619,7 @@ export async function startDashboard(
       // endpoint/model), never an api_key_ref value. Lets the Playground offer the zero-cloud path.
       council: councilSummary(cfg.settings?.council),
       // Built-in OAuth 2.1 authorization server — the path that lets ChatGPT / claude.ai reach a
-      // tunnelled Switchboard. `enforced` reflects whether it is actually wired this run.
+      // tunnelled MCP Switchboard. `enforced` reflects whether it is actually wired this run.
       oauth_server: {
         enabled: Boolean(cfg.settings?.oauth_server?.enabled),
         public_url: cfg.settings?.oauth_server?.public_url ?? "",
@@ -692,7 +692,7 @@ export async function startDashboard(
     const payload = JSON.stringify({
       type: "switchboard.test",
       ts: new Date().toISOString(),
-      message: "Test event from Switchboard.",
+      message: "Test event from MCP Switchboard.",
     });
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (wh.secret_ref) {
@@ -973,7 +973,7 @@ function callbackPage(message: string, ok: boolean, brand?: SettingsConfig["auth
       ? `<p class="sub"><a href="${esc(brand.support_url)}" style="color:${accent}">Need help?</a></p>`
       : "";
   return `<!doctype html><html lang="en"><head><meta charset="utf-8" />
-<title>Switchboard · ${title}</title>
+<title>MCP Switchboard · ${title}</title>
 <style>
   body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
     background:#0d1117; color:#e6edf3; font:15px/1.6 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }

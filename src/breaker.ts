@@ -1,7 +1,7 @@
 /**
  * Per-server circuit breaker — the upstream-resilience control a hosted router gives you for free.
  *
- * Switchboard proxies upstream MCP servers that can crash, wedge, or go unreachable. Without a
+ * MCP Switchboard proxies upstream MCP servers that can crash, wedge, or go unreachable. Without a
  * breaker, every call to a dead server pays the full `settings.call_timeout_ms` before failing, and
  * the agent rediscovers the outage one slow call at a time. The breaker watches each server's
  * TRANSPORT health — thrown errors and timeouts, NOT well-formed tool *error results* (a tool that

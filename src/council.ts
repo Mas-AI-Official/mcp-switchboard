@@ -1,11 +1,11 @@
 /**
  * Council relay tools — the synthetic in-process MCP server behind `settings.council`.
  *
- * Switchboard already brokers tool calls; the council lets one agent broker a *peer model*.
+ * MCP Switchboard already brokers tool calls; the council lets one agent broker a *peer model*.
  * Two tools are exposed:
  *   - `council_consult` — relay a single prompt to a configured provider (Anthropic, OpenAI,
  *     or a LOCAL OpenAI-compatible model) and return its reply. The headline use case: a
- *     ChatGPT or Claude client connected to Switchboard asking the *other* provider — or a
+ *     ChatGPT or Claude client connected to MCP Switchboard asking the *other* provider — or a
  *     local offline model — for a second opinion.
  *   - `council_debate`  — run a bounded, multi-round exchange between the configured
  *     providers on a topic, then synthesize a moderator's conclusion.

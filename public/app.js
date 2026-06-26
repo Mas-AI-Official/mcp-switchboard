@@ -1,4 +1,4 @@
-/* Switchboard dashboard — single-file vanilla SPA (no build step, no dependencies).
+/* MCP Switchboard dashboard — single-file vanilla SPA (no build step, no dependencies).
  * Hash router + fetch against the JSON API in src/dashboard.ts. Every endpoint and
  * response shape used here mirrors that file 1:1. */
 
@@ -418,7 +418,7 @@ async function openToolkitDetail(slug) {
     ${manual ? `<div class="error-banner" style="margin-top:14px">This toolkit must be installed manually and cannot be auto-added.</div>` : ""}`;
   const footer = `
     <button class="btn" data-close="1" id="tk-detail-close">Close</button>
-    ${manual ? "" : `<button class="btn btn-primary" id="tk-detail-add">Add to Switchboard</button>`}`;
+    ${manual ? "" : `<button class="btn btn-primary" id="tk-detail-add">Add to MCP Switchboard</button>`}`;
   const m = openModal({ title: tk.name, body, footer });
   const closeBtn = $("#tk-detail-close", m.root);
   if (closeBtn) closeBtn.addEventListener("click", m.close);
@@ -481,7 +481,7 @@ async function renderAccounts() {
   view().innerHTML =
     pageHead(
       "Connected Accounts",
-      "OAuth connections to upstream providers. Tokens are sealed in your local encrypted vault — Switchboard never holds them in plaintext and never sends them anywhere but the provider."
+      "OAuth connections to upstream providers. Tokens are sealed in your local encrypted vault — MCP Switchboard never holds them in plaintext and never sends them anywhere but the provider."
     ) +
     (providers.length ? `<div class="grid">${cards}</div>` : `<div class="empty"><div class="empty-title">No OAuth providers registered</div></div>`);
 
@@ -729,7 +729,7 @@ async function renderSettingsGeneral() {
   view().innerHTML = settingsScaffold(
     "general",
     "General",
-    "Identify this Switchboard instance and set the default governance posture for new tools.",
+    "Identify this MCP Switchboard instance and set the default governance posture for new tools.",
     `
     <div class="panel">
       <div class="panel-title">Identity</div>
@@ -779,7 +779,7 @@ async function renderSettingsUsage() {
   catch (e) { view().innerHTML = pageHead("Usage & billing") + errorBanner(e); return; }
   const enabledServers = st.servers.filter((s) => s.enabled).length;
   view().innerHTML =
-    pageHead("Usage & billing", "Where a hosted router would meter and bill you, Switchboard runs on your own machine.") +
+    pageHead("Usage & billing", "Where a hosted router would meter and bill you, MCP Switchboard runs on your own machine.") +
     `
     <div class="panel" style="border-left:3px solid var(--accent)">
       <div class="panel-title">$0.00 — self-hosted</div>
@@ -1056,7 +1056,7 @@ async function renderSettingsApiKeys() {
   view().innerHTML =
     pageHead(
       "API keys",
-      "Bearer tokens that authenticate the /mcp endpoint. Required automatically when you expose Switchboard beyond loopback (e.g. via a tunnel). Tokens are shown once and stored hashed.",
+      "Bearer tokens that authenticate the /mcp endpoint. Required automatically when you expose MCP Switchboard beyond loopback (e.g. via a tunnel). Tokens are shown once and stored hashed.",
       `<button class="btn btn-primary" id="k-new">+ New key</button>`
     ) +
     `<div class="row" style="margin-bottom:14px">Endpoint auth: ${posture} <span class="dim">· require_auth = <code>${esc(data.require_auth)}</code></span></div>` +
@@ -1115,7 +1115,7 @@ function showTokenModal(token, key) {
   const m = openModal({
     title: "Save your API key now",
     body: `
-      <p class="dim mt-0">This is the only time the full token is shown. Store it somewhere safe — Switchboard keeps only a hash.</p>
+      <p class="dim mt-0">This is the only time the full token is shown. Store it somewhere safe — MCP Switchboard keeps only a hash.</p>
       <div class="token-box" id="token-val">${esc(token)}</div>
       <button class="btn btn-sm" id="token-copy">Copy token</button>
       <dl class="kv" style="margin-top:16px">

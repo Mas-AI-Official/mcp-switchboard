@@ -1,6 +1,6 @@
 /**
  * Public library surface. Most users run the `switchboard` CLI, but the gateway is
- * also embeddable — import these to mount Switchboard inside another Node process.
+ * also embeddable — import these to mount MCP Switchboard inside another Node process.
  */
 
 export { Gateway, createGateway } from "./gateway.js";

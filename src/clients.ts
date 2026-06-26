@@ -1,5 +1,5 @@
 /**
- * clients.ts — `switchboard install <client>`: wire Switchboard into an MCP client's config.
+ * clients.ts — `switchboard install <client>`: wire MCP Switchboard into an MCP client's config.
  *
  * The whole point of an aggregator is that you point ONE thing at it and every upstream tool
  * shows up. This module writes the small config snippet each popular MCP client expects so the

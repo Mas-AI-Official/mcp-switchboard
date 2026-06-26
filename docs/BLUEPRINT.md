@@ -1,4 +1,4 @@
-# Switchboard — Blueprint (as-built)
+# MCP Switchboard — Blueprint (as-built)
 
 > This is the **as-built** architecture: what actually exists in the source tree today, module
 > by module, with the real names, the real data flow, and the real contracts. It is written from

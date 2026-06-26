@@ -1,7 +1,7 @@
-# Switchboard — Launch Video Package (production-ready)
+# MCP Switchboard — Launch Video Package (ready to produce)
 
-**Project:** Switchboard — a local-first, governed MCP aggregator
-**Repo (the "address"):** https://github.com/Masoud-Masoori/switchboard
+**Project:** MCP Switchboard — a local-first, governed MCP aggregator
+**Repo (the "address"):** https://github.com/Mas-AI-Official/mcp-switchboard
 **Install:** `npm install -g mcp-switchboard` → `switchboard init && switchboard serve`
 **License:** Apache-2.0 · **By:** MAS-AI Technologies · **Status:** working alpha
 
@@ -38,7 +38,7 @@ Alt hooks (A/B):
 
 Each scene: on-screen visual + on-screen text (burned-in caption) + voiceover (VO).
 **TTS note:** if any VO is synthesized, spell the maker as **"Mass A.I Technologies"** in the VO text
-(edge-tts multilingual voices mis-pronounce "MAS-AI" as Spanish *más*). Keep "Switchboard" as-is.
+(edge-tts multilingual voices mis-pronounce "MAS-AI" as Spanish *más*). Keep "MCP Switchboard" as-is.
 
 ### Scene 1 — Cold open / the problem (0:00–0:06)
 - **Visual:** A messy tangle of lines — 4 client icons (Claude, ChatGPT, Cursor, "your agent") each drawing separate lines to 6 app icons (GitHub, Slack, Gmail, Notion, Stripe, Linear). The mess pulses red.
@@ -50,13 +50,13 @@ Each scene: on-screen visual + on-screen text (burned-in caption) + voiceover (V
 - **On-screen text:** `And hosted routers hold your keys.`
 - **VO:** "And the hosted routers that promise to fix it? They custody your keys and meter your calls."
 
-### Scene 3 — Reveal Switchboard (0:12–0:19)
-- **Visual:** The tangle collapses into a clean hub. One box in the center labeled **Switchboard** glows gold. All clients connect to it with ONE line each; it connects out to all apps.
-- **On-screen text:** `Switchboard — one local, governed endpoint.`
-- **VO:** "Switchboard collapses it to N times one. One local process. One governed endpoint."
+### Scene 3 — Reveal MCP Switchboard (0:12–0:19)
+- **Visual:** The tangle collapses into a clean hub. One box in the center labeled **MCP Switchboard** glows gold. All clients connect to it with ONE line each; it connects out to all apps.
+- **On-screen text:** `MCP Switchboard — one local, governed endpoint.`
+- **VO:** "MCP Switchboard collapses it to N times one. One local process. One governed endpoint."
 
 ### Scene 4 — Both Claude AND ChatGPT (0:19–0:26)
-- **Visual:** Split screen — Claude on the left, ChatGPT on the right — both pointing arrows at the same Switchboard hub, which fans out to the same row of app icons.
+- **Visual:** Split screen — Claude on the left, ChatGPT on the right — both pointing arrows at the same MCP Switchboard hub, which fans out to the same row of app icons.
 - **On-screen text:** `Claude + ChatGPT → the same tools.`
 - **VO:** "Local clients connect directly. Claude on the web and ChatGPT custom connectors reach it through a built-in OAuth tunnel. Same tools, both sides."
 
@@ -76,11 +76,11 @@ Each scene: on-screen visual + on-screen text (burned-in caption) + voiceover (V
 - **VO:** "Browse over four thousand seven hundred toolkits in the dashboard, flip one on, and wire your client in one command. It even runs fully offline against a local model."
 
 ### Scene 8 — CTA / the address (0:46–0:50)
-- **Visual:** Clean end card on dark slate. Gold Switchboard wordmark. The install command in monospace. The repo URL. A small "Apache-2.0 · working alpha" line.
+- **Visual:** Clean end card on dark slate. Gold MCP Switchboard wordmark. The install command in monospace. The repo URL. A small "Apache-2.0 · working alpha" line.
 - **On-screen text:**
   ```
   npm install -g mcp-switchboard
-  github.com/Masoud-Masoori/switchboard
+  github.com/Mas-AI-Official/mcp-switchboard
   Free · Apache-2.0 · self-hosted
   ⭐ Star it if this should exist
   ```
@@ -92,7 +92,7 @@ Each scene: on-screen visual + on-screen text (burned-in caption) + voiceover (V
 
 > Every AI client you use re-wires every tool, separately. It's N times M, and it never ends.
 > And the hosted routers that promise to fix it? They custody your keys and meter your calls.
-> Switchboard collapses it to N times one. One local process. One governed endpoint.
+> MCP Switchboard collapses it to N times one. One local process. One governed endpoint.
 > Local clients connect directly; Claude on the web and ChatGPT connectors reach it through a built-in OAuth tunnel. Same tools, both sides.
 > Your keys stay in an encrypted vault on your machine. Nothing parked on someone else's server.
 > Toggle any tool. Scope it read, write, or full. Gate the risky ones behind approval. Every call is logged.
@@ -106,12 +106,12 @@ Each scene: on-screen visual + on-screen text (burned-in caption) + voiceover (V
 ```
 1  00:00:00,000 → 00:00:06,000  Every client wires every app. Again. And again.
 2  00:00:06,000 → 00:00:12,000  And hosted routers hold your keys.
-3  00:00:12,000 → 00:00:19,000  Switchboard: one local, governed endpoint.
+3  00:00:12,000 → 00:00:19,000  MCP Switchboard: one local, governed endpoint.
 4  00:00:19,000 → 00:00:26,000  Claude + ChatGPT → the same tools.
 5  00:00:26,000 → 00:00:33,000  Keys live in a local AES-256-GCM vault. Zero custody.
 6  00:00:33,000 → 00:00:40,000  Per-tool toggles · read/write/full · approval gates · audit log.
 7  00:00:40,000 → 00:00:46,000  Browse 4,700+ toolkits. Runs fully offline on a local LLM.
-8  00:00:46,000 → 00:00:50,000  npm i -g mcp-switchboard · github.com/Masoud-Masoori/switchboard
+8  00:00:46,000 → 00:00:50,000  npm i -g mcp-switchboard · github.com/Mas-AI-Official/mcp-switchboard
 ```
 
 ---
@@ -120,7 +120,7 @@ Each scene: on-screen visual + on-screen text (burned-in caption) + voiceover (V
 
 - Dark slate. A single gold hub in the center with two labeled arrows feeding in: **Claude** and **ChatGPT**.
 - Big text: **"One endpoint. Both AIs. Your keys stay home."**
-- Bottom strip: `github.com/Masoud-Masoori/switchboard`
+- Bottom strip: `github.com/Mas-AI-Official/mcp-switchboard`
 
 ---
 
@@ -130,17 +130,17 @@ Each scene: on-screen visual + on-screen text (burned-in caption) + voiceover (V
 > One local endpoint that gives **both Claude and ChatGPT** the same tools — and your API keys never leave your machine.
 > Per-tool toggles, read/write/full scopes, approval gates, audit log. Free + open source (Apache-2.0). Working alpha.
 > `npm i -g mcp-switchboard`
-> → github.com/Masoud-Masoori/switchboard
+> → github.com/Mas-AI-Official/mcp-switchboard
 
 **LinkedIn / YouTube Shorts description:**
-> Switchboard is a local-first, governed MCP aggregator. Instead of wiring every AI client to every tool (N×M), you run one local process that exposes one governed endpoint to all of them (N×1) — Claude, ChatGPT, Cursor, Claude Code, your own agents.
+> MCP Switchboard is a local-first, governed MCP aggregator. Instead of wiring every AI client to every tool (N×M), you run one local process that exposes one governed endpoint to all of them (N×1) — Claude, ChatGPT, Cursor, Claude Code, your own agents.
 > Keys stay in a local AES-256-GCM vault (zero custody). Every tool has on/off toggles, read/write/full scopes, approval gates that fail closed, and an append-only audit log. Browse 4,700+ toolkits in the built-in dashboard; it even runs fully offline against a local LLM.
 > Free, self-hosted, Apache-2.0. It's an early working alpha and feedback is very welcome.
 > Install: npm install -g mcp-switchboard
-> Repo: https://github.com/Masoud-Masoori/switchboard
+> Repo: https://github.com/Mas-AI-Official/mcp-switchboard
 
 **TikTok / Reels:**
-> your AI tools are wired N×M. here's the N×1 fix 👇 one local endpoint for Claude AND ChatGPT, keys never leave your machine. free + open source. link in bio → github.com/Masoud-Masoori/switchboard #mcp #ai #opensource #selfhosted #claude #chatgpt
+> your AI tools are wired N×M. here's the N×1 fix 👇 one local endpoint for Claude AND ChatGPT, keys never leave your machine. free + open source. link in bio → github.com/Mas-AI-Official/mcp-switchboard #mcp #ai #opensource #selfhosted #claude #chatgpt
 
 Hashtags (reuse): `#mcp #modelcontextprotocol #ai #opensource #selfhosted #claude #chatgpt #developertools #privacy`
 
@@ -161,7 +161,7 @@ Options to produce `final.mp4`:
 contentops_queue_browser_post(
   script_id=<id>,
   platforms=["x","linkedin","youtube_shorts","threads","bluesky","tiktok","instagram"],
-  video_path="D:/Ideas/Switchboard/marketing/video/final.mp4"
+  video_path="D:/Ideas/MCP Switchboard/marketing/video/final.mp4"
 )
 ```
 Posting uploads under your identity to your accounts — I will not auto-blast; it's queued for your approval.

@@ -2,7 +2,7 @@
  * Curated poll-first trigger templates.
  *
  * Hosted routers (Composio, Zapier, …) ship a catalog of provider-push triggers — "new GitHub
- * issue", "new Gmail message", "new Slack message". Switchboard can't depend on provider push
+ * issue", "new Gmail message", "new Slack message". MCP Switchboard can't depend on provider push
  * (it is local-first and behind NAT), so it offers the SAME catalog as POLL recipes: each
  * template pre-fills the detection wiring (which list field is the array, which field is the
  * unique key, a sane interval, sensible default args) for a common "watch X for new items"

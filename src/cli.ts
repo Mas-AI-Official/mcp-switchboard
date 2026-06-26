@@ -9,7 +9,7 @@
  *   switchboard doctor               check the environment + config
  *   switchboard catalog              list OAuth providers + connection status
  *   switchboard connect <provider>   authorize a provider via local loopback OAuth
- *   switchboard install <client>     wire Switchboard into an MCP client's config
+ *   switchboard install <client>     wire MCP Switchboard into an MCP client's config
  *   switchboard local-llm            detect a local LLM server for the offline council
  *   switchboard local-llm wire       wire a detected local server into the council
  *   switchboard toolkits sync        rebuild the integration catalog from open indexes
@@ -187,7 +187,7 @@ program
   .description("check the environment, config, and credentials")
   .action(() => {
     const path = configPath();
-    out(`Switchboard doctor`);
+    out(`MCP Switchboard doctor`);
     out(`  node:        ${process.version}`);
     out(`  home:        ${HOME_DIR}`);
     out(`  config:      ${path} ${existsSync(path) ? "(found)" : "(missing — run `switchboard init`)"}`);
@@ -337,7 +337,7 @@ program
 
 program
   .command("install <client>")
-  .description(`wire Switchboard into an MCP client's config (${SUPPORTED_CLIENTS.join(", ")})`)
+  .description(`wire MCP Switchboard into an MCP client's config (${SUPPORTED_CLIENTS.join(", ")})`)
   .option("--global", "write the client's user/global config instead of a project-local one")
   .option("--dir <path>", "project directory for project-local configs (default: cwd)")
   .option("--name <name>", "server name to register under", "switchboard")
@@ -375,7 +375,7 @@ program
         return;
       }
       if (plan.existed && !plan.changed) {
-        log.ok(`${plan.target.label} already points at this Switchboard (${plan.target.path}) — no change`);
+        log.ok(`${plan.target.label} already points at this MCP Switchboard (${plan.target.path}) — no change`);
       } else {
         writePlan(plan);
         log.ok(`${plan.existed ? "updated" : "wrote"} ${plan.target.label} config → ${plan.target.path}`);
@@ -393,7 +393,7 @@ const llmCmd = program
     const live = results.filter((r) => r.reachable);
     if (live.length === 0) {
       log.warn("no local model server reachable on the usual ports.");
-      out("\nRun a model locally — Switchboard never downloads or runs anything for you, so copy/paste these:\n");
+      out("\nRun a model locally — MCP Switchboard never downloads or runs anything for you, so copy/paste these:\n");
       for (const step of installGuide()) out(`  • ${step}`);
       return;
     }

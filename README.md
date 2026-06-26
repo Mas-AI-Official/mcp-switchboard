@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="docs/assets/switchboard-banner.svg" alt="Switchboard — one governed MCP endpoint for every tool, shared by Claude and ChatGPT, running local-first on your machine" width="880" />
+<img src="docs/assets/switchboard-banner.svg" alt="MCP Switchboard — one governed MCP endpoint for every tool, shared by Claude and ChatGPT, running local-first on your machine" width="880" />
 
-<h1>🔌&nbsp;Switchboard</h1>
+<h1>🔌&nbsp;MCP Switchboard</h1>
 
 <p>
   <b>One connector. Every tool. Both Claude <i>and</i> ChatGPT</b> — driving the same apps through one governed control plane on your machine.<br/>
@@ -36,7 +36,7 @@ actually *do things*: read your GitHub, triage your Gmail, update Notion, ping S
 internal API. Today that means wiring every client to every app by hand (**N×M** pain), and the
 "easy" hosted shortcut parks **your OAuth tokens on someone else's server**.
 
-Switchboard collapses **N×M into N×1**. You run **one** local process that re-exposes all your MCP
+MCP Switchboard collapses **N×M into N×1**. You run **one** local process that re-exposes all your MCP
 servers behind **one governed endpoint**. You add that endpoint **once** as a connector in Claude,
 and **once** in ChatGPT — and now *both* assistants reach the same tools, through the **same
 encrypted vault, the same on/off + read/write/full policy, the same approval gates, and the same
@@ -59,7 +59,7 @@ command. No tokens handed to a vendor, no per-call meter, no treadmill.
 
 ### "So Claude and ChatGPT share my email?" — almost; here's the precise mental model
 
-You're **right** that Switchboard is the single connector both assistants point at to reach every
+You're **right** that MCP Switchboard is the single connector both assistants point at to reach every
 app. Two corrections worth making:
 
 - **It's a shared *control plane*, not a shared *session*.** Claude and ChatGPT don't see each
@@ -77,7 +77,7 @@ app. Two corrections worth making:
 
 ### No cloud account? Run it fully offline.
 
-Adoption shouldn't require an API bill. Point Switchboard's **council** at a **local LLM** — Ollama,
+Adoption shouldn't require an API bill. Point MCP Switchboard's **council** at a **local LLM** — Ollama,
 LM Studio, llama.cpp, or vLLM — and you get a second-opinion / debate model with **zero cloud, zero
 keys, zero data leaving the box**. You don't even have to find the URL: `switchboard local-llm`
 **auto-detects** a running OpenAI-compatible server on the usual ports, and `switchboard local-llm wire`
@@ -86,7 +86,7 @@ policy, audit, council) runs on your hardware. See **[Run it fully offline with 
 
 ## Why it's different
 
-|  | Switchboard | Hosted tool routers |
+|  | MCP Switchboard | Hosted tool routers |
 |---|---|---|
 | **One connector, every assistant** | Add it once; **Claude *and* ChatGPT** share the same governed tools | Per-vendor, per-app setup |
 | **Where your tokens live** | A local AES-256 vault on **your** machine | Their cloud |
@@ -132,21 +132,21 @@ client in one command with `switchboard install <client>` (see [below](#wire-it-
 
 > One-time prerequisite: install **[Node 18.18+](https://nodejs.org)**.
 
-1. Get the code — `git clone https://github.com/Masoud-Masoori/switchboard.git`, or **Code ▸ Download ZIP** on GitHub and unzip it.
+1. Get the code — `git clone https://github.com/Mas-AI-Official/mcp-switchboard.git`, or **Code ▸ Download ZIP** on GitHub and unzip it.
 2. **Windows:** double-click **`start-switchboard.bat`**.
    **macOS / Linux:** run **`./start-switchboard.sh`** (`chmod +x start-switchboard.sh` once).
 3. That's it. The first run installs dependencies, builds, and writes a starter config for you; then the gateway starts and **the dashboard opens in your browser** automatically.
 
 To stop it: press **Ctrl+C** in the launcher window — or, if you closed the window and the port is still busy, double-click **`stop-switchboard.bat`** (`./stop-switchboard.sh` isn't needed on Unix; Ctrl+C is enough).
 
-The launcher runs Switchboard in **HTTP + dashboard** mode on `http://127.0.0.1:8088`. To wire a stdio client (`claude mcp add`, Cursor) or change the transport, edit `switchboard.config.yaml` or use the from-source commands below.
+The launcher runs MCP Switchboard in **HTTP + dashboard** mode on `http://127.0.0.1:8088`. To wire a stdio client (`claude mcp add`, Cursor) or change the transport, edit `switchboard.config.yaml` or use the from-source commands below.
 
 ### From source (manual)
 
-> Requires Node ≥ 18.18. Prefer this if you want to hack on Switchboard or pin a specific commit.
+> Requires Node ≥ 18.18. Prefer this if you want to hack on MCP Switchboard or pin a specific commit.
 
 ```bash
-git clone https://github.com/Masoud-Masoori/switchboard.git
+git clone https://github.com/Mas-AI-Official/mcp-switchboard.git
 cd switchboard
 npm install
 npm run build
@@ -212,7 +212,7 @@ servers:
 
 ### Connecting an OAuth provider (Phase 3)
 
-For the five managed providers you don't paste a token — you authorize once and Switchboard seals
+For the five managed providers you don't paste a token — you authorize once and MCP Switchboard seals
 the result in the vault. Store the provider's client credentials, then run the loopback flow:
 
 ```bash
@@ -230,7 +230,7 @@ your machine.
 
 ### Wrapping a REST API as MCP (app2mcp, Phase 4)
 
-Point a server at an OpenAPI/Swagger spec and Switchboard generates the MCP tools in-process at mount:
+Point a server at an OpenAPI/Swagger spec and MCP Switchboard generates the MCP tools in-process at mount:
 
 ```yaml
 servers:
@@ -249,11 +249,11 @@ Each operation becomes a governed tool. Scope is inferred from the HTTP verb
 
 ### Cross-provider council (Phase 5)
 
-Switchboard already brokers tool calls; the **council** lets one agent broker a *peer model*. Turn it
-on and Switchboard exposes two governed tools — `council_consult` (relay a prompt to the other provider
+MCP Switchboard already brokers tool calls; the **council** lets one agent broker a *peer model*. Turn it
+on and MCP Switchboard exposes two governed tools — `council_consult` (relay a prompt to the other provider
 and return its reply) and `council_debate` (a bounded multi-round exchange between providers plus a
 synthesized conclusion). The headline use case: a **Claude client asking OpenAI for a second opinion**,
-or vice-versa — the chat-window model orchestrates, Switchboard relays + governs + logs.
+or vice-versa — the chat-window model orchestrates, MCP Switchboard relays + governs + logs.
 
 ```bash
 # keys live in the vault, never in config (BYO keys, zero custody)
@@ -284,7 +284,7 @@ needs the OAuth layer below.
 
 The council's third provider is **`local`** — any OpenAI-compatible server: Ollama, LM Studio,
 llama.cpp's `llama-server`, or vLLM. No cloud, no key, nothing leaves the box. You don't have to know
-the URL or the model id — Switchboard probes for you:
+the URL or the model id — MCP Switchboard probes for you:
 
 ```bash
 node dist/cli.js local-llm          # scan the usual ports; print what's running + a ready-to-paste block
@@ -338,7 +338,7 @@ verified by a deterministic oracle: `npm run verify:webhook` — 33/33.
 
 ### Poll-first triggers (turn any read tool into an event source)
 
-Hosted tool routers sell "triggers" as inbound webhooks you have to expose to the cloud. Switchboard
+Hosted tool routers sell "triggers" as inbound webhooks you have to expose to the cloud. MCP Switchboard
 does it the local-first way: it **polls** a read-scoped tool you already mounted on a schedule, diffs
 each result against the last poll, and fires an event the moment something new shows up — no inbound
 listener, no public URL, no third-party relay.
@@ -443,12 +443,12 @@ servers:
 
 Every level stacks (global ∧ server ∧ tool), each requiring at least one ceiling. Enforcement is pinned
 by a deterministic oracle: `npm run verify:limits` — 61/61. *(Beyond hosted routers — they bill the
-overage; Switchboard stops it.)*
+overage; MCP Switchboard stops it.)*
 
 ### Circuit breaker — a flapping upstream fails fast instead of hanging
 
 When an upstream MCP server starts throwing or timing out, you don't want every agent call to sit on a
-30-second wall-clock timeout. Turn on **resilience** and Switchboard trips a per-server circuit after N
+30-second wall-clock timeout. Turn on **resilience** and MCP Switchboard trips a per-server circuit after N
 consecutive **transport** failures (a thrown error or a timeout — *not* a well-formed tool error, which
 is a valid answer). While open, calls fast-fail with `SB_UPSTREAM_UNAVAILABLE`; after a cooldown it
 auto-probes and closes on the first success.
@@ -534,7 +534,7 @@ is verified end-to-end by a deterministic oracle: `npm run verify:oauth` (20/20)
 | `switchboard init` | Scaffold `switchboard.config.yaml` + the `~/.switchboard` home |
 | `switchboard serve` | Run the gateway (stdio and/or HTTP, per config) |
 | `switchboard dashboard` | Run only the HTTP endpoint + web console |
-| `switchboard install <client>` | Wire Switchboard into a client (`claude-desktop`, `claude-code`, `cursor`, `vscode`, `codex`) — `--global` / `--dir` / `--name` / `--print` |
+| `switchboard install <client>` | Wire MCP Switchboard into a client (`claude-desktop`, `claude-code`, `cursor`, `vscode`, `codex`) — `--global` / `--dir` / `--name` / `--print` |
 | `switchboard expose` | Open an HTTPS tunnel to the local endpoint (for claude.ai web / ChatGPT / remote clients) |
 | `switchboard list` | Mount everything and print the governed tool list, then exit |
 | `switchboard doctor` | Check Node, config, transports, and that every secret resolves |
@@ -567,12 +567,12 @@ written to an append-only audit log**. Full walkthrough in **[docs/BLUEPRINT.md]
 ### Tool-exposure modes
 
 Mount 30 servers and naive aggregation dumps ~600 tool schemas into your agent's context — accuracy
-collapses, tokens explode. Switchboard offers three modes via `gateway.tool_exposure`:
+collapses, tokens explode. MCP Switchboard offers three modes via `gateway.tool_exposure`:
 
 - **`namespaced`** (default) — tools prefixed `github__create_issue`; only enabled servers exposed.
 - **`flat`** — bare tool names (small setups; first server to claim a name wins).
 - **`search`** — expose just two meta-tools, **`find_tools(query)`** and **`call_tool(name,args)`**.
-  The agent searches; Switchboard returns only the relevant handful. The surface stays flat no
+  The agent searches; MCP Switchboard returns only the relevant handful. The surface stays flat no
   matter how many servers you mount.
 
 ## Project status
@@ -586,7 +586,7 @@ through the governed path.
 - **Managed OAuth (Phase 3)** — local OAuth for **5 providers** (Google, GitHub, Slack, Notion, Linear)
   via the catalog UI or `switchboard connect <provider>`; tokens are sealed in the same local vault as
   BYO keys. Hand-rolled on Node `crypto` — no third-party auth service, zero native deps.
-- **app2mcp (Phase 4)** — point `source: app2mcp` at an OpenAPI/Swagger spec and Switchboard generates
+- **app2mcp (Phase 4)** — point `source: app2mcp` at an OpenAPI/Swagger spec and MCP Switchboard generates
   an in-process MCP server at mount, with verb→scope inference flowing into the **same** governance
   engine (a generated `deletepet` is denied under a `read` ceiling). A reference without a resolvable
   spec still fails closed.
@@ -612,7 +612,7 @@ through the governed path.
 
 **Beyond hosted parity — the net-new tier:**
 
-- **One-command install** — `switchboard install <client>` non-destructively wires Switchboard into
+- **One-command install** — `switchboard install <client>` non-destructively wires MCP Switchboard into
   Claude Desktop, Claude Code, Cursor, VS Code, or Codex (`--global` / `--dir` / `--name` / `--print`).
   Verified by `npm run verify:install` — 57/57.
 - **Offline local-LLM auto-detect** — `switchboard local-llm` probes for a running Ollama/LM Studio/
@@ -635,7 +635,7 @@ See **[docs/ROADMAP.md](docs/ROADMAP.md)** for the phase-by-phase detail and
 
 ### Everything is verified by a deterministic oracle
 
-Switchboard makes a lot of governance and honesty claims — "fails closed", "never auto-downloads",
+MCP Switchboard makes a lot of governance and honesty claims — "fails closed", "never auto-downloads",
 "metadata only", "a profile can only narrow". None of them are taken on faith. Every one is pinned by a
 **deterministic oracle**: a zero-dependency Node script that imports the *compiled* code, exercises the
 contract, and prints `N/N checks passed` — no model tokens, no flakiness, just code checking code. One

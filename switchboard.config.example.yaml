@@ -6,7 +6,7 @@
 # The dashboard reads and writes this file; you can also hand-edit it.
 
 gateway:
-  # How agents connect TO Switchboard. Run both at once if you like.
+  # How agents connect TO MCP Switchboard. Run both at once if you like.
   #   stdio -> for `claude mcp add` / Cursor / local MCP clients
   #   http  -> Streamable HTTP endpoint at /mcp + the web dashboard
   transport: [stdio, http]
@@ -65,7 +65,7 @@ settings:
     # Off by default — turn it on only when you need to inspect tool I/O.
     capture_io: false
 
-  # Cross-provider "council" relay tools. Lets an agent connected to Switchboard broker a
+  # Cross-provider "council" relay tools. Lets an agent connected to MCP Switchboard broker a
   # PEER model: council_consult (one prompt -> the other provider) and council_debate (a
   # bounded multi-round exchange between providers + a synthesized conclusion). The headline
   # use case: a Claude client asking OpenAI for a second opinion, or vice-versa.
@@ -102,7 +102,7 @@ settings:
         # base_url: https://api.openai.com
 
   # Built-in OAuth 2.1 + PKCE Authorization Server for the `/mcp` endpoint. Turn this ON only
-  # to connect a hosted MCP client that can reach Switchboard ONLY through a public HTTPS
+  # to connect a hosted MCP client that can reach MCP Switchboard ONLY through a public HTTPS
   # tunnel and refuses a static bearer token — notably claude.ai web, which requires OAuth 2.1
   # + PKCE + Dynamic Client Registration. Claude Desktop, Claude Code, and ChatGPT dev-mode all
   # reach a local endpoint with a plain API key instead, so they do NOT need this.
@@ -160,7 +160,7 @@ settings:
 
   # Hard wall-clock timeout (ms) on EVERY upstream tool call. A hung or slow upstream is cut off
   # and surfaced to the agent as `SB_UPSTREAM_TIMEOUT` instead of blocking it forever. Omit for no
-  # Switchboard-imposed timeout (the transport's own default still applies).
+  # MCP Switchboard-imposed timeout (the transport's own default still applies).
   call_timeout_ms: 30000
 
   # Circuit breaker — the upstream-resilience a hosted router gives you for free. After N consecutive

@@ -1,6 +1,6 @@
-# Switchboard → Composio Parity: Local, Self-Hosted, Zero-Custody Tool Router
+# MCP Switchboard → Composio Parity: Local, Self-Hosted, Zero-Custody Tool Router
 
-> Design + build plan. Decision-grade synthesis of six grounded research reports + a read of the current Switchboard source. KNOWN vs INFERRED is called out throughout; low-confidence/post-cutoff items carry caveats verbatim.
+> Design + build plan. Decision-grade synthesis of six grounded research reports + a read of the current MCP Switchboard source. KNOWN vs INFERRED is called out throughout; low-confidence/post-cutoff items carry caveats verbatim.
 
 ## 0. Build Status — ALL PHASES SHIPPED & VERIFIED
 
@@ -40,7 +40,7 @@ The DO-set below is **fully built**, and several items the original plan marked 
 
 **What Composio is.** A managed "tools-for-agents" platform: ~1000+ pre-built toolkits (Gmail/GitHub/Notion/Slack/Supabase/Linear/…), managed per-end-user OAuth/API-key auth, and a flagship **Tool Router** that mints a per-user pre-signed MCP URL so an agent uses a few meta-tools (search / execute / manage-connections) to discover and run tools just-in-time instead of loading thousands of schemas into context. Entity model: **Organization > Project (`proj_`) > Auth Config (`ac_`) > Connected Account (`ca_`) > Tools/Triggers**. Dashboard left-nav: Toolkits / Auth Configs / Connected Accounts / Triggers / MCP / Logs / Playground, plus Project + Org settings. Metered purely on **TOOL CALLS** (Free 20K → $29/200K → $229/2M → Enterprise). SDKs are open (MIT); the catalog pipeline, toolkit definitions, and managed OAuth apps are proprietary.
 
-**The thesis for a local clone.** Switchboard **already owns the hard, billable parts**: a local AES-256-GCM vault (zero custody), scope-based policy + approval gates (governance), an OpenAPI→MCP wrapper (`app2mcp`, `src/openapi.ts` invoked by `src/registry.ts`), OAuth-per-provider with PKCE, an append-only audit log, and a stateless Streamable-HTTP `/mcp` endpoint. What is missing is **breadth and presentation, not the engine**:
+**The thesis for a local clone.** MCP Switchboard **already owns the hard, billable parts**: a local AES-256-GCM vault (zero custody), scope-based policy + approval gates (governance), an OpenAPI→MCP wrapper (`app2mcp`, `src/openapi.ts` invoked by `src/registry.ts`), OAuth-per-provider with PKCE, an append-only audit log, and a stateless Streamable-HTTP `/mcp` endpoint. What is missing is **breadth and presentation, not the engine**:
 1. **Catalog scale** — 5 hardcoded OAuth providers + a flat server list vs Composio's 1000+ browsable toolkits.
 2. **Tool-Router context-economy at scale** — partially present as the `search` exposure mode (`config.ts gateway.tool_exposure` enum includes `search`); needs a real shared index.
 3. **The Composio-style dashboard/settings IA** — today the UI is a single vanilla-JS HTML string (`src/console.ts`) with 4 tab-cards; no catalog grid, categories, API-keys page, usage panel, logs, or settings.
@@ -51,32 +51,32 @@ The local **win** is removing the tool-call meter and the OAuth-app lock-in enti
 
 ## 2. Critical Answers
 
-### 2a. Can the consumer ChatGPT app (chatgpt.com) connect to a LOCAL Switchboard?
-**Yes — but never directly to localhost, only via a public HTTPS tunnel, and only after `/mcp` is authenticated.** chatgpt.com supports custom MCP servers via Settings → Apps & Connectors → Advanced → **Developer mode** (beta), including write actions. The connector MUST be a **remote** MCP server over public HTTPS (SSE or Streamable HTTP); ChatGPT's cloud connects **outbound** and can never reach `127.0.0.1`/LAN. Path: keep Switchboard's Streamable-HTTP `/mcp` (already present), expose via a public HTTPS tunnel (Cloudflare **named** tunnel preferred; quick tunnel works for stateless request/response but has **no SSE** and a random ephemeral URL; ngrok free injects an interstitial that breaks the handshake), and register the URL under Developer mode. ChatGPT generally accepts a **static bearer token via custom header**, so Switchboard's planned bearer auth suffices on the ChatGPT side.
+### 2a. Can the consumer ChatGPT app (chatgpt.com) connect to a LOCAL MCP Switchboard?
+**Yes — but never directly to localhost, only via a public HTTPS tunnel, and only after `/mcp` is authenticated.** chatgpt.com supports custom MCP servers via Settings → Apps & Connectors → Advanced → **Developer mode** (beta), including write actions. The connector MUST be a **remote** MCP server over public HTTPS (SSE or Streamable HTTP); ChatGPT's cloud connects **outbound** and can never reach `127.0.0.1`/LAN. Path: keep MCP Switchboard's Streamable-HTTP `/mcp` (already present), expose via a public HTTPS tunnel (Cloudflare **named** tunnel preferred; quick tunnel works for stateless request/response but has **no SSE** and a random ephemeral URL; ngrok free injects an interstitial that breaks the handshake), and register the URL under Developer mode. ChatGPT generally accepts a **static bearer token via custom header**, so MCP Switchboard's planned bearer auth suffices on the ChatGPT side.
 - **Confidence: HIGH** on architecture. **MEDIUM** on the Free-tier boundary (Apps-SDK doc says "all plans" 2025-11-13; Developer-mode list enumerates only Pro/Plus/Business/Enterprise/Edu — treat Free as unsupported until re-verified). Fast-moving beta; re-verify live.
 
 ### 2b. claude.ai web? Claude Desktop? Claude Code?
 - **claude.ai WEB** — cloud-bound. Anthropic connects **from its cloud**, explicitly **cannot** reach `127.0.0.1`/VPN/firewalled hosts; needs a public HTTPS remote-MCP URL. **CRITICAL:** web custom connectors require **OAuth 2.1 + PKCE** and **reject** static bearer tokens / `?token=`. A bearer-only expose path does **not** light up claude.ai web; full web support needs an OAuth-server layer. Free/Pro/Max/Team/Enterprise (Free = 1 connector; Team/Enterprise = Owner adds org-wide).
-- **Claude Desktop** — works **locally, no tunnel**: local stdio subprocess via `claude_desktop_config.json` (Switchboard already ships stdio). Can also use cloud remote connectors.
+- **Claude Desktop** — works **locally, no tunnel**: local stdio subprocess via `claude_desktop_config.json` (MCP Switchboard already ships stdio). Can also use cloud remote connectors.
 - **Claude Code (CLI)** — works **locally, no tunnel**: `claude mcp add switchboard -- <cmd>` (stdio) or `--transport http http://127.0.0.1:8088/mcp`. localhost works.
 - **Confidence: HIGH** on all three (grounded in Anthropic/MCP docs incl. verbatim cloud-vs-local statements). **MEDIUM** on the web OAuth-rejects-bearer specifics.
-- **Net contrast:** only claude.ai web + chatgpt.com are cloud-bound and need a tunnel; Desktop + Code reach local directly. claude.ai web additionally needs OAuth Switchboard lacks today.
+- **Net contrast:** only claude.ai web + chatgpt.com are cloud-bound and need a tunnel; Desktop + Code reach local directly. claude.ai web additionally needs OAuth MCP Switchboard lacks today.
 
-### 2c. A "council" between ChatGPT and claude.ai via Switchboard?
-**Not as the two models talking over MCP — that is a category error.** MCP shares **tools** between one client and one server; it does **not** bridge two providers. Each model independently calls Switchboard tools.
-- **Free today:** both apps hit the one Switchboard, so every call is governed by the same vault + policy + approval + audit. That uniform governance is the real aggregator value.
-- **A real council = build it as tools:** a `council_consult` / `ask_claude` / `ask_chatgpt` Switchboard tool that proxies a prompt to the **other** provider's API (keys in the vault) and returns the reply; the chat-window model orchestrates, Switchboard relays + governs + logs. Add max-rounds + token-budget + loop guards.
+### 2c. A "council" between ChatGPT and claude.ai via MCP Switchboard?
+**Not as the two models talking over MCP — that is a category error.** MCP shares **tools** between one client and one server; it does **not** bridge two providers. Each model independently calls MCP Switchboard tools.
+- **Free today:** both apps hit the one MCP Switchboard, so every call is governed by the same vault + policy + approval + audit. That uniform governance is the real aggregator value.
+- **A real council = build it as tools:** a `council_consult` / `ask_claude` / `ask_chatgpt` MCP Switchboard tool that proxies a prompt to the **other** provider's API (keys in the vault) and returns the reply; the chat-window model orchestrates, MCP Switchboard relays + governs + logs. Add max-rounds + token-budget + loop guards.
 - **Confidence: HIGH** (follows from protocol design).
 
 ### 2d. Realistically ~1047 toolkits locally?
 **Yes — by INGESTING freely-redistributable registries, re-implementing nothing, cloning nothing.**
-- **Anchor:** Official MCP Registry (`registry.modelcontextprotocol.io/v0/servers`, cursor-paginated, ~2,000), metadata **CC0 1.0**; `server.json` already encodes name/description/install-method + auth hints — near 1:1 onto Switchboard's catalog.
-- **Multiplier:** apis.guru openapi-directory (~2,529 APIs / 3,992 specs, **CC0**) through Switchboard's **existing** `app2mcp` wrapper — one entry per spec, `tool_count` = operation count, `auth_type` from `securitySchemes`.
+- **Anchor:** Official MCP Registry (`registry.modelcontextprotocol.io/v0/servers`, cursor-paginated, ~2,000), metadata **CC0 1.0**; `server.json` already encodes name/description/install-method + auth hints — near 1:1 onto MCP Switchboard's catalog.
+- **Multiplier:** apis.guru openapi-directory (~2,529 APIs / 3,992 specs, **CC0**) through MCP Switchboard's **existing** `app2mcp` wrapper — one entry per spec, `tool_count` = operation count, `auth_type` from `securitySchemes`.
 - MCP Registry (~2k) + apis.guru (~2.5k) **> 1047**, all CC0-clean. Glama (~48k) / PulseMCP (~19k) are **discovery/enrichment only** (query live, don't snapshot). **Never** import Composio's specs (proprietary; MIT covers SDK client code only).
 - **"Have" = browsable/installable catalog ENTRIES**, not 1047 live pre-warmed connections (same as Composio).
 - **Confidence: HIGH** on load-bearing facts; **MEDIUM** on registry sizes (mid-2026, preview — schema may shift). Dedupe by `registryType+identifier`/normalized repo URL; validate before installable; tag provenance/license.
 
-## 3. Composio → Switchboard Feature Map
+## 3. Composio → MCP Switchboard Feature Map
 
 | Composio feature | Local-first equivalent | Effort |
 |---|---|---|
@@ -111,9 +111,9 @@ The local **win** is removing the tool-call meter and the OAuth-app lock-in enti
 
 ## 5. Council Concept (honest)
 
-- **MCP gives, free:** Switchboard as the single governed bus — both apps' calls flow through one vault + policy + approval + audit (after Phase-0 auth).
+- **MCP gives, free:** MCP Switchboard as the single governed bus — both apps' calls flow through one vault + policy + approval + audit (after Phase-0 auth).
 - **MCP does NOT give:** model-to-model conversation. ChatGPT and Claude each call tools independently.
-- **A real council = relay tools:** `council_consult` (proxy a prompt to the other provider via vault-held keys, return the reply, governed + logged) + optional `council_debate` (fan-out + synthesis); add max-rounds + token-budget + loop guards. Chat-window model orchestrates; Switchboard is the bus.
+- **A real council = relay tools:** `council_consult` (proxy a prompt to the other provider via vault-held keys, return the reply, governed + logged) + optional `council_debate` (fan-out + synthesis); add max-rounds + token-budget + loop guards. Chat-window model orchestrates; MCP Switchboard is the bus.
 - **Connectivity reality:** zero-tunnel council = Claude Desktop + Claude Code only; adding ChatGPT needs the authenticated tunnel (bearer header); adding claude.ai web additionally needs the OAuth 2.1 + PKCE layer.
 
 ## 6. Phased Build Plan (mapped to existing files)
@@ -141,7 +141,7 @@ The local **win** is removing the tool-call meter and the OAuth-app lock-in enti
 4. **Catalog licensing:** bulk-copy ONLY CC0 (MCP Registry + apis.guru); enrichment registries query-live-only; never import Composio specs; registry is PREVIEW (pin + re-sync).
 5. **claude.ai-web auth:** rejects bearer/`?token=`, needs OAuth 2.1 + PKCE. Fork: is web a launch requirement? **DECISION: not a launch blocker — Phase 0 bearer covers ChatGPT + Desktop + Code now; claude.ai web is labeled OAuth-pending and lands in Phase 5.**
 6. **"1047 toolkits" expectation:** browsable/installable ENTRIES, not live connections — set this expectation explicitly.
-7. **Multi-user vs single-operator:** Composio is per-end-user; Switchboard is single-user. Multi-user isolation = L fork; carry `?user_id=` now, build later.
+7. **Multi-user vs single-operator:** Composio is per-end-user; MCP Switchboard is single-user. Multi-user isolation = L fork; carry `?user_id=` now, build later.
 8. **Council is a build, not a protocol feature:** budget the relay tools + provider keys if a true council is wanted; "shared governed tools" is free after Phase 0. **DECISION: ship "shared governed tools" with Phase 0; build the council relay tools in Phase 5.**
 
 ## 8. Sources
@@ -156,4 +156,4 @@ The local **win** is removing the tool-call meter and the OAuth-app lock-in enti
 
 **Catalog:** registry.modelcontextprotocol.io (/, /docs, /v0/servers, generic-server-json.md, terms-of-service, about); blog.modelcontextprotocol.io/posts/2025-09-08-mcp-registry-preview; github.com/modelcontextprotocol/registry; smithery.ai/docs; glama.ai/mcp/servers; pulsemcp.com/api + /servers; mcp.so; github.com/punkpeye/awesome-mcp-servers; github.com/APIs-guru/openapi-directory (+ LICENSE); api.apis.guru/v2/metrics.json; nordicapis.com/7-mcp-registries-worth-checking-out; truefoundry.com/blog/best-mcp-registries.
 
-**Switchboard source (read this session):** `src/dashboard.ts` (unauth `/mcp` at :39; `/api/catalog`, `/api/audit`, `/oauth/callback`, callbackPage), `src/config.ts` (`gateway.http` = `{host,port}` only; `tool_exposure` enum incl. `search`; `server.auth` enum `[none|oauth|bearer]`), `src/registry.ts` (`mount()` lifecycle; app2mcp via `buildOpenApiServer`), `src/oauth.ts` (5-provider PKCE table).
+**MCP Switchboard source (read this session):** `src/dashboard.ts` (unauth `/mcp` at :39; `/api/catalog`, `/api/audit`, `/oauth/callback`, callbackPage), `src/config.ts` (`gateway.http` = `{host,port}` only; `tool_exposure` enum incl. `search`; `server.auth` enum `[none|oauth|bearer]`), `src/registry.ts` (`mount()` lifecycle; app2mcp via `buildOpenApiServer`), `src/oauth.ts` (5-provider PKCE table).

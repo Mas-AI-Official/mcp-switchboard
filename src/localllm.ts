@@ -3,12 +3,12 @@
  * into the council as the zero-cloud, zero-key provider.
  *
  * The adoption story for non-cloud users: run a model on your own machine (Ollama, LM Studio,
- * llama.cpp's `llama-server`, vLLM — all speak the OpenAI `/v1` API), point Switchboard at it, and
+ * llama.cpp's `llama-server`, vLLM — all speak the OpenAI `/v1` API), point MCP Switchboard at it, and
  * the cross-provider council/playground works fully offline with no API key. This module does the
  * boring-but-fiddly parts: probe the usual localhost ports, read the model list, pick a sane default,
  * and merge a `settings.council.providers.local` block into the config WITHOUT touching anything else.
  *
- * Safety rule (same as `install`): Switchboard NEVER downloads or executes an installer. When no
+ * Safety rule (same as `install`): MCP Switchboard NEVER downloads or executes an installer. When no
  * server is found we PRINT exact copy-paste steps and stop — the user runs them.
  *
  * The pure pieces (parsers, model picker, config merge, install guide) are exported so the
@@ -174,7 +174,7 @@ export function wireAdvice(result: WireResult, model: string): string[] {
   return lines;
 }
 
-/** Exact, copy-paste setup steps. PRINTED ONLY — Switchboard never runs these for you. */
+/** Exact, copy-paste setup steps. PRINTED ONLY — MCP Switchboard never runs these for you. */
 export function installGuide(platform: NodeJS.Platform = process.platform): string[] {
   const steps: string[] = [];
   if (platform === "win32") {
@@ -186,7 +186,7 @@ export function installGuide(platform: NodeJS.Platform = process.platform): stri
   }
   steps.push("Pull a small, capable model: `ollama pull llama3.1` (≈4.7 GB; or `qwen2.5:7b`, `mistral`).");
   steps.push("Ollama then serves an OpenAI-compatible API at http://127.0.0.1:11434/v1 — no API key needed.");
-  steps.push("Wire it into Switchboard: `switchboard local-llm wire`.");
+  steps.push("Wire it into MCP Switchboard: `switchboard local-llm wire`.");
   steps.push("Prefer a GUI? LM Studio (https://lmstudio.ai) serves the same API at http://127.0.0.1:1234/v1.");
   return steps;
 }

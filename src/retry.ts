@@ -3,14 +3,14 @@
  *
  * A server that fails to mount at boot (transient DNS, an upstream still warming up, a
  * race on a freshly-spawned stdio child) was previously dead until the operator restarted
- * Switchboard. This module computes a capped exponential backoff schedule; the Gateway uses
+ * MCP Switchboard. This module computes a capped exponential backoff schedule; the Gateway uses
  * it to retry a failed mount in the background until it succeeds or the attempts are spent.
  *
  * Everything here is deterministic and side-effect-free (no timers, no I/O, no clock, no
  * randomness) so the schedule can be unit-tested exactly. The Gateway owns the one impure
  * part — a single `setTimeout(...).unref()` per scheduled attempt — and nothing else.
  *
- * No jitter on purpose: Switchboard reconnects a handful of named upstreams from ONE process,
+ * No jitter on purpose: MCP Switchboard reconnects a handful of named upstreams from ONE process,
  * not a fleet of thousands hammering a shared backend, so the thundering-herd problem jitter
  * solves does not apply here — and a deterministic schedule is testable to the millisecond.
  */

@@ -1,5 +1,5 @@
 /**
- * Switchboard error taxonomy.
+ * MCP Switchboard error taxonomy.
  *
  * Every governed failure carries a stable `SB_*` code plus a one-line, actionable hint — so an
  * agent (or a human reading the Logs page) gets a fixable message instead of an opaque stack.
@@ -41,7 +41,7 @@ export const SB_HINTS: Record<SbErrorCode, string> = {
   [SB_ERR.UPSTREAM_TIMEOUT]:
     "The upstream call exceeded settings.call_timeout_ms. Raise the timeout, or check whether the upstream server is reachable and responsive.",
   [SB_ERR.UPSTREAM_UNAVAILABLE]:
-    "This server's circuit breaker is open after repeated transport failures — Switchboard is failing fast instead of hanging on a dead upstream. Wait for the retry window, then it auto-probes; check the upstream server's health and credentials in the meantime. Tune via settings.resilience / server.resilience.",
+    "This server's circuit breaker is open after repeated transport failures — MCP Switchboard is failing fast instead of hanging on a dead upstream. Wait for the retry window, then it auto-probes; check the upstream server's health and credentials in the meantime. Tune via settings.resilience / server.resilience.",
   [SB_ERR.BAD_REQUEST]:
     "The request was malformed. Check the tool's input schema and that all required arguments are present.",
   [SB_ERR.RATE_LIMITED]:

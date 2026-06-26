@@ -65,7 +65,7 @@ const DEFAULT_TOLERANCE_SEC = 300;
 /**
  * Standard Webhooks (standardwebhooks.com) signature: HMAC-SHA256 over `${id}.${timestamp}.${payload}`,
  * returned in the spec's `v1,<base64>` form. This is the interoperable scheme Svix/Stripe-style
- * receiver libraries already verify, so a Switchboard delivery drops straight into existing tooling.
+ * receiver libraries already verify, so a MCP Switchboard delivery drops straight into existing tooling.
  */
 function signStandardWebhook(id: string, timestamp: number, payload: string, secret: string): string {
   return "v1," + createHmac("sha256", secret).update(`${id}.${timestamp}.${payload}`).digest("base64");

@@ -1,5 +1,5 @@
 /**
- * Shared types for Switchboard.
+ * Shared types for MCP Switchboard.
  *
  * The shapes here mirror `switchboard.config.yaml` 1:1. `config.ts` validates the
  * raw YAML against a zod schema and returns `SwitchboardConfig`; everything else
@@ -121,7 +121,7 @@ export interface ResponseRedaction {
 /**
  * Declarative auth injection for a server. Resolved per call so OAuth/vault values stay fresh,
  * then mapped to the right HTTP header (remote/app2mcp/http-tool) or env var (stdio). All `*_ref`
- * fields accept `${vault:..}`/`${env:..}` references — Switchboard never custodies a plaintext key.
+ * fields accept `${vault:..}`/`${env:..}` references — MCP Switchboard never custodies a plaintext key.
  */
 export type AuthScheme =
   | { kind: "bearer"; ref: string }
@@ -290,7 +290,7 @@ export interface SettingsConfig {
   council?: CouncilConfig;
   /**
    * Built-in OAuth 2.1 + PKCE Authorization Server for the `/mcp` endpoint. Off by default.
-   * Required for hosted MCP clients (e.g. claude.ai web) that can only reach Switchboard
+   * Required for hosted MCP clients (e.g. claude.ai web) that can only reach MCP Switchboard
    * through a public HTTPS tunnel and refuse to connect without OAuth + DCR.
    */
   oauth_server?: OAuthServerConfig;
@@ -303,7 +303,7 @@ export interface SettingsConfig {
   /**
    * Hard wall-clock timeout (ms) applied to every upstream tool call. A slow or hung upstream is
    * cut off and surfaced as an `SB_UPSTREAM_TIMEOUT` error instead of blocking the agent forever.
-   * Omitted = no Switchboard-imposed timeout (the transport's own default applies).
+   * Omitted = no MCP Switchboard-imposed timeout (the transport's own default applies).
    */
   call_timeout_ms?: number;
   /**
@@ -334,7 +334,7 @@ export interface SettingsConfig {
   resilience?: ResilienceConfig;
   /**
    * Self-healing mounts. When a server fails to mount at boot (transient DNS, an upstream still
-   * warming up, a stdio-child race), Switchboard retries it in the background on a capped
+   * warming up, a stdio-child race), MCP Switchboard retries it in the background on a capped
    * exponential backoff instead of leaving it dead until restart. On by default; set
    * `enabled: false` to disable, or tune the schedule. See `MountRetryConfig`.
    */
@@ -445,7 +445,7 @@ export interface OAuthServerConfig {
 export interface CouncilProviderConfig {
   /**
    * `${vault:..}`/`${env:..}` reference to the provider API key. MUST be a reference,
-   * never a literal key — Switchboard never custodies plaintext secrets.
+   * never a literal key — MCP Switchboard never custodies plaintext secrets.
    */
   api_key_ref: string;
   /** Default model id used when a call omits `model`. Config-driven to avoid hardcoded staleness. */
@@ -458,7 +458,7 @@ export interface CouncilProviderConfig {
  * A LOCAL, OpenAI-compatible model server (Ollama, LM Studio, llama.cpp, vLLM, …). The headline
  * "zero-cloud, zero-key" path: point `base_url` at the local server and the council/playground run
  * entirely offline. `api_key_ref` is OPTIONAL — most local servers need no token — but when present
- * it must still be a `${vault:..}`/`${env:..}` reference (Switchboard never custodies a plaintext key).
+ * it must still be a `${vault:..}`/`${env:..}` reference (MCP Switchboard never custodies a plaintext key).
  */
 export interface LocalProviderConfig {
   /** OpenAI-compatible base URL, e.g. `http://127.0.0.1:11434/v1` (Ollama) or `http://127.0.0.1:1234/v1` (LM Studio). */

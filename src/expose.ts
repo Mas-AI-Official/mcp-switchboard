@@ -157,7 +157,7 @@ function spawnTunnel(kind: TunnelKind, targetPort: number): Promise<{ child: Chi
 /** Print the paste-ready connection block once the public URL is known. */
 function printConnectionInfo(publicMcp: string, apiKeys: ApiKeyStore, issuedToken: string | null): void {
   out("");
-  out("  ┌─ Switchboard is live on the public internet ────────────────────");
+  out("  ┌─ MCP Switchboard is live on the public internet─────────────────");
   out("  │");
   out(`  │  MCP endpoint:  ${publicMcp}`);
   out("  │  Auth:          required — bearer API key");

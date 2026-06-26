@@ -188,7 +188,7 @@ export class Router {
         name: CALL_TOOL,
         description:
           "Invoke a tool discovered via `find_tools`, by its exact `name` (e.g. " +
-          "'github__create_issue'). The call is governed by Switchboard's policy and audit log.",
+          "'github__create_issue'). The call is governed by MCP Switchboard's policy and audit log.",
         inputSchema: {
           type: "object",
           properties: {

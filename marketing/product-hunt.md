@@ -1,4 +1,4 @@
-# Switchboard — Product Hunt launch kit
+# MCP Switchboard — Product Hunt launch kit
 
 ## Tagline
 
@@ -10,11 +10,11 @@ Run ONE local process that re-exposes all your MCP servers behind ONE governed e
 
 ## Maker's first comment
 
-Hi PH 👋 I'm Masoud, building Switchboard at MAS-AI Technologies.
+Hi PH 👋 I'm Masoud, building MCP Switchboard at MAS-AI Technologies.
 
 The problem that started this: I have two of the best agents in the world — Claude and ChatGPT — and I want both of them to actually *do things* (read GitHub, triage Gmail, update Notion, ping Slack, hit my internal API). Today that means wiring every client to every app by hand. N clients × M apps. And the "easy" hosted shortcut parks your OAuth tokens on someone else's server and meters every call.
 
-Switchboard collapses N×M into N×1. You run one local process that re-exposes all your MCP servers behind one governed endpoint. You add that endpoint once in Claude and once in ChatGPT, and now *both* assistants reach the same tools through the same encrypted local vault, the same on/off + read/write/full policy, the same approval gates, and the same audit log. One control plane. Your machine. No "us" in the middle.
+MCP Switchboard collapses N×M into N×1. You run one local process that re-exposes all your MCP servers behind one governed endpoint. You add that endpoint once in Claude and once in ChatGPT, and now *both* assistants reach the same tools through the same encrypted local vault, the same on/off + read/write/full policy, the same approval gates, and the same audit log. One control plane. Your machine. No "us" in the middle.
 
 Why local-first matters here:
 - **Your keys stay yours.** BYO credentials live in a local AES-256-GCM vault on your machine — zero token custody, nothing parked on a vendor server. Secret fields only ever hold `${vault:..}` / `${env:..}` / `${oauth:..}` references, never raw values.
@@ -28,7 +28,7 @@ Two things make day one easy: browse 4,700+ toolkits in the embedded dashboard, 
 
 **The honest part — this is a working alpha.** Every phase is shipped and verified, but it just launched: zero stars, no production users yet, and I'm not going to pretend otherwise. Under the hood it's pure-TypeScript/Node ESM with exactly 5 runtime dependencies, zero native dependencies, and every feature is backed by deterministic verification oracles (~1,150 automated checks — code checking code, no model tokens).
 
-Positioning, plainly: hosted tool routers like Composio and Pipedream are genuinely good hosted SaaS — but they custody your tokens and meter your calls. Switchboard is the self-hosted, governed alternative that keeps keys, governance and audit on *your* machine, free and open-source.
+Positioning, plainly: hosted tool routers like Composio and Pipedream are genuinely good hosted SaaS — but they custody your tokens and meter your calls. MCP Switchboard is the self-hosted, governed alternative that keeps keys, governance and audit on *your* machine, free and open-source.
 
 ```
 npm install -g mcp-switchboard
@@ -37,13 +37,13 @@ switchboard init && switchboard serve     # or: npx mcp-switchboard serve
 
 Requires Node ≥ 18.18. Dashboard opens at http://127.0.0.1:8088 (binds localhost by default).
 
-Repo: https://github.com/Masoud-Masoori/switchboard
+Repo: https://github.com/Mas-AI-Official/mcp-switchboard
 
 I'd genuinely rather hear what's wrong with it than collect upvotes — tear into the threat model, the governance design, the offline path. Issues and PRs welcome.
 
 ## Gallery slide captions
 
-1. **N×M → N×1.** One local Switchboard process re-exposes all your MCP servers behind one governed endpoint — so Claude *and* ChatGPT (plus Cursor, Claude Code, VS Code, your own agents) reach the same tools the same way.
+1. **N×M → N×1.** One local MCP Switchboard process re-exposes all your MCP servers behind one governed endpoint — so Claude *and* ChatGPT (plus Cursor, Claude Code, VS Code, your own agents) reach the same tools the same way.
 
 2. **Your keys never leave the box.** BYO credentials live in a local AES-256-GCM vault; config holds only `${vault:..}` references. Zero token custody — nothing parked on a vendor server.
 
@@ -65,11 +65,11 @@ I'd genuinely rather hear what's wrong with it than collect upvotes — tear int
 ## First-24h checklist
 
 - Publish the GitHub release and confirm `npm install -g mcp-switchboard` + `npx mcp-switchboard serve` both work cleanly on a fresh machine with Node 18.18.
-- Verify the repo URL in every asset points to https://github.com/Masoud-Masoori/switchboard and the README quickstart matches the launch copy.
+- Verify the repo URL in every asset points to https://github.com/Mas-AI-Official/mcp-switchboard and the README quickstart matches the launch copy.
 - Post the maker's first comment the moment the listing goes live; pin it.
 - Confirm all 5 gallery slides are uploaded in order and captions render correctly.
 - Be present in the comments all day — answer every question fast, especially anything on the threat model, token custody, and the offline local-LLM path. Invite criticism; don't get defensive.
-- When asked "how is this different from Composio / Pipedream?", give the honest framing: they're solid hosted SaaS, Switchboard is the self-hosted, governed, Apache-2.0 alternative that keeps keys + governance + audit on your machine.
+- When asked "how is this different from Composio / Pipedream?", give the honest framing: they're solid hosted SaaS, MCP Switchboard is the self-hosted, governed, Apache-2.0 alternative that keeps keys + governance + audit on your machine.
 - State the alpha status plainly if anyone asks about maturity — working alpha, just launched, no production users yet.
 - Cross-post truthfully to a Show HN and a relevant subreddit (r/LocalLLaMA, r/ClaudeAI, r/ChatGPT) with the problem-first framing; link back to the repo, not the PH page only.
 - Watch GitHub issues and the `npm` page; triage and reply to the first bug reports same-day.

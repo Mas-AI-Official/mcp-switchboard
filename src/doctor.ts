@@ -1,5 +1,5 @@
 /**
- * Doctor — pre-flight diagnosis of a Switchboard install, computed as DATA.
+ * Doctor — pre-flight diagnosis of a MCP Switchboard install, computed as DATA.
  *
  * `switchboard doctor` renders this report; the oracle asserts on it. Keeping the
  * checks in one pure function — no console, no process.exit, no live gateway — makes

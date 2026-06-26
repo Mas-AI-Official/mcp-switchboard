@@ -1,6 +1,6 @@
 ## Title
 
-Switchboard: a local-first, governed MCP aggregator — BYO keys in a local AES-256-GCM vault, zero token custody, governance + audit on your own box (working alpha, Apache-2.0)
+MCP Switchboard: a local-first, governed MCP aggregator — BYO keys in a local AES-256-GCM vault, zero token custody, governance + audit on your own box (working alpha, Apache-2.0)
 
 ## Body
 
@@ -8,7 +8,7 @@ I got tired of two things about wiring AI assistants up to my tools, so I built 
 
 **The problem.** If you use MCP (Model Context Protocol) servers to let an agent actually *do* things — read GitHub, triage Gmail, poke Notion, hit your own REST API — you end up hand-wiring every client to every server. N clients x M apps of config. And the "easy" shortcut is a hosted router that parks your OAuth tokens on someone else's server and meters every call. Not what I want running my email.
 
-**What Switchboard does.** It's one local process that re-exposes all your MCP servers behind one governed endpoint, so it collapses that N x M wiring into N x 1. You point a client at one endpoint instead of wiring each tool into each client. The same vault, the same on/off + read/write/full policy, the same approval gates, and the same audit log sit underneath every assistant that connects — Claude Desktop, Claude Code, Cursor, VS Code, your own agents.
+**What MCP Switchboard does.** It's one local process that re-exposes all your MCP servers behind one governed endpoint, so it collapses that N x M wiring into N x 1. You point a client at one endpoint instead of wiring each tool into each client. The same vault, the same on/off + read/write/full policy, the same approval gates, and the same audit log sit underneath every assistant that connects — Claude Desktop, Claude Code, Cursor, VS Code, your own agents.
 
 The bits that matter for r/selfhosted specifically:
 
@@ -27,11 +27,11 @@ The bits that matter for r/selfhosted specifically:
 
 **Honest status — this is a working alpha.** It just launched: zero GitHub stars, no known production users, no battle-testing. Every phase is implemented and verified by the oracles above, but please treat it as alpha and tell me where it breaks. I'd rather hear the holes now. Specific things I'd love eyes on: the vault/key-on-disk model, the fail-closed governance paths, and whether the `expose` + OAuth flow is sane for anyone who actually wants remote access.
 
-**Positioning, to be upfront:** hosted tool routers (Composio, Pipedream, etc.) are solid hosted SaaS — but they custody your tokens and meter your calls. Switchboard is the self-hosted, governed alternative: keys + governance + audit stay on your machine, free and OSS. Not claiming they're bad; claiming this is the local-first option.
+**Positioning, to be upfront:** hosted tool routers (Composio, Pipedream, etc.) are solid hosted SaaS — but they custody your tokens and meter your calls. MCP Switchboard is the self-hosted, governed alternative: keys + governance + audit stay on your machine, free and OSS. Not claiming they're bad; claiming this is the local-first option.
 
 **License:** Apache-2.0. Author/maintainer: MAS-AI Technologies (Masoud Masoori).
 
-**Repo:** https://github.com/Masoud-Masoori/switchboard
+**Repo:** https://github.com/Mas-AI-Official/mcp-switchboard
 
 ```bash
 # Node >= 18.18 required

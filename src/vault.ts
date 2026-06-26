@@ -18,7 +18,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "n
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-/** Switchboard's home dir. Override with SWITCHBOARD_HOME (used in tests). */
+/** MCP Switchboard's home dir. Override with SWITCHBOARD_HOME (used in tests). */
 export const HOME_DIR = process.env.SWITCHBOARD_HOME ?? join(homedir(), ".switchboard");
 
 const KEY_PATH = join(HOME_DIR, "vault.key");

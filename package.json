@@ -5,13 +5,13 @@
   "type": "module",
   "license": "Apache-2.0",
   "author": "MAS-AI Technologies",
-  "homepage": "https://github.com/Masoud-Masoori/switchboard#readme",
+  "homepage": "https://github.com/Mas-AI-Official/mcp-switchboard#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Masoud-Masoori/switchboard.git"
+    "url": "git+https://github.com/Mas-AI-Official/mcp-switchboard.git"
   },
   "bugs": {
-    "url": "https://github.com/Masoud-Masoori/switchboard/issues"
+    "url": "https://github.com/Mas-AI-Official/mcp-switchboard/issues"
   },
   "keywords": [
     "mcp",
@@ -30,7 +30,8 @@
     "composio-alternative"
   ],
   "bin": {
-    "switchboard": "dist/cli.js"
+    "switchboard": "dist/cli.js",
+    "mcp-switchboard": "dist/cli.js"
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

@@ -1,4 +1,4 @@
-# Switchboard — Roadmap
+# MCP Switchboard — Roadmap
 
 Principle: **ship the smallest thing that is already differentiated.** The MVP had to be
 local-first + per-tool toggle on day one — that alone beats "paste 10 server configs by hand."

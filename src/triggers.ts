@@ -3,10 +3,10 @@
  *
  * A trigger periodically calls a (normally read-scoped) tool and fires when the result
  * changes. It is the LOCAL-FIRST answer to a provider webhook: the poll is an OUTBOUND call,
- * so Switchboard never needs an inbound port, a public tunnel, or a provider that supports
+ * so MCP Switchboard never needs an inbound port, a public tunnel, or a provider that supports
  * push — it works behind NAT, on a laptop, fully offline-capable except for the upstream it
- * polls. (Inbound webhooks — `settings.webhook` — go the other way: Switchboard POSTs OUT to
- * the operator. Triggers are how Switchboard learns that something CHANGED upstream.)
+ * polls. (Inbound webhooks — `settings.webhook` — go the other way: MCP Switchboard POSTs OUT to
+ * the operator. Triggers are how MCP Switchboard learns that something CHANGED upstream.)
  *
  * Two governed actions per trigger, kept deliberately distinct:
  *   1. THE POLL is a real `router.callTool(...)`, so it runs the full policy → approval →

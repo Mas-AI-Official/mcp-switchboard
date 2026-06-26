@@ -1,4 +1,4 @@
-# Switchboard — Vision & Positioning
+# MCP Switchboard — Vision & Positioning
 
 ## The problem
 

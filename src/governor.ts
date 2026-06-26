@@ -1,7 +1,7 @@
 /**
  * Rate limits + spend budgets — the protective inverse of a hosted router's billing meter.
  *
- * Hosted aggregators meter your calls to bill you. Switchboard runs on YOUR machine, so the same
+ * Hosted aggregators meter your calls to bill you. MCP Switchboard runs on YOUR machine, so the same
  * accounting becomes a governance control instead: cap how fast (and how expensively) an autonomous
  * agent may hit a tool, so a runaway loop or a pricey cross-provider council can't quietly burn your
  * API budget. Limits stack across three levels — global (`settings.limits`), per-server

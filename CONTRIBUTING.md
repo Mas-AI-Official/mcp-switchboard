@@ -1,6 +1,6 @@
-# Contributing to Switchboard
+# Contributing to MCP Switchboard
 
-Thanks for your interest. Switchboard is a small, deliberately dependency-light
+Thanks for your interest. MCP Switchboard is a small, deliberately dependency-light
 TypeScript project — contributions that keep it that way are the most welcome.
 
 ## Ground rules
@@ -11,13 +11,13 @@ TypeScript project — contributions that keep it that way are the most welcome.
   a tool is more serious than one that under-exposes it.
 - **Zero native dependencies.** `npm install` must not require a C/C++ toolchain. The
   encrypted-file vault uses Node's built-in `crypto` for exactly this reason.
-- **Aggregate, don't re-implement.** Switchboard mounts existing MCP servers. We do not
+- **Aggregate, don't re-implement.** MCP Switchboard mounts existing MCP servers. We do not
   ship hand-written integrations for individual SaaS apps.
 
 ## Dev setup
 
 ```bash
-git clone https://github.com/Masoud-Masoori/switchboard.git
+git clone https://github.com/Mas-AI-Official/mcp-switchboard.git
 cd switchboard
 npm install
 npm run build          # tsc -> dist/
@@ -55,7 +55,7 @@ See [docs/BLUEPRINT.md](docs/BLUEPRINT.md) for the full as-built architecture.
 ## Reporting security issues
 
 Please **do not** open a public issue for a vulnerability. Email the maintainer
-(see the repository profile) with details and a reproduction. Switchboard handles
+(see the repository profile) with details and a reproduction. MCP Switchboard handles
 credentials, so security reports are triaged first.
 
 ## License
