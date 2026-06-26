@@ -29,7 +29,7 @@ export type TunnelKind = "cloudflared" | "ngrok" | "tailscale";
 
 export const TUNNEL_KINDS: TunnelKind[] = ["cloudflared", "ngrok", "tailscale"];
 
-interface TunnelSpec {
+export interface TunnelSpec {
   /** Binary name; spawned without a shell, so it must be on PATH. */
   bin: string;
   /** Argv to point the tunnel at the local /mcp listener on `port`. */
@@ -42,7 +42,7 @@ interface TunnelSpec {
   note?: string;
 }
 
-const TUNNELS: Record<TunnelKind, TunnelSpec> = {
+export const TUNNELS: Record<TunnelKind, TunnelSpec> = {
   cloudflared: {
     bin: "cloudflared",
     args: (port) => ["tunnel", "--url", `http://127.0.0.1:${port}`],
