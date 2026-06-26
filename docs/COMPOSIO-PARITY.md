@@ -4,29 +4,35 @@
 
 ## 0. Build Status — ALL PHASES SHIPPED & VERIFIED
 
-The DO-set below is **fully built**, and several items the original plan marked "defer" (Triggers, Webhooks) were also delivered, plus net-new resilience/governance features (Profiles, Rate-limits + spend-budgets, per-server circuit breaker) that go *beyond* Composio. Each feature is pinned by a zero-dep deterministic oracle; `npm run verify` runs the build + **all sixteen** and is **green (619 checks)**.
+The DO-set below is **fully built**, and several items the original plan marked "defer" (Triggers, Webhooks) were also delivered, plus net-new resilience/governance features (Profiles, Rate-limits + spend-budgets, per-server circuit breaker, retry/backoff) that go *beyond* Composio. Each feature is pinned by a zero-dep deterministic oracle; `npm run verify` runs the build + **all 25 oracles** and is **green (1153 checks)**.
 
 | Phase / feature | Status | Oracle | Source |
 |---|---|---|---|
 | **0 — `/mcp` endpoint auth** (named API keys, fail-closed) | ✅ | `verify:auth` 13/13 | `apikeys.ts`, `dashboard.ts` |
-| **1 — Dashboard SPA + catalog grid + settings** | ✅ | `verify:dashboard` 43/43 | `dashboard.ts`, `catalog.ts` |
+| **1 — Dashboard SPA + catalog grid + settings** | ✅ | `verify:dashboard` 73/73 | `dashboard.ts`, `catalog.ts` |
 | **2 — Catalog (multi-category, mounted-first ordering)** | ✅ | `verify:catalog` 20/20 | `catalog.ts` |
-| **3 — Playground + opt-in tool I/O capture / Logs** | ✅ | (dashboard) | `router.ts`, `audit.ts` |
-| **4 — `switchboard expose` (safe public tunnel)** | ✅ | — | `expose.ts`, `cli.ts` |
+| **3 — Logs + opt-in tool I/O capture / redaction** | ✅ | `verify:audit` 61/61 | `audit.ts`, `transforms.ts`, `router.ts` |
+| **4 — `switchboard expose` (safe public tunnel)** | ✅ | `verify:expose` 83/83 | `expose.ts`, `cli.ts` |
 | **5a — Council relay tools** (`council_consult`/`council_debate`) | ✅ | `verify:council` 34/34 | `council.ts` |
 | **5b — claude.ai-web / ChatGPT OAuth 2.1 + PKCE AS** | ✅ | `verify:oauth` 20/20 | `authserver.ts`, `dashboard.ts` |
+| **Tool router** (scope → policy → approval → audit dispatch core) | ✅ | `verify:router` 29/29 | `router.ts`, `registry.ts` |
 | **Triggers** (poll-first, pause/resume, templates) — *was "defer"* | ✅ | `verify:triggers` 60/60 | `triggers.ts`, `trigger-templates.ts` |
 | **Webhooks** (signed, Standard Webhooks) — *was "defer"* | ✅ | `verify:webhook` 33/33 | `webhook.ts` |
 | **Response modifiers** (drop_params/inject_args/redact_response) | ✅ | `verify:modifiers` 28/28 | `transforms.ts` |
-| **Auth schemes** (bearer/api_key/basic per server) | ✅ | (httptool/config) | `authscheme.ts` |
-| **HTTP-tool servers** (declare REST calls inline as MCP tools) | ✅ | `verify:httptool` 29/29 | `httptool.ts` |
-| **BM25F semantic `find_tools` search** (Tool-Router context-economy) | ✅ | `verify:search` 21/21 | `search.ts`, `router.ts` |
+| **HTTP-tool servers** (inline REST → MCP tools; per-server bearer/api_key/basic auth) | ✅ | `verify:httptool` 29/29 | `httptool.ts`, `authscheme.ts` |
+| **OpenAPI→MCP wrapper** (`app2mcp`, one spec → many tools) | ✅ | `verify:openapi` 66/66 | `openapi.ts`, `registry.ts` |
+| **BM25F semantic `find_tools` search** (Tool-Router context-economy) | ✅ | `verify:search` 21/21 | `search-index.ts`, `router.ts` |
+| **Resources + prompts pass-through** (full MCP surface, not just tools) | ✅ | `verify:resources-prompts` 34/34 | `registry.ts`, `router.ts` |
 | **One-command `install` into Claude/Cursor/VS Code/Codex** | ✅ | `verify:install` 57/57 | `clients.ts`, `cli.ts` |
-| **Offline local-LLM council** (auto-detect + `local-llm wire`) | ✅ | `verify:local-llm` 71/71 | `local-llm.ts`, `council.ts` |
+| **Offline local-LLM council** (auto-detect + `local-llm wire`, non-chat-model guard) | ✅ | `verify:local-llm` 107/107 | `localllm.ts`, `council.ts` |
+| **Local AES-256-GCM credential vault** (zero custody, sealed at rest) | ✅ | `verify:vault` 43/43 | `vault.ts` |
+| **Health endpoint** (`/healthz` liveness, no auth/secret leak) | ✅ | `verify:health` 47/47 | `dashboard.ts`, `gateway.ts` |
+| **`switchboard doctor`** (preflight config/vault/port diagnostics) | ✅ | `verify:doctor` 51/51 | `doctor.ts`, `cli.ts` |
 | **Profiles** (named switchable views — hide servers/tools, lower scope) | ✅ *beyond Composio* | `verify:profiles` 61/61 | `profiles.ts`, `router.ts` |
 | **Rate-limits + spend-budgets** (per-tool/server/global, fail-closed) | ✅ *beyond Composio* | `verify:limits` 61/61 | `governor.ts`, `router.ts` |
 | **Circuit breaker** (per-server fail-fast on a dead/wedged upstream) | ✅ *beyond Composio* | `verify:breaker` 47/47 | `breaker.ts`, `router.ts` |
-| **Shipped example config exercises every parity feature** | ✅ | `verify:config` 21/21 | `switchboard.config.example.yaml` |
+| **Retry / backoff** (idempotent upstream calls, jittered) | ✅ *beyond Composio* | `verify:retry` 54/54 | `retry.ts`, `gateway.ts` |
+| **Shipped example config exercises every parity feature** | ✅ | `verify:config` 21/21 | `config.ts`, `switchboard.config.example.yaml` |
 
 **Deliberately NOT built (out of scope, documented forks):** multi-user/per-end-user isolation (`?user_id=` carried, full isolation = L fork, §7.7); Composio-style per-end-user managed OAuth apps (we use the operator's own app, zero-custody, §3 Auth Screen); the catalog *ingest* pipeline at full registry scale (Adapters A+B designed in §4; the catalog UI + schema ship, bulk CC0 ingest is a maintainer-run sync, not a launch blocker). **Not published to npm** (v0.1.0 — publishing is an explicit, separate go-ahead). The sections below are the original plan, kept verbatim for provenance; where they say "defer/optional," see this table for what actually shipped.
 
