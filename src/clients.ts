@@ -26,7 +26,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, posix, win32 } from "node:path";
 
 export const SUPPORTED_CLIENTS = ["claude-desktop", "claude-code", "cursor", "vscode", "codex"] as const;
 export type ClientId = (typeof SUPPORTED_CLIENTS)[number];
@@ -89,15 +89,16 @@ export function authRequired(ep: EndpointInfo): boolean {
 /** Compute the on-disk target (path/format/transport/key) for a client. */
 export function resolveTarget(client: ClientId, opts: ResolveOptions = {}): InstallTarget {
   const platform = opts.platform ?? process.platform;
+  const joinForPlatform = platform === "win32" ? win32.join : posix.join;
   const home = opts.home ?? homedir();
-  const appData = opts.appData ?? process.env.APPDATA ?? join(home, "AppData", "Roaming");
+  const appData = opts.appData ?? process.env.APPDATA ?? joinForPlatform(home, "AppData", "Roaming");
   const base = opts.baseDir ?? process.cwd();
 
   // OS-specific user-config dir for an app that keeps config under the platform's app-data root.
   const appConfigDir = (app: string): string => {
-    if (platform === "win32") return join(appData, app);
-    if (platform === "darwin") return join(home, "Library", "Application Support", app);
-    return join(home, ".config", app);
+    if (platform === "win32") return joinForPlatform(appData, app);
+    if (platform === "darwin") return joinForPlatform(home, "Library", "Application Support", app);
+    return joinForPlatform(home, ".config", app);
   };
 
   switch (client) {
@@ -108,7 +109,7 @@ export function resolveTarget(client: ClientId, opts: ResolveOptions = {}): Inst
         transport: "stdio",
         format: "json",
         jsonKey: "mcpServers",
-        path: join(appConfigDir("Claude"), "claude_desktop_config.json"),
+        path: joinForPlatform(appConfigDir("Claude"), "claude_desktop_config.json"),
         label: "Claude Desktop",
       };
     case "claude-code":
@@ -117,7 +118,7 @@ export function resolveTarget(client: ClientId, opts: ResolveOptions = {}): Inst
         transport: "http",
         format: "json",
         jsonKey: "mcpServers",
-        path: opts.global ? join(home, ".claude.json") : join(base, ".mcp.json"),
+        path: opts.global ? joinForPlatform(home, ".claude.json") : joinForPlatform(base, ".mcp.json"),
         label: "Claude Code",
       };
     case "cursor":
@@ -126,7 +127,7 @@ export function resolveTarget(client: ClientId, opts: ResolveOptions = {}): Inst
         transport: "http",
         format: "json",
         jsonKey: "mcpServers",
-        path: opts.global ? join(home, ".cursor", "mcp.json") : join(base, ".cursor", "mcp.json"),
+        path: opts.global ? joinForPlatform(home, ".cursor", "mcp.json") : joinForPlatform(base, ".cursor", "mcp.json"),
         label: "Cursor",
       };
     case "vscode":
@@ -135,7 +136,7 @@ export function resolveTarget(client: ClientId, opts: ResolveOptions = {}): Inst
         transport: "http",
         format: "json",
         jsonKey: "servers", // VS Code uses `servers`, not `mcpServers`
-        path: opts.global ? join(appConfigDir("Code"), "User", "mcp.json") : join(base, ".vscode", "mcp.json"),
+        path: opts.global ? joinForPlatform(appConfigDir("Code"), "User", "mcp.json") : joinForPlatform(base, ".vscode", "mcp.json"),
         label: "VS Code",
       };
     case "codex":
@@ -144,7 +145,7 @@ export function resolveTarget(client: ClientId, opts: ResolveOptions = {}): Inst
         transport: "http",
         format: "toml",
         jsonKey: "",
-        path: opts.global ? join(home, ".codex", "config.toml") : join(base, ".codex", "config.toml"),
+        path: opts.global ? joinForPlatform(home, ".codex", "config.toml") : joinForPlatform(base, ".codex", "config.toml"),
         label: "Codex CLI",
       };
   }
