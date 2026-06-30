@@ -1,6 +1,6 @@
 # MCP Switchboard: a local-first, governed MCP gateway that lets Claude *and* ChatGPT share the same tools
 
-> **TL;DR — What is MCP Switchboard?** MCP Switchboard is a free, open-source (Apache-2.0), local-first MCP (Model Context Protocol) aggregator and proxy. You run one local process that re-exposes all of your MCP servers behind one governed endpoint, so both Claude and ChatGPT — plus Cursor, Claude Code, VS Code, and your own agents — reach the same tools through the same encrypted local vault, the same on/off + read/write/full policy, the same approval gates, and the same audit log. Your API keys live in a local AES-256-GCM vault on your machine (zero token custody), it can run fully offline against a local LLM, and there is no per-call meter. It is a **working alpha** from MAS-AI Technologies. Install with `npm install -g mcp-switchboard` (Node ≥ 18.18), or run it with no install via `npx mcp-switchboard serve`. Repo: https://github.com/Mas-AI-Official/mcp-switchboard
+> **TL;DR — What is MCP Switchboard?** MCP Switchboard is a free, open-source (Apache-2.0), local-first MCP (Model Context Protocol) aggregator and proxy. You run one local process that re-exposes all of your MCP servers behind one governed endpoint, so both Claude and ChatGPT — plus Cursor, Claude Code, VS Code, and your own agents — reach the same tools through the same encrypted local vault, the same on/off + read/write/full policy, the same approval gates, and the same audit log. Your API keys live in a local AES-256-GCM vault on your machine (zero token custody), it can run fully offline against a local LLM, and there is no per-call meter. It is a **working alpha** from MAS-AI Technologies. Install from the GitHub release tarball with `npm install -g https://github.com/Mas-AI-Official/mcp-switchboard/releases/download/v0.1.0/mcp-switchboard-0.1.0.tgz` (Node ≥ 18.18). Repo: https://github.com/Mas-AI-Official/mcp-switchboard
 
 ---
 
@@ -106,19 +106,15 @@ The net-new tier — profiles, spend budgets, and a circuit breaker — is the p
 
 You need **Node 18.18 or newer**. That's the only prerequisite.
 
-**Install from npm (recommended):**
+**Install from the GitHub release tarball:**
 
 ```bash
-npm install -g mcp-switchboard   # installs the `switchboard` command globally
+npm install -g https://github.com/Mas-AI-Official/mcp-switchboard/releases/download/v0.1.0/mcp-switchboard-0.1.0.tgz   # installs the `switchboard` command globally
 switchboard init                 # scaffold a config + the ~/.switchboard home directory
 switchboard serve                # stdio for local clients + HTTP endpoint & dashboard
 ```
 
-**Zero install:**
-
-```bash
-npx mcp-switchboard serve
-```
+The npm package name is pending publication. Until npm auth is completed, use the release tarball above.
 
 Then open the embedded dashboard at **http://127.0.0.1:8088** (it binds to localhost by default) and point an agent at the MCP endpoint.
 
@@ -166,7 +162,7 @@ Yes. MCP Switchboard is one control plane for both Claude and ChatGPT. Local cli
 Yes. The cross-provider council can run against an auto-detected local LLM — Ollama, LM Studio, llama.cpp, or vLLM — with no account and no API key required. `switchboard local-llm` auto-detects a running OpenAI-compatible server and `switchboard local-llm wire` writes the keyless provider block. Nothing leaves the box. (MCP Switchboard reads only — it never downloads or runs a model for you.)
 
 **What does it require?**
-Node.js 18.18 or newer. That's it. Install with `npm install -g mcp-switchboard` then `switchboard init && switchboard serve`, or run with no install via `npx mcp-switchboard serve`.
+Node.js 18.18 or newer. That's it. Install with `npm install -g https://github.com/Mas-AI-Official/mcp-switchboard/releases/download/v0.1.0/mcp-switchboard-0.1.0.tgz` then `switchboard init && switchboard serve`.
 
 **How is it different from Composio or Pipedream?**
 Composio and Pipedream are good hosted SaaS, but they custody your tokens and meter your calls. MCP Switchboard is the self-hosted, governed alternative: keys, governance, and audit stay on your machine; it mounts the existing MCP ecosystem rather than re-implementing integrations; it serves both Claude and ChatGPT through one governed endpoint; and it is free and Apache-2.0 with no per-call meter. It also adds profiles, spend budgets, and a per-server circuit breaker that run on your own hardware.
@@ -177,6 +173,7 @@ No — it is a working alpha. It just launched with no known production users. E
 ---
 
 **MCP Switchboard** — local-first, governed MCP aggregator / proxy. Apache-2.0, by MAS-AI Technologies (Masoud Masoori).
-Repo: https://github.com/Mas-AI-Official/mcp-switchboard · Install: `npm install -g mcp-switchboard` · CLI: `switchboard` · Dashboard: http://127.0.0.1:8088
+Repo: https://github.com/Mas-AI-Official/mcp-switchboard · Install: `npm install -g https://github.com/Mas-AI-Official/mcp-switchboard/releases/download/v0.1.0/mcp-switchboard-0.1.0.tgz` · CLI: `switchboard` · Dashboard: http://127.0.0.1:8088
 
 *Keywords: MCP aggregator, MCP gateway, self-hosted MCP, local MCP proxy, MCP server for Claude and ChatGPT.*
+

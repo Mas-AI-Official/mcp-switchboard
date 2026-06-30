@@ -35,10 +35,8 @@ The bits that matter for r/selfhosted specifically:
 
 ```bash
 # Node >= 18.18 required
-npm install -g mcp-switchboard
+npm install -g https://github.com/Mas-AI-Official/mcp-switchboard/releases/download/v0.1.0/mcp-switchboard-0.1.0.tgz
 switchboard init && switchboard serve
-# or zero-install:
-npx mcp-switchboard serve
 ```
 
 Dashboard opens at http://127.0.0.1:8088. Feedback, issues, and PRs all welcome.
@@ -46,3 +44,4 @@ Dashboard opens at http://127.0.0.1:8088. Feedback, issues, and PRs all welcome.
 ## Note on self-promo
 
 Per sub etiquette: I'm the author, this is my own project, and it's free and open-source (Apache-2.0, self-hosted, no paid tier or upsell). Posting it here because it's squarely a self-hosted, local-first tool and I genuinely want this community's scrutiny rather than upvotes. Happy to answer anything in the comments, and mods — please remove if this crosses the line.
+

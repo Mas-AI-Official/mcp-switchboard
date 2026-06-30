@@ -2,7 +2,7 @@
 
 **Project:** MCP Switchboard — a local-first, governed MCP aggregator
 **Repo (the "address"):** https://github.com/Mas-AI-Official/mcp-switchboard
-**Install:** `npm install -g mcp-switchboard` → `switchboard init && switchboard serve`
+**Install:** `npm install -g https://github.com/Mas-AI-Official/mcp-switchboard/releases/download/v0.1.0/mcp-switchboard-0.1.0.tgz` → `switchboard init && switchboard serve`
 **License:** Apache-2.0 · **By:** MAS-AI Technologies · **Status:** working alpha
 
 > Everything below is grounded in the README + verified facts. No fabricated metrics, no
@@ -79,7 +79,7 @@ Each scene: on-screen visual + on-screen text (burned-in caption) + voiceover (V
 - **Visual:** Clean end card on dark slate. Gold MCP Switchboard wordmark. The install command in monospace. The repo URL. A small "Apache-2.0 · working alpha" line.
 - **On-screen text:**
   ```
-  npm install -g mcp-switchboard
+  npm install -g https://github.com/Mas-AI-Official/mcp-switchboard/releases/download/v0.1.0/mcp-switchboard-0.1.0.tgz
   github.com/Mas-AI-Official/mcp-switchboard
   Free · Apache-2.0 · self-hosted
   ⭐ Star it if this should exist
@@ -136,7 +136,7 @@ Each scene: on-screen visual + on-screen text (burned-in caption) + voiceover (V
 > MCP Switchboard is a local-first, governed MCP aggregator. Instead of wiring every AI client to every tool (N×M), you run one local process that exposes one governed endpoint to all of them (N×1) — Claude, ChatGPT, Cursor, Claude Code, your own agents.
 > Keys stay in a local AES-256-GCM vault (zero custody). Every tool has on/off toggles, read/write/full scopes, approval gates that fail closed, and an append-only audit log. Browse 4,700+ toolkits in the built-in dashboard; it even runs fully offline against a local LLM.
 > Free, self-hosted, Apache-2.0. It's an early working alpha and feedback is very welcome.
-> Install: npm install -g mcp-switchboard
+> Install: npm install -g https://github.com/Mas-AI-Official/mcp-switchboard/releases/download/v0.1.0/mcp-switchboard-0.1.0.tgz
 > Repo: https://github.com/Mas-AI-Official/mcp-switchboard
 
 **TikTok / Reels:**
@@ -160,3 +160,4 @@ ContentOps render completed and was staged for operator approval. Nothing has be
 QA status: `human_review`, score `75/100`. The deterministic gate passed file validity, duration, 9:16 aspect ratio, audio, captions assumption, and topic relevance. It flagged `visual_quality` because the dark brand palette has low luma variance; sampled frames are readable, but this still requires human review before posting.
 
 **Post only after explicit approval:** posting uploads under MAS-AI identity to external accounts. Approve the queued ContentOps manifest first, then publish to X, LinkedIn, YouTube Shorts, TikTok, Instagram Reels, Threads, and Bluesky.
+

@@ -109,21 +109,17 @@ circuit breaker, all running on your own hardware.**
 
 ## Quickstart
 
-### Install from npm — recommended
+### Install from GitHub release tarball
 
 > One-time prerequisite: install **[Node 18.18+](https://nodejs.org)**.
 
 ```bash
-npm install -g mcp-switchboard   # installs the `switchboard` command globally
+npm install -g https://github.com/Mas-AI-Official/mcp-switchboard/releases/download/v0.1.0/mcp-switchboard-0.1.0.tgz   # installs the `switchboard` command globally
 switchboard init                 # scaffold a config + the ~/.switchboard home directory
 switchboard serve                # stdio for local clients + HTTP endpoint & dashboard
 ```
 
-Prefer not to install anything globally? Run it on demand with npx:
-
-```bash
-npx mcp-switchboard serve
-```
+The npm package name is pending publication. Until npm auth is completed, use the release tarball above.
 
 Uninstall is plain npm:
 
@@ -720,3 +716,4 @@ small and dependency-light (zero native deps); please keep it that way.
 ## License
 
 [Apache-2.0](LICENSE) © MAS-AI Technologies.
+

@@ -48,10 +48,8 @@ It also has the stuff a metered cloud can't really sell you because it runs on y
 **Install (zero cloud account needed):**
 
 ```
-npm install -g mcp-switchboard
+npm install -g https://github.com/Mas-AI-Official/mcp-switchboard/releases/download/v0.1.0/mcp-switchboard-0.1.0.tgz
 switchboard init && switchboard serve
-# or zero-install:
-npx mcp-switchboard serve
 ```
 
 Dashboard at `http://127.0.0.1:8088`. License: Apache-2.0.
@@ -61,3 +59,4 @@ Repo: **https://github.com/Mas-AI-Official/mcp-switchboard**
 ## Note on self-promo
 
 Heads up to anyone posting this kind of thing here: r/LocalLLaMA has self-promotion etiquette — read the rules, don't just drop a link and leave. Show up in the comments, answer the hard questions, take the criticism, and contribute to other threads too rather than treating the sub as a launchpad. If a mod or the community says it's over the line, respect that. Genuine technical discussion is the price of admission, not the link.
+

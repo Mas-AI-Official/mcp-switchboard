@@ -5,8 +5,8 @@ against the repo `README.md` before landing here — no fabricated metrics, no "
 Status everywhere is **working alpha** (zero stars, zero known production users at launch).
 
 **Ground facts (do not drift):**
-- npm package: `mcp-switchboard` · CLI command after install: `switchboard`
-- Install: `npm install -g mcp-switchboard` → `switchboard init && switchboard serve` (or `npx mcp-switchboard serve`, Node ≥ 18.18)
+- npm package: pending publication as `mcp-switchboard`; CLI command after install: `switchboard`
+- Current install: `npm install -g https://github.com/Mas-AI-Official/mcp-switchboard/releases/download/v0.1.0/mcp-switchboard-0.1.0.tgz` → `switchboard init && switchboard serve` (Node ≥ 18.18)
 - Repo / "the address": https://github.com/Mas-AI-Official/mcp-switchboard
 - License Apache-2.0 · by MAS-AI Technologies · dashboard at http://127.0.0.1:8088
 - Catalog: real count is 4,776 toolkits → say **"4,700+"** in copy
@@ -46,3 +46,4 @@ Status everywhere is **working alpha** (zero stars, zero known production users 
 
 > **Posting is outward-facing** — these go out under your identity to your accounts. Nothing here is auto-posted;
 > they're prepared for you (or an operator-approved ContentOps browser post) to publish.
+

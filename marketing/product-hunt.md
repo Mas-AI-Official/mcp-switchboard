@@ -31,8 +31,8 @@ Two things make day one easy: browse 4,700+ toolkits in the embedded dashboard, 
 Positioning, plainly: hosted tool routers like Composio and Pipedream are genuinely good hosted SaaS — but they custody your tokens and meter your calls. MCP Switchboard is the self-hosted, governed alternative that keeps keys, governance and audit on *your* machine, free and open-source.
 
 ```
-npm install -g mcp-switchboard
-switchboard init && switchboard serve     # or: npx mcp-switchboard serve
+npm install -g https://github.com/Mas-AI-Official/mcp-switchboard/releases/download/v0.1.0/mcp-switchboard-0.1.0.tgz
+switchboard init && switchboard serve
 ```
 
 Requires Node ≥ 18.18. Dashboard opens at http://127.0.0.1:8088 (binds localhost by default).
@@ -64,7 +64,7 @@ I'd genuinely rather hear what's wrong with it than collect upvotes — tear int
 
 ## First-24h checklist
 
-- Publish the GitHub release and confirm `npm install -g mcp-switchboard` + `npx mcp-switchboard serve` both work cleanly on a fresh machine with Node 18.18.
+- Publish the GitHub release and confirm `npm install -g https://github.com/Mas-AI-Official/mcp-switchboard/releases/download/v0.1.0/mcp-switchboard-0.1.0.tgz` + `switchboard serve` both work cleanly on a fresh machine with Node 18.18.
 - Verify the repo URL in every asset points to https://github.com/Mas-AI-Official/mcp-switchboard and the README quickstart matches the launch copy.
 - Post the maker's first comment the moment the listing goes live; pin it.
 - Confirm all 5 gallery slides are uploaded in order and captions render correctly.
@@ -75,3 +75,4 @@ I'd genuinely rather hear what's wrong with it than collect upvotes — tear int
 - Watch GitHub issues and the `npm` page; triage and reply to the first bug reports same-day.
 - Do NOT fabricate or imply star counts, downloads, users, or testimonials — there are none yet, and saying so builds more trust than faking it.
 - Thank everyone who tries it and files an issue or PR; capture recurring feedback into the issue tracker for the next iteration.
+

@@ -1,6 +1,6 @@
 # MCP Switchboard — Registry & Directory Submission Pack
 
-Everything below is ready to paste. Repo URL is fixed: `https://github.com/Mas-AI-Official/mcp-switchboard`. npm package is `mcp-switchboard`; the CLI command after install is `switchboard`. License Apache-2.0. Status: **working alpha** — keep that label in every blurb; do not imply more.
+Everything below is ready to paste once npm publication is complete. Repo URL is fixed: `https://github.com/Mas-AI-Official/mcp-switchboard`. npm package is pending as `mcp-switchboard`; the CLI command after install is `switchboard`. License Apache-2.0. Status: **working alpha** — keep that label in every blurb; do not imply more.
 
 > Honesty note for whoever submits these: MCP Switchboard just launched (zero stars, zero known production users). Do not add star counts, download numbers, testimonials, or "first/only" claims. Every feature mentioned here is in the README; do not add features that aren't.
 
@@ -92,8 +92,8 @@ Ready-to-paste blurbs. Each is title + 1–2 sentence description + repo URL + i
 
 **Install:**
 ```bash
-npm install -g mcp-switchboard
-switchboard init && switchboard serve   # or: npx mcp-switchboard serve   (Node >= 18.18)
+npm install -g https://github.com/Mas-AI-Official/mcp-switchboard/releases/download/v0.1.0/mcp-switchboard-0.1.0.tgz
+switchboard init && switchboard serve   # Node >= 18.18
 ```
 
 ### glama.ai
@@ -106,8 +106,8 @@ switchboard init && switchboard serve   # or: npx mcp-switchboard serve   (Node 
 
 **Install:**
 ```bash
-npm install -g mcp-switchboard
-switchboard init && switchboard serve   # zero-install: npx mcp-switchboard serve
+npm install -g https://github.com/Mas-AI-Official/mcp-switchboard/releases/download/v0.1.0/mcp-switchboard-0.1.0.tgz
+switchboard init && switchboard serve
 ```
 
 ### pulsemcp.com
@@ -120,7 +120,7 @@ switchboard init && switchboard serve   # zero-install: npx mcp-switchboard serv
 
 **Install:**
 ```bash
-npm install -g mcp-switchboard
+npm install -g https://github.com/Mas-AI-Official/mcp-switchboard/releases/download/v0.1.0/mcp-switchboard-0.1.0.tgz
 switchboard init && switchboard serve   # dashboard at http://127.0.0.1:8088
 ```
 
@@ -134,11 +134,11 @@ switchboard init && switchboard serve   # dashboard at http://127.0.0.1:8088
 
 **Install:**
 ```bash
-npm install -g mcp-switchboard
-switchboard init && switchboard serve   # or npx mcp-switchboard serve
+npm install -g https://github.com/Mas-AI-Official/mcp-switchboard/releases/download/v0.1.0/mcp-switchboard-0.1.0.tgz
+switchboard init && switchboard serve
 ```
 
-> Submission process for each directory varies (PR to a GitHub repo, a web form, or auto-crawl from npm/the official registry). Verify the current submission path per site — e.g. for PulseMCP and mcp.so check their "submit" / "add server" link, and for glama.ai confirm whether listing is automatic from the npm package or requires a form.
+> Submission process for each directory varies (PR to a GitHub repo, a web form, or auto-crawl from npm/the official registry). Verify the current submission path per site — e.g. for PulseMCP and mcp.so check their "submit" / "add server" link, and for glama.ai confirm whether listing is automatic from the npm package or requires a form. Do not submit npm-crawled directories until npm publish succeeds.
 
 ---
 
@@ -165,7 +165,7 @@ switchboard init && switchboard serve   # or npx mcp-switchboard serve
 > It's an early **working alpha** — just launched, no production users yet. I'd genuinely value technical criticism.
 >
 > Repo: https://github.com/Mas-AI-Official/mcp-switchboard
-> Install: `npm install -g mcp-switchboard` then `switchboard init && switchboard serve`
+> Install: `npm install -g https://github.com/Mas-AI-Official/mcp-switchboard/releases/download/v0.1.0/mcp-switchboard-0.1.0.tgz` then `switchboard init && switchboard serve`
 >
 > #MCP #ModelContextProtocol #OpenSource #LLM #AIagents #SelfHosted
 
@@ -190,3 +190,4 @@ Ordered by star-leverage, highest first.
 | X (Twitter) | https://x.com/ | Low | Medium | Thread version of the LinkedIn post; lead with N×M→N×1 and "both Claude and ChatGPT." Truthful, benefit-led, link the repo. |
 | GitHub topic tags `mcp` / `model-context-protocol` | https://github.com/Mas-AI-Official/mcp-switchboard (repo ▸ About ▸ topics) | Trivial | Medium | Add `mcp`, `model-context-protocol`, plus `mcp-server`, `aggregator`, `gateway`, `self-hosted`, `governance`. Passive discovery via topic browsing; do this first since it's near-zero effort. |
 | dev.to / Hashnode cross-post | https://dev.to/ · https://hashnode.com/ | Medium | Low-Medium | Cross-post a deeper write-up (the N×M problem, the governance/vault design, the 1,171-check oracle approach). Canonical-link back to the repo/README. Long-tail SEO, slower burn. |
+

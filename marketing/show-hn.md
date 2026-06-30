@@ -28,10 +28,10 @@ Positioning, to be fair about it: hosted routers like Composio and Pipedream are
 
 Install:
 
-    npm install -g mcp-switchboard
+    npm install -g https://github.com/Mas-AI-Official/mcp-switchboard/releases/download/v0.1.0/mcp-switchboard-0.1.0.tgz
     switchboard init && switchboard serve
 
-or zero-install: `npx mcp-switchboard serve` (requires Node >= 18.18).
+Requires Node >= 18.18.
 
 Repo: https://github.com/Mas-AI-Official/mcp-switchboard
 
@@ -55,3 +55,4 @@ Specific feedback I'm after:
 - The 5-runtime-dependency, zero-native-dependency constraint — is it worth the friction it occasionally causes, and where would you relax it?
 
 Apache-2.0, free, self-hosted, no per-call meter. Repo: https://github.com/Mas-AI-Official/mcp-switchboard — issues and PRs welcome, and harsh reviews especially.
+

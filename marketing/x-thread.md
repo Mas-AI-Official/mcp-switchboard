@@ -57,11 +57,11 @@ Positioning: the self-hosted, governed alternative to hosted tool routers.
 It's a working alpha — fresh launch, Apache-2.0, by MAS-AI Technologies. Honest feedback and criticism very welcome.
 
 ```
-npm install -g mcp-switchboard
+npm install -g https://github.com/Mas-AI-Official/mcp-switchboard/releases/download/v0.1.0/mcp-switchboard-0.1.0.tgz
 switchboard init && switchboard serve
-# or zero-install: npx mcp-switchboard serve
 ```
 
 Repo (Node ≥ 18.18): https://github.com/Mas-AI-Official/mcp-switchboard
 
 Star it, try it, tell me what breaks. 🔌
+
