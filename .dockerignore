@@ -1,0 +1,10 @@
+# Keep the build context small and reproducible — dist/ is compiled in-image, deps are
+# installed from the lockfile, and the big local report/log artifacts never belong in the image.
+.git
+node_modules
+dist
+*.log
+launch-report.*.json
+.switchboard
+switchboard.config.yaml
+scratchpad
