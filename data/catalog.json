@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-24T15:58:22.115Z",
+  "generated_at": "2026-07-10T15:51:12.112Z",
   "counts": {
     "total": 4776,
     "mcp_registry": 2247,
@@ -7,20 +7,16 @@
   },
   "categories": [
     {
-      "name": "MCP Servers",
-      "count": 1000
+      "name": "Cloud",
+      "count": 975
     },
     {
-      "name": "Cloud",
-      "count": 978
+      "name": "MCP Servers",
+      "count": 944
     },
     {
       "name": "AI / ML",
-      "count": 550
-    },
-    {
-      "name": "Web & Search",
-      "count": 295
+      "count": 525
     },
     {
       "name": "Open Data",
@@ -31,32 +27,36 @@
       "count": 284
     },
     {
+      "name": "Web & Search",
+      "count": 273
+    },
+    {
       "name": "Developer Tools",
-      "count": 195
+      "count": 198
     },
     {
       "name": "Uncategorized",
       "count": 188
     },
     {
-      "name": "Communication",
-      "count": 77
-    },
-    {
-      "name": "Productivity",
-      "count": 77
-    },
-    {
       "name": "Ecommerce",
       "count": 74
     },
     {
-      "name": "Files & Storage",
-      "count": 70
+      "name": "Communication",
+      "count": 73
+    },
+    {
+      "name": "Productivity",
+      "count": 73
     },
     {
       "name": "Financial",
       "count": 70
+    },
+    {
+      "name": "Files & Storage",
+      "count": 63
     },
     {
       "name": "Media",
@@ -75,16 +75,16 @@
       "count": 53
     },
     {
-      "name": "Finance",
-      "count": 45
-    },
-    {
       "name": "Location",
       "count": 45
     },
     {
-      "name": "Databases",
+      "name": "Finance",
       "count": 43
+    },
+    {
+      "name": "Databases",
+      "count": 41
     },
     {
       "name": "Collaboration",
@@ -95,8 +95,16 @@
       "count": 31
     },
     {
+      "name": "Aggregators",
+      "count": 30
+    },
+    {
       "name": "Transport",
       "count": 28
+    },
+    {
+      "name": "Finance & Fintech",
+      "count": 22
     },
     {
       "name": "Hosting",
@@ -104,7 +112,7 @@
     },
     {
       "name": "Security",
-      "count": 18
+      "count": 19
     },
     {
       "name": "Iot",
@@ -113,6 +121,10 @@
     {
       "name": "Social",
       "count": 17
+    },
+    {
+      "name": "Location Services",
+      "count": 16
     },
     {
       "name": "Messaging",
@@ -124,6 +136,10 @@
     },
     {
       "name": "Enterprise",
+      "count": 11
+    },
+    {
+      "name": "Search & Data Extraction",
       "count": 11
     },
     {
@@ -147,7 +163,35 @@
       "count": 6
     },
     {
+      "name": "Knowledge & Memory",
+      "count": 5
+    },
+    {
+      "name": "Other Tools and Integrations",
+      "count": 5
+    },
+    {
+      "name": "Cloud Platforms",
+      "count": 4
+    },
+    {
+      "name": "Customer Data Platforms",
+      "count": 4
+    },
+    {
+      "name": "Workplace & Productivity",
+      "count": 4
+    },
+    {
+      "name": "Art & Culture",
+      "count": 3
+    },
+    {
       "name": "Backend",
+      "count": 3
+    },
+    {
+      "name": "Browser Automation",
       "count": 3
     },
     {
@@ -163,7 +207,59 @@
       "count": 2
     },
     {
+      "name": "Travel & Transportation",
+      "count": 2
+    },
+    {
+      "name": "Architecture & Design",
+      "count": 1
+    },
+    {
+      "name": "Coding Agents",
+      "count": 1
+    },
+    {
+      "name": "Command Line",
+      "count": 1
+    },
+    {
+      "name": "Conversational AI",
+      "count": 1
+    },
+    {
+      "name": "Data Science Tools",
+      "count": 1
+    },
+    {
+      "name": "E-Commerce",
+      "count": 1
+    },
+    {
+      "name": "Embedded System",
+      "count": 1
+    },
+    {
+      "name": "File Systems",
+      "count": 1
+    },
+    {
+      "name": "Gaming",
+      "count": 1
+    },
+    {
+      "name": "Legal",
+      "count": 1
+    },
+    {
+      "name": "Multimedia Process",
+      "count": 1
+    },
+    {
       "name": "S",
+      "count": 1
+    },
+    {
+      "name": "Social Media",
       "count": 1
     },
     {
@@ -1394,7 +1490,7 @@
       "slug": "mcp:dev.cz-agents/adis",
       "name": "adis",
       "description": "Czech VAT-payer reliability (ADIS / nespolehlivý plátce DPH) + registered bank accounts by DIČ.",
-      "category": "MCP Servers",
+      "category": "Finance & Fintech",
       "tags": [
         "dev",
         "cz",
@@ -2020,7 +2116,7 @@
       "slug": "mcp:com.mcpbundles/agent-interviews",
       "name": "Agent Interviews MCP Server from MCPBundles",
       "description": "Agent Interviews is an AI-powered research platform designed to conduct qualitative interviews an...",
-      "category": "Web & Search",
+      "category": "Aggregators",
       "tags": [
         "com",
         "mcpbundles",
@@ -2041,7 +2137,7 @@
       "slug": "mcp:dev.agent-module/mcp",
       "name": "Agent Module",
       "description": "Deterministic compliance and vertical knowledge bases for autonomous agents. Free 24hr trial.",
-      "category": "MCP Servers",
+      "category": "Knowledge & Memory",
       "tags": [
         "dev",
         "agent",
@@ -2602,7 +2698,7 @@
       "slug": "mcp:dev.agentmetal/agentmetal",
       "name": "agentmetal",
       "description": "Rent a Linux VPS from an AI agent: provision, SSH in, run commands. Pay USDC (x402) or card.",
-      "category": "AI / ML",
+      "category": "Cloud Platforms",
       "tags": [
         "dev",
         "agentmetal",
@@ -3384,7 +3480,7 @@
       "slug": "mcp:co.ainumbers/tools",
       "name": "AINumbers Fintech Intelligence Suite",
       "description": "420+ client-side fintech tools (ISO 20022, AML, DORA, agentic payments) as MCP widgets. Zero PII.",
-      "category": "Finance",
+      "category": "Finance & Fintech",
       "tags": [
         "co",
         "ainumbers",
@@ -3622,7 +3718,7 @@
       "slug": "mcp:ai.waystation/airtable",
       "name": "airtable",
       "description": "Access and manage your Airtable bases, tables, and records seamlessly",
-      "category": "MCP Servers",
+      "category": "Aggregators",
       "tags": [
         "ai",
         "waystation",
@@ -6667,7 +6763,7 @@
       "slug": "mcp:ai.mcpanalytics/analytics",
       "name": "analytics",
       "description": "Analytics for business data: upload CSV or connect GA4/GSC, run ML/stats, get HTML reports.",
-      "category": "AI / ML",
+      "category": "Customer Data Platforms",
       "tags": [
         "ai",
         "mcpanalytics",
@@ -7114,7 +7210,7 @@
       "slug": "mcp:cloud.anythink/anythink",
       "name": "Anythink all-in-one backend: data, auth, files, workflows, payments, APIs",
       "description": "Sick of stitched-together services? Anythink is the all-in-one backend, configured with AI.",
-      "category": "Cloud",
+      "category": "Cloud Platforms",
       "tags": [
         "cloud",
         "anythink",
@@ -8449,7 +8545,7 @@
       "slug": "mcp:com.apogeoapi/apogeoapi-mcp",
       "name": "apogeoapi-mcp",
       "description": "Geographic data API: 250+ countries, 150K+ cities, IP geolocation, 161 live FX rates.",
-      "category": "MCP Servers",
+      "category": "Location Services",
       "tags": [
         "com",
         "apogeoapi",
@@ -9394,7 +9490,7 @@
       "slug": "mcp:dev.cz-agents/ares",
       "name": "ares",
       "description": "Czech & Slovak business registry — company lookup by IČO, name, legal form, VAT. Official ARES.",
-      "category": "MCP Servers",
+      "category": "Finance & Fintech",
       "tags": [
         "dev",
         "cz",
@@ -16085,7 +16181,7 @@
       "slug": "mcp:com.ruddia/being-mcp-server",
       "name": "being-mcp-server",
       "description": "Personality Runtime for AI agents — persistent memory, personality, and relationships via MCP",
-      "category": "AI / ML",
+      "category": "Knowledge & Memory",
       "tags": [
         "com",
         "ruddia",
@@ -17946,7 +18042,7 @@
       "slug": "mcp:ai.smithery/brave",
       "name": "brave",
       "description": "Visit https://brave.com/search/api/ for a free API key. Search the web, local businesses, images,…",
-      "category": "Web & Search",
+      "category": "Search & Data Extraction",
       "tags": [
         "ai",
         "smithery",
@@ -18151,7 +18247,7 @@
       "slug": "mcp:ai.smithery/browserbasehq-mcp-browserbase",
       "name": "browserbasehq-mcp-browserbase",
       "description": "Provides cloud browser automation capabilities using Stagehand and Browserbase, enabling LLMs to i…",
-      "category": "AI / ML",
+      "category": "Browser Automation",
       "tags": [
         "ai",
         "smithery",
@@ -18580,7 +18676,7 @@
       "slug": "mcp:ai.buywhere/buywhere-mcp",
       "name": "BuyWhere MCP",
       "description": "Product search, price comparison, and affiliate-ready shopping across Singapore and US retailers.",
-      "category": "Web & Search",
+      "category": "E-Commerce",
       "tags": [
         "ai",
         "buywhere",
@@ -19919,7 +20015,7 @@
       "slug": "mcp:com.changethisfile/mcp",
       "name": "ChangeThisFile",
       "description": "Convert files between 690+ formats: image, video, audio, documents, ebooks, archives. Free, no auth.",
-      "category": "Files & Storage",
+      "category": "File Systems",
       "tags": [
         "com",
         "changethisfile",
@@ -20032,7 +20128,7 @@
       "slug": "mcp:com.mylinedchart/chart-context",
       "name": "chart-context",
       "description": "Read-only MCP server: AI agents read your live MyLinedChart desktop chart context. Local, IBKR.",
-      "category": "AI / ML",
+      "category": "Finance & Fintech",
       "tags": [
         "com",
         "mylinedchart",
@@ -20625,7 +20721,7 @@
       "slug": "mcp:com.cityparity/cityparity",
       "name": "cityparity — Cost-of-Living & Quality-of-Life Comparison",
       "description": "Cost-of-living & quality-of-life comparison: take-home pay, equivalent salary, safety-net deltas.",
-      "category": "MCP Servers",
+      "category": "Finance & Fintech",
       "tags": [
         "com",
         "cityparity",
@@ -22463,7 +22559,7 @@
       "slug": "mcp:dev.cz-agents/cnb",
       "name": "cnb",
       "description": "Official ČNB exchange rates — daily & historical CZK vs EUR, USD, 30+ currencies. For accounting.",
-      "category": "MCP Servers",
+      "category": "Finance & Fintech",
       "tags": [
         "dev",
         "cz",
@@ -24460,7 +24556,7 @@
       "slug": "mcp:com.contrastcyber/api",
       "name": "ContrastAPI",
       "description": "54 tools, 7 Resources, Sigma rules, email SPF/DMARC, MITRE, CVE/KEV, risk_score. No key.",
-      "category": "Communication",
+      "category": "Security",
       "tags": [
         "com",
         "contrastcyber",
@@ -26159,7 +26255,7 @@
       "slug": "mcp:com.daedalmap/boundaries",
       "name": "DaedalMap Administrative Boundaries (loc_id to polygon)",
       "description": "A loc_id to its bounding box, centroid, and polygon, with its name and admin level.",
-      "category": "MCP Servers",
+      "category": "Location Services",
       "tags": [
         "com",
         "daedalmap",
@@ -26179,7 +26275,7 @@
       "slug": "mcp:com.daedalmap/world_factbook",
       "name": "DaedalMap CIA World Factbook",
       "description": "CIA World Factbook country indicators: infrastructure, energy, demographics, economy, 2002-2026.",
-      "category": "MCP Servers",
+      "category": "Location Services",
       "tags": [
         "com",
         "daedalmap",
@@ -26200,7 +26296,7 @@
       "slug": "mcp:com.daedalmap/county-map",
       "name": "DaedalMap Disaster and Geospatial Data",
       "description": "Geospatial MCP server for earthquake, tsunami, volcano, disaster, and FX data queries.",
-      "category": "MCP Servers",
+      "category": "Location Services",
       "tags": [
         "com",
         "daedalmap",
@@ -26221,7 +26317,7 @@
       "slug": "mcp:com.daedalmap/earthquakes",
       "name": "DaedalMap Earthquake Data",
       "description": "Global earthquake events from the USGS, 2150 BC-present: magnitude, depth, location, counts.",
-      "category": "MCP Servers",
+      "category": "Location Services",
       "tags": [
         "com",
         "daedalmap",
@@ -26241,7 +26337,7 @@
       "slug": "mcp:com.daedalmap/floods",
       "name": "DaedalMap Flood Events",
       "description": "Global flood events and extent 1985-present from the Dartmouth Flood Observatory and GFD.",
-      "category": "MCP Servers",
+      "category": "Location Services",
       "tags": [
         "com",
         "daedalmap",
@@ -26261,7 +26357,7 @@
       "slug": "mcp:com.daedalmap/geocoding",
       "name": "DaedalMap Geocoding and Reverse Geocoding (loc_id)",
       "description": "Reverse geocode latitude/longitude to loc_id; resolve loc_ids to boundaries, centroids, hierarchy.",
-      "category": "MCP Servers",
+      "category": "Location Services",
       "tags": [
         "com",
         "daedalmap",
@@ -26281,7 +26377,7 @@
       "slug": "mcp:com.daedalmap/currency",
       "name": "DaedalMap Historical FX Rates",
       "description": "Historical FX rates for 100+ currencies vs USD from IMF and World Bank data, 1940-present.",
-      "category": "MCP Servers",
+      "category": "Location Services",
       "tags": [
         "com",
         "daedalmap",
@@ -26301,7 +26397,7 @@
       "slug": "mcp:com.daedalmap/hurricanes",
       "name": "DaedalMap Hurricane and Tropical Cyclone Data",
       "description": "Global hurricane and tropical cyclone tracks from IBTrACS/NOAA, 1842-present. Wind and pressure.",
-      "category": "MCP Servers",
+      "category": "Location Services",
       "tags": [
         "com",
         "daedalmap",
@@ -26321,7 +26417,7 @@
       "slug": "mcp:com.daedalmap/population",
       "name": "DaedalMap Population Estimates",
       "description": "Global population estimates from WorldPop, 2000-2030, at country and sub-national levels.",
-      "category": "MCP Servers",
+      "category": "Location Services",
       "tags": [
         "com",
         "daedalmap",
@@ -26341,7 +26437,7 @@
       "slug": "mcp:com.daedalmap/reverse-geocoding",
       "name": "DaedalMap Reverse Geocoding (coordinates to loc_id)",
       "description": "Convert latitude/longitude to the deepest administrative loc_id plus its full parent chain.",
-      "category": "MCP Servers",
+      "category": "Location Services",
       "tags": [
         "com",
         "daedalmap",
@@ -26362,7 +26458,7 @@
       "slug": "mcp:com.daedalmap/tornadoes",
       "name": "DaedalMap Tornado Events",
       "description": "US tornado events 1950-present from the NOAA Storm Prediction Center: EF rating, tracks, damage.",
-      "category": "MCP Servers",
+      "category": "Location Services",
       "tags": [
         "com",
         "daedalmap",
@@ -26382,7 +26478,7 @@
       "slug": "mcp:com.daedalmap/tsunamis",
       "name": "DaedalMap Tsunami Data",
       "description": "Global tsunami events from NOAA NCEI, 2000 BC-present: wave height, runups, and counts.",
-      "category": "MCP Servers",
+      "category": "Location Services",
       "tags": [
         "com",
         "daedalmap",
@@ -26402,7 +26498,7 @@
       "slug": "mcp:com.daedalmap/un_sdg",
       "name": "DaedalMap UN Sustainable Development Goals",
       "description": "UN Sustainable Development Goals indicators across all 17 goals, from the UN SDG Global Database.",
-      "category": "Databases",
+      "category": "Location Services",
       "tags": [
         "com",
         "daedalmap",
@@ -26423,7 +26519,7 @@
       "slug": "mcp:com.daedalmap/volcanoes",
       "name": "DaedalMap Volcanic Activity",
       "description": "Global volcanic eruptions from the Smithsonian Global Volcanism Program: VEI, location, dates.",
-      "category": "MCP Servers",
+      "category": "Location Services",
       "tags": [
         "com",
         "daedalmap",
@@ -26443,7 +26539,7 @@
       "slug": "mcp:com.daedalmap/wildfires",
       "name": "DaedalMap Wildfire Events",
       "description": "Wildfire events and aggregates across global, U.S., and Canada sources. Paid via x402 USDC.",
-      "category": "MCP Servers",
+      "category": "Location Services",
       "tags": [
         "com",
         "daedalmap",
@@ -27299,7 +27395,7 @@
       "slug": "mcp:cloud.dchub/mcp-server",
       "name": "DC Hub — Data Center & Energy Intelligence",
       "description": "Data-center, power, energy, renewables & gas intelligence for AI agents — query and cite.",
-      "category": "AI / ML",
+      "category": "Customer Data Platforms",
       "tags": [
         "cloud",
         "dchub",
@@ -27320,7 +27416,7 @@
       "slug": "mcp:dev.cz-agents/dd",
       "name": "dd",
       "description": "Czech & EU due diligence in one call — facts, insolvency, sanctions, VAT, risk score, UBO chain.",
-      "category": "MCP Servers",
+      "category": "Finance & Fintech",
       "tags": [
         "dev",
         "cz",
@@ -28469,7 +28565,7 @@
       "slug": "mcp:ai.diagramzu/mcp",
       "name": "DiagramZu",
       "description": "Let Claude, Cursor, or ChatGPT author Mermaid diagrams your team can read and share.",
-      "category": "MCP Servers",
+      "category": "Architecture & Design",
       "tags": [
         "ai",
         "diagramzu",
@@ -28756,7 +28852,7 @@
       "slug": "mcp:com.leap-labs/discovery-engine",
       "name": "Disco",
       "description": "Find novel, statistically validated patterns in tabular data — hypothesis-free.",
-      "category": "MCP Servers",
+      "category": "Data Science Tools",
       "tags": [
         "com",
         "leap",
@@ -29932,7 +30028,7 @@
       "slug": "mcp:com.driflyte/driflyte-mcp-server",
       "name": "driflyte-mcp-server",
       "description": "Driflyte MCP server which lets AI assistants query topic-specific knowledge from web and GitHub.",
-      "category": "Developer Tools",
+      "category": "Search & Data Extraction",
       "tags": [
         "com",
         "driflyte",
@@ -30123,7 +30219,7 @@
       "slug": "mcp:com.iunera/druid-mcp-server",
       "name": "druid-mcp-server",
       "description": "AI-powered MCP server for Apache Druid cluster management and analytic",
-      "category": "MCP Servers",
+      "category": "Databases",
       "tags": [
         "com",
         "iunera",
@@ -31216,7 +31312,7 @@
       "slug": "mcp:ai.byteask/embedded-docs",
       "name": "embedded-docs",
       "description": "Page-cited retrieval for embedded docs, datasheets, MISRA, CMSIS, and RTOS references.",
-      "category": "MCP Servers",
+      "category": "Embedded System",
       "tags": [
         "ai",
         "byteask",
@@ -32020,7 +32116,7 @@
       "slug": "mcp:dev.cz-agents/eu-registry",
       "name": "eu-registry",
       "description": "EU business registry lookup via GLEIF/LEI & national registries — cross-border due diligence & KYC.",
-      "category": "MCP Servers",
+      "category": "Finance & Fintech",
       "tags": [
         "dev",
         "cz",
@@ -32424,7 +32520,7 @@
       "slug": "mcp:ai.exa/exa",
       "name": "exa",
       "description": "Fast, intelligent web search and web crawling. New mcp tool: Exa-code is a context tool for coding",
-      "category": "Web & Search",
+      "category": "Search & Data Extraction",
       "tags": [
         "ai",
         "exa",
@@ -34089,7 +34185,7 @@
       "slug": "mcp:dev.filetopdf/filetopdf-mcp",
       "name": "FileToPDF",
       "description": "Convert files, HTML, and Markdown to PDF via the FileToPDF API. Bring your own API key.",
-      "category": "Files & Storage",
+      "category": "Multimedia Process",
       "tags": [
         "dev",
         "filetopdf",
@@ -35327,7 +35423,7 @@
       "slug": "mcp:ai.voxell/forge",
       "name": "forge",
       "description": "MCP server for Forge, Voxell's hosted text-embedding API. Tools: embed and list_models.",
-      "category": "AI / ML",
+      "category": "Search & Data Extraction",
       "tags": [
         "ai",
         "voxell",
@@ -35966,7 +36062,7 @@
       "slug": "mcp:com.gadgethumans.api/api-hub",
       "name": "GadgetHumans API Hub",
       "description": "337 free tools: weather, crypto, DNS, search, text, colors, QR, calculators and more for AI agents.",
-      "category": "AI / ML",
+      "category": "Aggregators",
       "tags": [
         "com",
         "gadgethumans",
@@ -36233,7 +36329,7 @@
       "slug": "mcp:ai.gavelin/mcp",
       "name": "Gavelin",
       "description": "Search bills and speaker-attributed hearing transcripts across all 50 US state legislatures.",
-      "category": "Web & Search",
+      "category": "Legal",
       "tags": [
         "ai",
         "gavelin",
@@ -36374,7 +36470,7 @@
       "slug": "mcp:dev.gemot/gemot",
       "name": "Gemot Deliberation Server",
       "description": "Deliberation primitive for multi-agent coordination: cruxes, vote clustering, consensus.",
-      "category": "MCP Servers",
+      "category": "Other Tools and Integrations",
       "tags": [
         "dev",
         "gemot",
@@ -37582,7 +37678,7 @@
       "slug": "mcp:ai.waystation/gmail",
       "name": "gmail",
       "description": "Read emails, send messages, and manage labels in your Gmail account.",
-      "category": "Communication",
+      "category": "Aggregators",
       "tags": [
         "ai",
         "waystation",
@@ -39206,7 +39302,7 @@
       "slug": "mcp:com.gradusmusic/notation",
       "name": "Gradus Notation",
       "description": "Render music notation (SVG/MusicXML/MIDI), analyze, search music theory. Free, no auth, no GUI.",
-      "category": "Web & Search",
+      "category": "Art & Culture",
       "tags": [
         "com",
         "gradusmusic",
@@ -40770,7 +40866,7 @@
       "slug": "mcp:app.himalayas/mcp",
       "name": "Himalayas Remote Jobs",
       "description": "Search and post remote jobs, browse companies, check salaries, and find talent on Himalayas.app",
-      "category": "Web & Search",
+      "category": "Search & Data Extraction",
       "tags": [
         "app",
         "himalayas",
@@ -41538,7 +41634,7 @@
       "slug": "mcp:ai.smithery/hustcc-mcp-mermaid",
       "name": "hustcc-mcp-mermaid",
       "description": "Generate dynamic Mermaid diagrams and charts with AI assistance. Customize styles and export diagr…",
-      "category": "AI / ML",
+      "category": "Customer Data Platforms",
       "tags": [
         "ai",
         "smithery",
@@ -42724,7 +42820,7 @@
       "slug": "mcp:dev.infranode/infranode",
       "name": "InfraNode",
       "description": "Keyless open-data MCP for 84 German cities: weather, air, electricity, transit, land, tax.",
-      "category": "MCP Servers",
+      "category": "Travel & Transportation",
       "tags": [
         "dev",
         "infranode",
@@ -43538,7 +43634,7 @@
       "slug": "mcp:com.babyblueviper/invinoveritas",
       "name": "invinoveritas",
       "description": "On-chain & AI-agent verifier: verdict committed before the outcome graded against it; /ledger.",
-      "category": "MCP Servers",
+      "category": "Finance & Fintech",
       "tags": [
         "com",
         "babyblueviper",
@@ -44017,7 +44113,7 @@
       "slug": "mcp:dev.cz-agents/isir",
       "name": "isir",
       "description": "Czech insolvency register (ISIR) — active/historical insolvency & bankruptcy by IČO or person.",
-      "category": "MCP Servers",
+      "category": "Finance & Fintech",
       "tags": [
         "dev",
         "cz",
@@ -44570,7 +44666,7 @@
       "slug": "mcp:ai.waystation/jira",
       "name": "jira",
       "description": "Track issues, manage projects, and streamline workflows in Jira.",
-      "category": "Productivity",
+      "category": "Aggregators",
       "tags": [
         "ai",
         "waystation",
@@ -44649,7 +44745,7 @@
       "slug": "mcp:ai.smithery/jjlabsio-korea-stock-mcp",
       "name": "jjlabsio-korea-stock-mcp",
       "description": "Search company disclosures and financial statements from the Korean market. Retrieve stock profile…",
-      "category": "Web & Search",
+      "category": "Finance & Fintech",
       "tags": [
         "ai",
         "smithery",
@@ -45006,7 +45102,7 @@
       "slug": "mcp:com.kage-core/kage",
       "name": "kage",
       "description": "Verified memory for coding agents: claims cited against code, stale withheld, savings receipts.",
-      "category": "MCP Servers",
+      "category": "Knowledge & Memory",
       "tags": [
         "com",
         "kage",
@@ -45708,7 +45804,7 @@
       "slug": "mcp:ai.smithery/kkjdaniel-bgg-mcp",
       "name": "kkjdaniel-bgg-mcp",
       "description": "BGG MCP provides access to the BoardGameGeek API through the Model Context Protocol, enabling retr…",
-      "category": "AI / ML",
+      "category": "Gaming",
       "tags": [
         "ai",
         "smithery",
@@ -47876,7 +47972,7 @@
       "slug": "mcp:ai.lithtrix/lithtrix-mcp",
       "name": "Lithtrix — Identity, Memory & Trust for AI Agents",
       "description": "Identity, memory, trust, and swarm primitives for AI agents. MIRC base always free.",
-      "category": "AI / ML",
+      "category": "Knowledge & Memory",
       "tags": [
         "ai",
         "lithtrix",
@@ -47958,7 +48054,7 @@
       "slug": "mcp:com.llm-bus/llm-bus",
       "name": "llm-bus",
       "description": "Coordinate multiple AI agents over MCP: atomic claims, leases, shared ledger, handoffs, tasks.",
-      "category": "Productivity",
+      "category": "Coding Agents",
       "tags": [
         "com",
         "llm",
@@ -48036,7 +48132,7 @@
       "slug": "mcp:com.local-mcp/local-mcp",
       "name": "local-mcp",
       "description": "163 local tools for Claude, Cursor, ChatGPT, Hermes: Mail, iMessage, Teams, WhatsApp & files. Local.",
-      "category": "Files & Storage",
+      "category": "Communication",
       "tags": [
         "com",
         "local",
@@ -48148,7 +48244,7 @@
       "slug": "mcp:ai.nocturnus/logic-server",
       "name": "logic-server",
       "description": "Agent reasoning, memory, and token-optimized context for AI applications.",
-      "category": "AI / ML",
+      "category": "Knowledge & Memory",
       "tags": [
         "ai",
         "nocturnus",
@@ -48783,7 +48879,7 @@
       "slug": "mcp:com.lyrenth/lyrenth-mcp",
       "name": "lyrenth-mcp",
       "description": "Read any public web page as a clean AIDocument (Markdown + structure) through Lyrenth.",
-      "category": "Web & Search",
+      "category": "Browser Automation",
       "tags": [
         "com",
         "lyrenth",
@@ -50104,7 +50200,7 @@
       "slug": "mcp:com.adrianczuczka/mason",
       "name": "mason",
       "description": "Context engineering MCP server — generates CLAUDE.md files via structured codebase analysis",
-      "category": "Files & Storage",
+      "category": "Developer Tools",
       "tags": [
         "com",
         "adrianczuczka",
@@ -50659,7 +50755,7 @@
       "slug": "mcp:ai.snapdiff/mcp",
       "name": "mcp",
       "description": "Visual-diff & change-detection tools that catch agentic UI drift for coding agents.",
-      "category": "MCP Servers",
+      "category": "Browser Automation",
       "tags": [
         "ai",
         "snapdiff",
@@ -50735,7 +50831,7 @@
       "slug": "mcp:ai.waystation/mcp",
       "name": "mcp",
       "description": "Ultimate toolbox to connect your LLM to popular productivity tools such as Monday, AirTable, Slack",
-      "category": "Communication",
+      "category": "Aggregators",
       "tags": [
         "ai",
         "waystation",
@@ -50755,7 +50851,7 @@
       "slug": "mcp:ai.websitepublisher/mcp",
       "name": "mcp",
       "description": "Build and publish websites through AI conversation.",
-      "category": "AI / ML",
+      "category": "Other Tools and Integrations",
       "tags": [
         "ai",
         "websitepublisher",
@@ -51138,7 +51234,7 @@
       "slug": "mcp:com.cloudflare.mcp/mcp",
       "name": "mcp",
       "description": "Cloudflare MCP servers",
-      "category": "Cloud",
+      "category": "Cloud Platforms",
       "tags": [
         "com",
         "cloudflare",
@@ -51882,7 +51978,7 @@
       "slug": "mcp:com.longbridge/mcp",
       "name": "mcp",
       "description": "US/HK markets — 145 tools: quotes, options, orders, fundamentals, screener, IPO, alerts & DCA",
-      "category": "MCP Servers",
+      "category": "Finance & Fintech",
       "tags": [
         "com",
         "longbridge",
@@ -52053,7 +52149,7 @@
       "slug": "mcp:com.picaos/mcp",
       "name": "mcp",
       "description": "A Model Context Protocol Server for Pica",
-      "category": "AI / ML",
+      "category": "Developer Tools",
       "tags": [
         "com",
         "picaos",
@@ -52264,7 +52360,7 @@
       "slug": "mcp:com.teamwork/mcp",
       "name": "mcp",
       "description": "The Teamwork.com official MCP server helps teams efficiently manage client projects with AI.",
-      "category": "MCP Servers",
+      "category": "Workplace & Productivity",
       "tags": [
         "com",
         "teamwork",
@@ -52284,7 +52380,7 @@
       "slug": "mcp:com.the13f/mcp",
       "name": "mcp",
       "description": "Institutional 13F intelligence: 8,600+ managers, holdings, peer search, sector flows.",
-      "category": "Web & Search",
+      "category": "Finance & Fintech",
       "tags": [
         "com",
         "the13f",
@@ -52481,7 +52577,7 @@
       "slug": "mcp:dev.augments/mcp",
       "name": "mcp",
       "description": "Augments MCP Server - A comprehensive framework documentation provider for Claude Code",
-      "category": "Files & Storage",
+      "category": "Developer Tools",
       "tags": [
         "dev",
         "augments",
@@ -52756,7 +52852,7 @@
       "slug": "mcp:com.mambabuilt/mcp-company-firmographic-enricher",
       "name": "mcp-company-firmographic-enricher",
       "description": "Enrich a company domain into firmographics via Apify: employees, industry, HQ, revenue, logo, age.",
-      "category": "MCP Servers",
+      "category": "Search & Data Extraction",
       "tags": [
         "com",
         "mambabuilt",
@@ -52841,7 +52937,7 @@
       "slug": "mcp:com.mambabuilt/mcp-domain-deliverability-checker",
       "name": "mcp-domain-deliverability-checker",
       "description": "Audit a domain email deliverability via Apify: SPF, DKIM, DMARC, MX, blacklist, catch-all, age.",
-      "category": "Communication",
+      "category": "Developer Tools",
       "tags": [
         "com",
         "mambabuilt",
@@ -52863,7 +52959,7 @@
       "slug": "mcp:com.mambabuilt/mcp-domain-to-linkedin-url-resolver",
       "name": "mcp-domain-to-linkedin-url-resolver",
       "description": "Resolves a company domain or name to its LinkedIn URL with confidence and firmographics.",
-      "category": "MCP Servers",
+      "category": "Search & Data Extraction",
       "tags": [
         "com",
         "mambabuilt",
@@ -52976,7 +53072,7 @@
       "slug": "mcp:com.mambabuilt/mcp-gtm-suite",
       "name": "mcp-gtm-suite",
       "description": "11 Mamba Labs account-intelligence MCP tools in one server: identity, signals, ICP. Clay-ready.",
-      "category": "MCP Servers",
+      "category": "Aggregators",
       "tags": [
         "com",
         "mambabuilt",
@@ -53021,7 +53117,7 @@
       "slug": "mcp:com.mambabuilt/mcp-icp-fit-scorer",
       "name": "mcp-icp-fit-scorer",
       "description": "Scores a company against your ICP with weighted signals. Returns score, tier, and breakdown.",
-      "category": "MCP Servers",
+      "category": "Customer Data Platforms",
       "tags": [
         "com",
         "mambabuilt",
@@ -54126,7 +54222,7 @@
       "slug": "mcp:com.mcpbundles/hub",
       "name": "MCPBundles Hub",
       "description": "Access all your MCPBundles tools in one place. Unified hub for all enabled bundles.",
-      "category": "MCP Servers",
+      "category": "Aggregators",
       "tags": [
         "com",
         "mcpbundles",
@@ -55594,7 +55690,7 @@
       "slug": "mcp:ai.waystation/miro",
       "name": "miro",
       "description": "Collaborate on visual boards with your team using Miro integration.",
-      "category": "MCP Servers",
+      "category": "Aggregators",
       "tags": [
         "ai",
         "waystation",
@@ -56144,7 +56240,7 @@
       "slug": "mcp:ai.waystation/monday",
       "name": "monday",
       "description": "Access and manage your Monday.com boards, items, and updates seamlessly",
-      "category": "MCP Servers",
+      "category": "Aggregators",
       "tags": [
         "ai",
         "waystation",
@@ -61046,7 +61142,7 @@
       "slug": "mcp:app.octotrip/rental-cars",
       "name": "OctoTrip Rental Cars",
       "description": "Free, no-login rental car search with real-time pricing. Affiliate-attributed booking links.",
-      "category": "Web & Search",
+      "category": "Travel & Transportation",
       "tags": [
         "app",
         "octotrip",
@@ -61199,7 +61295,7 @@
       "slug": "mcp:ai.waystation/office",
       "name": "office",
       "description": "Create, edit, and collaborate on Office documents and spreadsheets.",
-      "category": "Files & Storage",
+      "category": "Aggregators",
       "tags": [
         "ai",
         "waystation",
@@ -63416,7 +63512,7 @@
       "slug": "mcp:ai.parallel/search-mcp",
       "name": "Parallel Search MCP",
       "description": "The best web search for your AI Agent",
-      "category": "AI / ML",
+      "category": "Search & Data Extraction",
       "tags": [
         "ai",
         "parallel",
@@ -63437,7 +63533,7 @@
       "slug": "mcp:ai.parallel/task-mcp",
       "name": "Parallel Task MCP",
       "description": "An MCP server for deep research or task groups",
-      "category": "Productivity",
+      "category": "Search & Data Extraction",
       "tags": [
         "ai",
         "parallel",
@@ -63907,7 +64003,7 @@
       "slug": "mcp:dev.cz-agents/payqr",
       "name": "payqr",
       "description": "European payment QR — SPAYD (CZ/SK) & EPC/GiroCode (SEPA), plus text/WiFi/vCard. Local, free.",
-      "category": "Finance",
+      "category": "Finance & Fintech",
       "tags": [
         "dev",
         "cz",
@@ -64333,7 +64429,7 @@
       "slug": "mcp:ai.getperspective/mcp",
       "name": "Perspective AI",
       "description": "An AI concierge that turns static forms into adaptive AI conversations. From any MCP client.",
-      "category": "AI / ML",
+      "category": "Conversational AI",
       "tags": [
         "ai",
         "getperspective",
@@ -65672,7 +65768,7 @@
       "slug": "mcp:ai.waystation/postgres",
       "name": "postgres",
       "description": "Connect to your PostgreSQL database to query data and schemas.",
-      "category": "Databases",
+      "category": "Aggregators",
       "tags": [
         "ai",
         "waystation",
@@ -66252,7 +66348,7 @@
       "slug": "mcp:com.prereason/mcp",
       "name": "PreReason",
       "description": "Pre-reasoned Bitcoin & macro financial briefings for AI agents. Trend signals, regimes, 17 contexts.",
-      "category": "AI / ML",
+      "category": "Finance & Fintech",
       "tags": [
         "com",
         "prereason",
@@ -66272,7 +66368,7 @@
       "slug": "mcp:com.getalai/presentations",
       "name": "presentations",
       "description": "Generate, edit, and export AI presentations to PDF, PPTX, or a shareable link.",
-      "category": "AI / ML",
+      "category": "Workplace & Productivity",
       "tags": [
         "com",
         "getalai",
@@ -66292,7 +66388,7 @@
       "slug": "mcp:ai.presentations/presentations-ai",
       "name": "presentations-ai",
       "description": "Presentations.AI MCP server — create designed slide decks from a topic, text, or document.",
-      "category": "Files & Storage",
+      "category": "Workplace & Productivity",
       "tags": [
         "ai",
         "presentations",
@@ -67756,7 +67852,7 @@
       "slug": "mcp:com.quanttogo/quanttogo-mcp",
       "name": "quanttogo-mcp",
       "description": "Macro-factor quantitative signal source for US and China stock markets via MCP.",
-      "category": "MCP Servers",
+      "category": "Finance & Fintech",
       "tags": [
         "com",
         "quanttogo",
@@ -68552,7 +68648,7 @@
       "slug": "mcp:dev.cz-agents/realestate",
       "name": "realestate",
       "description": "Czech distressed real estate — anonymized district aggregates (k≥5). Free tier.",
-      "category": "MCP Servers",
+      "category": "Finance & Fintech",
       "tags": [
         "dev",
         "cz",
@@ -69998,7 +70094,7 @@
       "slug": "mcp:com.tradallo/reputation",
       "name": "reputation",
       "description": "Query cryptographically-verified trading reputations (humans + AI agents). ed25519-signed.",
-      "category": "AI / ML",
+      "category": "Finance & Fintech",
       "tags": [
         "com",
         "tradallo",
@@ -70671,7 +70767,7 @@
       "slug": "mcp:com.rootly/mcp-server",
       "name": "Rootly",
       "description": "Incident management, on-call scheduling, and intelligent analysis powered by Rootly.",
-      "category": "MCP Servers",
+      "category": "Developer Tools",
       "tags": [
         "com",
         "rootly",
@@ -71401,7 +71497,7 @@
       "slug": "mcp:dev.cz-agents/sanctions",
       "name": "sanctions",
       "description": "Sanctions screening for KYC/AML — EU FSF + OFAC SDN checks for Czech companies & individuals.",
-      "category": "AI / ML",
+      "category": "Finance & Fintech",
       "tags": [
         "dev",
         "cz",
@@ -71561,7 +71657,7 @@
       "slug": "mcp:com.sats4ai/bitcoin-ai-tools",
       "name": "Sats4AI - Bitcoin-Powered AI Tools",
       "description": "Permissionless communication supercharger. 40+ Lightning-paid tools for humans and AI agents.",
-      "category": "AI / ML",
+      "category": "Other Tools and Integrations",
       "tags": [
         "com",
         "sats4ai",
@@ -71583,7 +71679,7 @@
       "slug": "mcp:com.savvly/savvly",
       "name": "savvly",
       "description": "Savvly MCP: query fund data, model projections, and compare against alternative retirement products.",
-      "category": "AI / ML",
+      "category": "Finance & Fintech",
       "tags": [
         "com",
         "savvly",
@@ -73596,7 +73692,7 @@
       "slug": "mcp:ai.smithery/serkan-ozal-driflyte-mcp-server",
       "name": "serkan-ozal-driflyte-mcp-server",
       "description": "Discover available topics and explore up-to-date, topic-tagged web content. Search to surface the…",
-      "category": "Web & Search",
+      "category": "Search & Data Extraction",
       "tags": [
         "ai",
         "smithery",
@@ -74166,7 +74262,7 @@
       "slug": "mcp:dev.servonaut/servonaut",
       "name": "Servonaut",
       "description": "Manage AWS, Hetzner, OVH and SSH servers: status, logs, CloudWatch, IP bans, safe command exec.",
-      "category": "Cloud",
+      "category": "Command Line",
       "tags": [
         "dev",
         "servonaut",
@@ -74523,7 +74619,7 @@
       "slug": "mcp:com.shipstatic/mcp",
       "name": "ShipStatic",
       "description": "Deploy websites from AI agents. Free at mcp.shipstatic.com. Install for the full toolset.",
-      "category": "Developer Tools",
+      "category": "Cloud Platforms",
       "tags": [
         "com",
         "shipstatic",
@@ -75286,7 +75382,7 @@
       "slug": "mcp:ai.waystation/slack",
       "name": "slack",
       "description": "Send messages, access channels, and manage files in your Slack workspace.",
-      "category": "Communication",
+      "category": "Aggregators",
       "tags": [
         "ai",
         "waystation",
@@ -79147,7 +79243,7 @@
       "slug": "mcp:ai.klavis/strata",
       "name": "strata",
       "description": "MCP server for progressive tool usage at any scale (see https://klavis.ai)",
-      "category": "MCP Servers",
+      "category": "Other Tools and Integrations",
       "tags": [
         "ai",
         "klavis",
@@ -79981,7 +80077,7 @@
       "slug": "mcp:ai.waystation/supabase",
       "name": "supabase",
       "description": "Connect to your Supabase database to query data and schemas.",
-      "category": "Databases",
+      "category": "Aggregators",
       "tags": [
         "ai",
         "waystation",
@@ -81014,7 +81110,7 @@
       "slug": "mcp:ai.waystation/teams",
       "name": "teams",
       "description": "Collaborate, chat, and manage meetings in Microsoft Teams.",
-      "category": "MCP Servers",
+      "category": "Aggregators",
       "tags": [
         "ai",
         "waystation",
@@ -81125,7 +81221,7 @@
       "slug": "mcp:co.tempguru/event-staffing",
       "name": "TempGuru Event Staffing",
       "description": "W-2 event staffing data for AI agents: 345 US/CA markets, roles, rates, lead times, compliance.",
-      "category": "AI / ML",
+      "category": "Workplace & Productivity",
       "tags": [
         "co",
         "tempguru",
@@ -82659,7 +82755,7 @@
       "slug": "mcp:ai.traderouter/trade-router-mcp",
       "name": "trade-router-mcp",
       "description": "Non-custodial Solana swap & limit order engine for AI agents.",
-      "category": "AI / ML",
+      "category": "Finance & Fintech",
       "tags": [
         "ai",
         "traderouter",
@@ -83817,7 +83913,7 @@
       "slug": "mcp:art.travel/mcp",
       "name": "travel.art",
       "description": "Art-tourism data for AI agents: biennales, art fairs, museums, layover itineraries with 2026 facts.",
-      "category": "AI / ML",
+      "category": "Art & Culture",
       "tags": [
         "art",
         "travel",
@@ -85496,7 +85592,7 @@
       "slug": "mcp:com.mcpbundles/uk-air-quality",
       "name": "UK Air Quality MCP Server from MCPBundles",
       "description": "Access UK air quality data, monitoring sites, and hourly pollutant measurements across regions",
-      "category": "MCP Servers",
+      "category": "Aggregators",
       "tags": [
         "com",
         "mcpbundles",
@@ -85518,7 +85614,7 @@
       "slug": "mcp:com.mcpbundles/uk-case-law",
       "name": "UK Case Law MCP Server from MCPBundles",
       "description": "Search UK court judgments and tribunal decisions from the National Archives",
-      "category": "Web & Search",
+      "category": "Aggregators",
       "tags": [
         "com",
         "mcpbundles",
@@ -85540,7 +85636,7 @@
       "slug": "mcp:com.mcpbundles/uk-civic-parliamentary",
       "name": "UK Civic & Parliamentary Data MCP Server from MCPBundles",
       "description": "Query UK Parliament, elections, crime stats, ONS census data, and national archives",
-      "category": "MCP Servers",
+      "category": "Aggregators",
       "tags": [
         "com",
         "mcpbundles",
@@ -85562,7 +85658,7 @@
       "slug": "mcp:com.mcpbundles/uk-constituencies",
       "name": "UK Constituencies MCP Server from MCPBundles",
       "description": "Search UK parliamentary constituencies by name, get boundaries and ONS codes",
-      "category": "Web & Search",
+      "category": "Aggregators",
       "tags": [
         "com",
         "mcpbundles",
@@ -85583,7 +85679,7 @@
       "slug": "mcp:com.mcpbundles/uk-court-finder",
       "name": "UK Court Finder MCP Server from MCPBundles",
       "description": "Find UK courts and tribunals by location, name, or law area with addresses and contacts",
-      "category": "MCP Servers",
+      "category": "Aggregators",
       "tags": [
         "com",
         "mcpbundles",
@@ -85605,7 +85701,7 @@
       "slug": "mcp:com.mcpbundles/uk-environmental-intelligence",
       "name": "UK Environmental Intelligence MCP Server from MCPBundles",
       "description": "Access UK flood warnings, river levels, water quality, Met Office forecasts, and carbon data",
-      "category": "MCP Servers",
+      "category": "Aggregators",
       "tags": [
         "com",
         "mcpbundles",
@@ -85627,7 +85723,7 @@
       "slug": "mcp:com.mcpbundles/uk-hansard",
       "name": "UK Hansard MCP Server from MCPBundles",
       "description": "Search Parliamentary questions and motions from UK House of Commons",
-      "category": "Web & Search",
+      "category": "Aggregators",
       "tags": [
         "com",
         "mcpbundles",
@@ -85648,7 +85744,7 @@
       "slug": "mcp:com.mcpbundles/uk-legislation",
       "name": "UK Legislation MCP Server from MCPBundles",
       "description": "Search UK Acts, Statutory Instruments, and legislation with full text retrieval",
-      "category": "Web & Search",
+      "category": "Aggregators",
       "tags": [
         "com",
         "mcpbundles",
@@ -85669,7 +85765,7 @@
       "slug": "mcp:com.mcpbundles/uk-parliament",
       "name": "UK Parliament MCP Server from MCPBundles",
       "description": "Search MPs and Lords, fetch profiles, synopses, and Westminster constituencies",
-      "category": "Web & Search",
+      "category": "Aggregators",
       "tags": [
         "com",
         "mcpbundles",
@@ -85708,7 +85804,7 @@
       "slug": "mcp:com.mcpbundles/uk-petitions",
       "name": "UK Petitions MCP Server from MCPBundles",
       "description": "Search UK Parliament petitions, view signatures, government responses, and debate outcomes",
-      "category": "Web & Search",
+      "category": "Aggregators",
       "tags": [
         "com",
         "mcpbundles",
@@ -85729,7 +85825,7 @@
       "slug": "mcp:com.mcpbundles/uk-planning",
       "name": "UK Planning Data MCP Server from MCPBundles",
       "description": "Search UK planning applications, entities, datasets, and conservation areas",
-      "category": "Web & Search",
+      "category": "Aggregators",
       "tags": [
         "com",
         "mcpbundles",
@@ -85750,7 +85846,7 @@
       "slug": "mcp:com.mcpbundles/uk-police",
       "name": "UK Police MCP Server from MCPBundles",
       "description": "Access street-level crime reports, stop and search data, and outcomes across UK police forces",
-      "category": "Web & Search",
+      "category": "Aggregators",
       "tags": [
         "com",
         "mcpbundles",
@@ -85771,7 +85867,7 @@
       "slug": "mcp:com.mcpbundles/uk-property-business",
       "name": "UK Property & Business Intelligence MCP Server from MCPBundles",
       "description": "Search UK companies, land registry prices, charities, OS locations, and traffic data",
-      "category": "Web & Search",
+      "category": "Aggregators",
       "tags": [
         "com",
         "mcpbundles",
@@ -85793,7 +85889,7 @@
       "slug": "mcp:com.mcpbundles/uk-public-services-health",
       "name": "UK Public Services & Health MCP Server from MCPBundles",
       "description": "Access CQC care ratings, NHS health services, and food hygiene data across the UK",
-      "category": "MCP Servers",
+      "category": "Aggregators",
       "tags": [
         "com",
         "mcpbundles",
@@ -88331,7 +88427,7 @@
       "slug": "mcp:ai.keenable/web-search",
       "name": "web-search",
       "description": "Live web search and clean-markdown page fetch over the Keenable web index.",
-      "category": "Web & Search",
+      "category": "Search & Data Extraction",
       "tags": [
         "ai",
         "keenable",
@@ -89444,7 +89540,7 @@
       "slug": "mcp:ai.waystation/wrike",
       "name": "wrike",
       "description": "Manage projects, tasks, and workflows with Wrike project management.",
-      "category": "Productivity",
+      "category": "Aggregators",
       "tags": [
         "ai",
         "waystation",
@@ -89727,7 +89823,7 @@
       "slug": "mcp:com.xquik/mcp",
       "name": "Xquik MCP Server",
       "description": "X data platform with 100+ REST endpoints, MCP tools, webhooks, SDKs, and confirmed writes.",
-      "category": "MCP Servers",
+      "category": "Social Media",
       "tags": [
         "com",
         "xquik",
@@ -90113,7 +90209,7 @@
       "slug": "mcp:ai.smithery/yuna0x0-anilist-mcp",
       "name": "yuna0x0-anilist-mcp",
       "description": "Access and interact with anime and manga data seamlessly. Retrieve detailed information about your…",
-      "category": "MCP Servers",
+      "category": "Art & Culture",
       "tags": [
         "ai",
         "smithery",
@@ -90135,7 +90231,7 @@
       "slug": "mcp:ai.smithery/yuna0x0-hackmd-mcp",
       "name": "yuna0x0-hackmd-mcp",
       "description": "Interact with your HackMD notes and teams seamlessly. Manage your notes, view reading history, and…",
-      "category": "MCP Servers",
+      "category": "Other Tools and Integrations",
       "tags": [
         "ai",
         "smithery",
@@ -90529,7 +90625,7 @@
       "slug": "mcp:com.zippfeed/zipp",
       "name": "Zipp",
       "description": "Multi-language crypto news with editorial sentiment + importance scoring; cites original publisher.",
-      "category": "MCP Servers",
+      "category": "Finance & Fintech",
       "tags": [
         "com",
         "zippfeed",

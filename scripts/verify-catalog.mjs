@@ -17,7 +17,17 @@
 //                          filtered count.
 //   search + category     — free-text terms AND the category filter compose.
 // Zero deps (node stdlib + the package's compiled output). Build first.
-import { queryCatalog, toolkitCategories, tallyCategories, loadCatalog } from "../dist/catalog.js";
+import {
+  queryCatalog,
+  toolkitCategories,
+  tallyCategories,
+  loadCatalog,
+  normalizeRepoUrl,
+  parseAwesomeEntries,
+  parseAwesomeTaxonomy,
+  searchAwesomeServers,
+  applyTaxonomyToSnapshot,
+} from "../dist/catalog.js";
 
 const checks = [];
 const assert = (name, cond, detail = "") => {
@@ -165,6 +175,186 @@ const snap = {
     }
   }
   assert("shipped catalog has no invalid or templated mount URLs", bad.length === 0, bad.slice(0, 3).join("; "));
+}
+
+// ==================================================================================================
+// awesome-mcp-servers adapter (Adapter C) — taxonomy + live discovery. These prove the ENRICHMENT
+// layer parses/joins correctly and, critically, that it can NEVER leak into the snapshot.
+// ==================================================================================================
+
+// A synthetic README slice covering the awesome-mcp shapes the parser must survive: emoji headings,
+// an <a name> anchor, `&` and `/` kept mid-category, a glama badge and a non-github link before the
+// real repo, an inline second github link in the description, and content on BOTH sides of the
+// `## Server Implementations` boundary that must be excluded.
+const AWESOME_FIXTURE = [
+  "# awesome-mcp-servers",
+  "",
+  "## Table of Contents",
+  "",
+  "- [before/section](https://github.com/before/section) - Must be ignored (pre-section).",
+  "",
+  "## Server Implementations",
+  "",
+  "### 🔗 Aggregators",
+  "",
+  "- [foo/aggregator](https://github.com/foo/aggregator) - Bridges many servers.",
+  "- [bar/switch](https://github.com/bar/switch) ![glama](https://glama.ai/mcp/servers/xyz/badge) - Routes requests. See also [related](https://github.com/other/related).",
+  "- [docs](https://example.com/docs) [zap/tool](https://github.com/zap/tool) - Zaps things.",
+  "",
+  '### <a name="finance"></a>💰 Finance & Fintech',
+  "",
+  "- [baz/pay](https://github.com/baz/pay) - Payment processing.",
+  "",
+  "### 📂 Cloud / Infra",
+  "",
+  "- [qux/cloud](https://github.com/qux/cloud) - Cloud object storage.",
+  "",
+  "## Frameworks",
+  "",
+  "### For servers",
+  "",
+  "- [never/parsed](https://github.com/never/parsed) - Should not appear (past the boundary).",
+  "",
+].join("\n");
+
+// --- 9. normalizeRepoUrl: every URL shape collapses to the canonical join key ---------------------
+{
+  const cases = [
+    ["https://github.com/Owner/Repo.git", "github.com/owner/repo"], // case + .git suffix
+    ["git+https://github.com/Owner/Repo", "github.com/owner/repo"], // git+ prefix
+    ["git@github.com:Owner/Repo.git", "github.com/owner/repo"], // scp-style
+    ["https://www.github.com/Owner/Repo", "github.com/owner/repo"], // www. subdomain
+    ["https://github.com/owner/repo/tree/main/pkg", "github.com/owner/repo"], // deep path -> first 2 segs
+    ["https://gitlab.com/owner/repo", null], // non-github host
+    ["https://github.com/owner", null], // < 2 path segments
+    ["https://notgithub.com/owner/repo", null], // host must END in github.com
+    ["not a url", null],
+    ["", null],
+    [null, null],
+    [undefined, null],
+  ];
+  let bad = "";
+  for (const [input, want] of cases) {
+    const got = normalizeRepoUrl(input);
+    if (got !== want) { bad = `${JSON.stringify(input)} -> ${JSON.stringify(got)} (want ${JSON.stringify(want)})`; break; }
+  }
+  assert("normalizeRepoUrl collapses every URL shape to the canonical key (or null)", !bad, bad);
+}
+
+// --- 10. parseAwesomeTaxonomy / parseAwesomeEntries: fidelity + section boundaries -----------------
+{
+  const tax = parseAwesomeTaxonomy(AWESOME_FIXTURE);
+  assert("taxonomy holds exactly the 5 in-section repos", tax.size === 5, `size=${tax.size} [${[...tax.keys()].join(", ")}]`);
+  assert("emoji-only heading -> plain category", tax.get("github.com/foo/aggregator") === "Aggregators", tax.get("github.com/foo/aggregator"));
+  assert("<a name> anchor stripped AND `&` kept mid-category", tax.get("github.com/baz/pay") === "Finance & Fintech", tax.get("github.com/baz/pay"));
+  assert("`/` kept mid-category", tax.get("github.com/qux/cloud") === "Cloud / Infra", tax.get("github.com/qux/cloud"));
+  assert("pre-section bullet excluded (before Server Implementations)", !tax.has("github.com/before/section"));
+  assert("post-boundary bullet excluded (## Frameworks ends the section)", !tax.has("github.com/never/parsed"));
+  assert("inline description github link is NOT a second entry (first-repo-per-line)", !tax.has("github.com/other/related"));
+
+  const entries = parseAwesomeEntries(AWESOME_FIXTURE);
+  const agg = entries.find((e) => e.repoUrl === "github.com/foo/aggregator");
+  assert("entry name = link text, description = post-dash text", agg && agg.name === "foo/aggregator" && agg.description === "Bridges many servers.", JSON.stringify(agg));
+  const zap = entries.find((e) => e.repoUrl === "github.com/zap/tool");
+  assert("non-github link before the repo is skipped for the REPO (repo=first github link)", !!zap, JSON.stringify(zap));
+}
+
+// --- 11. searchAwesomeServers: pure filter, exclusion, limit clamp, discovery shape ---------------
+{
+  const hits = searchAwesomeServers(AWESOME_FIXTURE, "payment");
+  assert("query matches on name/desc/category", hits.length === 1 && hits[0].repository === "https://github.com/baz/pay", JSON.stringify(hits.map((h) => h.repository)));
+  const r = hits[0];
+  assert("discovery hit is flagged installable:false + source awesome-mcp", r.installable === false && r.source === "awesome-mcp", JSON.stringify(r));
+  assert("discovery hit carries the vet-before-mounting note", typeof r.note === "string" && /discovery-only/i.test(r.note), r.note);
+  assert("discovery hit keeps the curated category", r.category === "Finance & Fintech", r.category);
+
+  const excluded = searchAwesomeServers(AWESOME_FIXTURE, "payment", { exclude: new Set(["github.com/baz/pay"]) });
+  assert("a repo we already hold is excluded from discovery", excluded.length === 0, String(excluded.length));
+
+  const all = searchAwesomeServers(AWESOME_FIXTURE, "");
+  assert("empty query returns every in-section server (deduped)", all.length === 5, String(all.length));
+  const clamped = searchAwesomeServers(AWESOME_FIXTURE, "", { limit: 0 });
+  assert("limit is clamped to >=1", clamped.length === 1, String(clamped.length));
+}
+
+// --- 12. NO-SNAPSHOT invariant: discovery is structurally un-persistable; catalog stays CC0-only ---
+{
+  const r = searchAwesomeServers(AWESOME_FIXTURE, "payment")[0];
+  const forbidden = ["slug", "mount", "origin"].filter((k) => k in r);
+  assert("DiscoveryResult has NO slug/mount/origin (can't be written or mounted as a Toolkit)", forbidden.length === 0, forbidden.join(","));
+
+  const shipped = loadCatalog();
+  const ok = new Set(["mcp-registry", "apis-guru"]);
+  const leaked = shipped.toolkits.filter((t) => !ok.has(t.origin)).map((t) => `${t.slug}:${t.origin}`);
+  assert(`shipped catalog is CC0-only (${shipped.toolkits.length} toolkits, every origin ∈ {mcp-registry, apis-guru})`, leaked.length === 0, leaked.slice(0, 3).join("; "));
+}
+
+// --- 13. applyTaxonomyToSnapshot: post-hoc recategorize, origin-scoped, invariant-preserving -------
+// Proves the `toolkits recategorize` data-layer op: it overrides `category` ONLY for mcp-registry
+// entries whose repo joins the taxonomy, NEVER touches apis-guru (even on a repo match), leaves
+// non-joining / repo-less entries alone, recomputes the histogram so count==content still holds,
+// preserves the toolkit set + CC0-only origins, is a no-op on an empty taxonomy, and is idempotent.
+{
+  const reg = (slug, name, category, repository) => ({
+    slug, name, description: `${name} server`, category,
+    tags: [name.toLowerCase()], origin: "mcp-registry",
+    source_license: "MIT (MCP Registry data)", repository,
+    mount: { source: "manual", note: "test" },
+  });
+  const api = (slug, name, category, repository) => ({
+    slug, name, description: `${name} api`, category,
+    tags: [name.toLowerCase()], origin: "apis-guru",
+    source_license: "CC0-1.0 (test)", repository,
+    mount: { source: "manual", note: "test" },
+  });
+  const mkSnap = () => {
+    const tks = [
+      reg("mcp:agg", "Aggregator", "MCP Servers", "https://github.com/foo/aggregator"),
+      reg("mcp:pay", "Payer", "MCP Servers", "https://github.com/baz/pay"),
+      reg("mcp:orphan", "Orphan", "MCP Servers", "https://github.com/no/match"),
+      reg("mcp:norepo", "NoRepo", "MCP Servers", undefined),
+      api("openapi:foo", "FooApi", "Cloud", "https://github.com/foo/aggregator"),
+    ];
+    return { generated_at: "", counts: { total: tks.length, mcp_registry: 4, apis_guru: 1 }, categories: tallyCategories(tks), toolkits: tks };
+  };
+  const taxonomy = new Map([
+    ["github.com/foo/aggregator", "Aggregators"],
+    ["github.com/baz/pay", "Finance & Fintech"],
+  ]);
+
+  const s = mkSnap();
+  const res = applyTaxonomyToSnapshot(s, taxonomy);
+  assert("recategorize matched=2, changed=2 (only the two joining mcp-registry entries)", res.matched === 2 && res.changed === 2, JSON.stringify(res));
+
+  const cat = (slug) => s.toolkits.find((t) => t.slug === slug).category;
+  assert("mcp-registry + repo∈taxonomy gets the curated category", cat("mcp:agg") === "Aggregators" && cat("mcp:pay") === "Finance & Fintech", `${cat("mcp:agg")} / ${cat("mcp:pay")}`);
+  assert("apis-guru is NEVER recategorized, even on a repo match (origin-scoped)", cat("openapi:foo") === "Cloud", cat("openapi:foo"));
+  assert("mcp-registry entry whose repo is not in the taxonomy is unchanged", cat("mcp:orphan") === "MCP Servers", cat("mcp:orphan"));
+  assert("mcp-registry entry with no repository is unchanged", cat("mcp:norepo") === "MCP Servers", cat("mcp:norepo"));
+
+  // honesty invariant survives the recompute: every histogram count == its live filter count.
+  let consistent = true, firstBad = "";
+  for (const { name, count } of s.categories) {
+    const got = queryCatalog(s, { category: name, limit: 200 }).total;
+    if (got !== count) { consistent = false; if (!firstBad) firstBad = `${name}: histogram=${count} filter=${got}`; }
+  }
+  assert("after recategorize, histogram count == filter count (honesty invariant holds)", consistent, firstBad);
+  assert("recomputed histogram reflects the moves (Aggregators=1, MCP Servers=2)", eq(s.categories.find((c) => c.name === "Aggregators"), { name: "Aggregators", count: 1 }) && s.categories.find((c) => c.name === "MCP Servers").count === 2, JSON.stringify(s.categories));
+
+  // structural invariants: toolkit set unchanged, origins stay CC0-only.
+  assert("toolkit count is unchanged by recategorize", s.toolkits.length === 5, String(s.toolkits.length));
+  const okOrigins = new Set(["mcp-registry", "apis-guru"]);
+  assert("origins stay CC0-only after recategorize", s.toolkits.every((t) => okOrigins.has(t.origin)));
+
+  // idempotent: a second apply matches the same 2 but changes nothing.
+  const res2 = applyTaxonomyToSnapshot(s, taxonomy);
+  assert("recategorize is idempotent (matched=2, changed=0 on re-run)", res2.matched === 2 && res2.changed === 0, JSON.stringify(res2));
+
+  // empty taxonomy is a pure no-op (no matches, categories untouched).
+  const s2 = mkSnap();
+  const before = JSON.stringify(s2.categories);
+  const res3 = applyTaxonomyToSnapshot(s2, new Map());
+  assert("empty taxonomy is a no-op (matched=0, changed=0, categories untouched)", res3.matched === 0 && res3.changed === 0 && JSON.stringify(s2.categories) === before, JSON.stringify(res3));
 }
 
 const failed = checks.filter((c) => !c.ok);

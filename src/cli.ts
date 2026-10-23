@@ -46,6 +46,9 @@ import {
   loadCatalog,
   writeCatalog,
   defaultCatalogPath,
+  discoverToolkits,
+  fetchAwesomeTaxonomy,
+  applyTaxonomyToSnapshot,
 } from "./catalog.js";
 import { SUPPORTED_CLIENTS, buildPlan, writePlan, type ClientId } from "./clients.js";
 import {
@@ -250,13 +253,20 @@ toolkitsCmd
   .description("rebuild data/catalog.json from the open MCP Registry + APIs.guru indexes")
   .action(async () => {
     out("Syncing catalog from the MCP Registry and APIs.guru…");
-    const { snapshot, errors } = await ingestCatalogVerbose();
+    const { snapshot, errors, enrichment } = await ingestCatalogVerbose();
     snapshot.generated_at = new Date().toISOString();
     const path = defaultCatalogPath();
     writeCatalog(snapshot, path);
     log.ok(
       `wrote ${snapshot.counts.total} toolkits (${snapshot.counts.mcp_registry} MCP, ${snapshot.counts.apis_guru} OpenAPI) to ${path}`,
     );
+    if (enrichment.taxonomy_entries > 0) {
+      log.ok(
+        `awesome-mcp taxonomy: ${enrichment.taxonomy_entries} categorized repos → ${enrichment.reclassified} registry servers reclassified`,
+      );
+    } else {
+      log.warn("awesome-mcp taxonomy unavailable — categories fell back to the keyword heuristic");
+    }
     for (const e of errors) log.warn(`partial: ${e.source} failed — ${e.message}`);
   });
 
@@ -275,6 +285,65 @@ toolkitsCmd
     out(`  OpenAPI:      ${c.counts.apis_guru}`);
     out(`\n  ${c.categories.length} categories:`);
     for (const cat of c.categories) out(`    ${cat.name.padEnd(22)} ${cat.count}`);
+  });
+
+toolkitsCmd
+  .command("discover <query...>")
+  .description("live-search awesome-mcp-servers for MCP servers NOT in our snapshot (never persisted)")
+  .option("-n, --limit <n>", "max results", "20")
+  .action(async (query: string[], opts: { limit: string }) => {
+    const q = query.join(" ");
+    out(`Searching awesome-mcp-servers live for "${q}" (discovery only — nothing is written)…`);
+    let results;
+    try {
+      results = await discoverToolkits(q, { limit: Number(opts.limit) || 20 });
+    } catch (err) {
+      log.error(`discovery failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 1;
+      return;
+    }
+    if (results.length === 0) {
+      out("no new servers found (all matches are already in the snapshot, or no match)");
+      return;
+    }
+    out(`\n${results.length} discovery result(s) — vet before mounting, none are auto-installed:`);
+    for (const r of results) {
+      out(`  • ${r.name}  [${r.category}]`);
+      out(`    ${r.repository}`);
+      if (r.description) out(`    ${r.description}`);
+    }
+  });
+
+toolkitsCmd
+  .command("recategorize")
+  .description("re-apply the awesome-mcp category taxonomy to the existing catalog (no full re-fetch)")
+  .action(async () => {
+    const path = defaultCatalogPath();
+    const c = loadCatalog(path);
+    if (c.counts.total === 0) {
+      out("catalog is empty — run `switchboard toolkits sync` first");
+      return;
+    }
+    out("Fetching the awesome-mcp-servers category taxonomy (categories only — no server lists)…");
+    let taxonomy: Map<string, string>;
+    try {
+      taxonomy = await fetchAwesomeTaxonomy();
+    } catch (err) {
+      log.error(`taxonomy fetch failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 1;
+      return;
+    }
+    if (taxonomy.size === 0) {
+      log.error("taxonomy fetch returned no categories — catalog left unchanged");
+      process.exitCode = 1;
+      return;
+    }
+    const { matched, changed } = applyTaxonomyToSnapshot(c, taxonomy);
+    c.generated_at = new Date().toISOString();
+    writeCatalog(c, path);
+    log.ok(
+      `awesome-mcp taxonomy: ${taxonomy.size} categorized repos → ${matched} catalog entries matched, ${changed} recategorized (${path})`,
+    );
   });
 
 program

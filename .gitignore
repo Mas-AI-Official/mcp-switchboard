@@ -34,3 +34,7 @@ launch-report.*
 # Keep the committed examples (these are templates, not real config):
 !switchboard.config.example.yaml
 !examples/switchboard.config.yaml
+
+# local operator notes and config backups (never published)
+switchboard.config.yaml.bak*
+docs/STATUS-*
