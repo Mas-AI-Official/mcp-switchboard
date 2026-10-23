@@ -30,7 +30,7 @@
 import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
-import type { Response } from "express";
+import type { Request, Response } from "express";
 import type {
   OAuthServerProvider,
   AuthorizationParams,
@@ -124,6 +124,18 @@ interface PendingAuth {
 
 const emptyState = (): AuthServerState => ({ clients: {}, accessTokens: {}, refreshTokens: {} });
 
+/**
+ * How the consent step learns who the owner is (design vNext 3.2). Consent used to be satisfied by whoever
+ * was driving the browser, which includes the client that is asking for access. It now needs an owner
+ * session, supplied by the dashboard process that owns the session store.
+ */
+export interface OwnerConsentGate {
+  /** The owner session attached to this request (for its CSRF value), or null when not signed in. */
+  sessionFor(req: Request): { csrf: string } | null;
+  /** Loopback URL where a signed-in owner can finish a pending consent that began elsewhere. */
+  resumeUrl(pendingId: string): string;
+}
+
 /** Resolved, validated OAuth-server runtime options (or null when the feature is off). */
 export interface ResolvedOAuthOptions {
   issuerUrl: URL;
@@ -186,6 +198,7 @@ export class SwitchboardAuthProvider implements OAuthServerProvider {
   constructor(
     private readonly opts: ResolvedOAuthOptions,
     brand?: SettingsConfig["auth_screen"],
+    private readonly ownerGate?: OwnerConsentGate,
   ) {
     this.key = loadVaultKey();
     this.state = this.load();
@@ -221,6 +234,11 @@ export class SwitchboardAuthProvider implements OAuthServerProvider {
     const now = Date.now();
     for (const [code, rec] of this.codes) if (rec.expiresAt <= now) this.codes.delete(code);
     for (const [id, rec] of this.pending) if (rec.expiresAt <= now) this.pending.delete(id);
+  }
+
+  /** How many dynamically registered clients exist (the DCR cap is checked against this). */
+  clientCount(): number {
+    return Object.keys(this.state.clients).length;
   }
 
   // ── OAuthRegisteredClientsStore (RFC 7591 Dynamic Client Registration) ──────────────
@@ -271,7 +289,31 @@ export class SwitchboardAuthProvider implements OAuthServerProvider {
     });
     res.set("Content-Type", "text/html; charset=utf-8");
     res.set("Cache-Control", "no-store");
-    res.send(this.consentPage(id, client, scopes, resource));
+    // Consent is the owner's decision, not the requester's. Without an owner session the page carries
+    // no form at all: it only says how to sign in, and the pending request waits for a signed-in owner.
+    const owner = this.ownerGate?.sessionFor(res.req);
+    if (this.ownerGate && !owner) {
+      res.status(401).send(this.ownerRequiredPage(this.ownerGate.resumeUrl(id), client.client_name ?? client.client_id));
+      return;
+    }
+    res.send(this.consentPage(id, client, scopes, resource, owner?.csrf));
+  }
+
+  /** The consent page for an already-pending request, for a signed-in owner. Null when unknown or expired. */
+  renderPendingConsent(pendingId: string, csrf: string): string | null {
+    this.gc();
+    const p = this.pending.get(pendingId);
+    if (!p) return null;
+    const stub = { client_id: p.clientId, client_name: p.clientName } as OAuthClientInformationFull;
+    return this.consentPage(pendingId, stub, p.scopes, p.resource, csrf);
+  }
+
+  /** Sign-in-required page for a pending request. Null when unknown or expired. */
+  renderOwnerRequired(pendingId: string): string | null {
+    this.gc();
+    const p = this.pending.get(pendingId);
+    if (!p || !this.ownerGate) return null;
+    return this.ownerRequiredPage(this.ownerGate.resumeUrl(pendingId), p.clientName);
   }
 
   /**
@@ -475,6 +517,7 @@ export class SwitchboardAuthProvider implements OAuthServerProvider {
     client: OAuthClientInformationFull,
     scopes: string[],
     resource: string,
+    csrf?: string,
   ): string {
     const accent = /^#[0-9a-fA-F]{3,8}$/.test(this.brand.accent_color ?? "") ? this.brand.accent_color! : "#2dd4bf";
     const title = esc(this.brand.title || "Authorize access");
@@ -521,11 +564,35 @@ ${logo}
 <ul>${scopeList}</ul>
 <p class="res">Audience: ${esc(resource)}</p>
 <input type="hidden" name="pending_id" value="${esc(pendingId)}"/>
+${csrf ? `<input type="hidden" name="csrf" value="${esc(csrf)}"/>` : ""}
 <div class="row">
 <button class="deny" type="submit" name="decision" value="deny">Deny</button>
 <button class="approve" type="submit" name="decision" value="approve">Approve</button>
 </div>
 ${support}
 </form></body></html>`;
+  }
+
+  /** Page shown when consent is requested without an owner session: instructions only, never a form. */
+  private ownerRequiredPage(resumeUrl: string, clientName: string): string {
+    const accent = /^#[0-9a-fA-F]{3,8}$/.test(this.brand.accent_color ?? "") ? this.brand.accent_color! : "#2dd4bf";
+    const title = esc(this.brand.title || "Owner sign-in required");
+    return `<!doctype html><html lang="en"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>${title}</title><style>
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0d1117;color:#e6edf3;
+font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+.card{width:min(480px,92vw);background:#161b22;border:1px solid #30363d;border-top:3px solid ${accent};border-radius:14px;padding:30px}
+h1{font-size:19px;margin:0 0 10px}
+p{color:#8b949e;font-size:14px;margin:0 0 14px}
+code{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:2px 6px;color:#e6edf3}
+a{color:${accent};word-break:break-all}
+</style></head><body><div class="card">
+<h1>${title}</h1>
+<p><strong>${esc(clientName)}</strong> asked to connect to this MCP Switchboard. Only the owner of this machine can approve that, and no owner session came with this request.</p>
+<p>On the machine that runs Switchboard, run <code>switchboard dashboard login</code>. Then open this link in the browser it opens:</p>
+<p><a href="${esc(resumeUrl)}">${esc(resumeUrl)}</a></p>
+<p>The request stays pending for ten minutes.</p>
+</div></body></html>`;
   }
 }

@@ -13,6 +13,7 @@ process.env.SWITCHBOARD_HOME = mkdtempSync(join(tmpdir(), "sb-oauth-"));
 
 const { Gateway } = await import("../dist/gateway.js");
 const { startDashboard } = await import("../dist/dashboard.js");
+const { LoginCodeStore } = await import("../dist/httpsec.js");
 
 const PORT = 8099;
 const PUBLIC = `http://127.0.0.1:${PORT}`; // loopback http is fine for this offline oracle
@@ -64,12 +65,19 @@ try {
   const client = await reg.json();
   assert("DCR returns a client_id", reg.status === 201 && typeof client.client_id === "string", `${reg.status} ${client.client_id ?? client.error}`);
 
+  // 4b) Consent is the OWNER's decision (design vNext 3.2): sign in the way `switchboard dashboard login`
+  // does, by redeeming a one-time login code for the owner session cookie + CSRF value.
+  const loginRes = await fetch(`${PUBLIC}/api/session`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code: new LoginCodeStore().mint() }) });
+  const owner = await loginRes.json();
+  const ownerCookie = (loginRes.headers.get("set-cookie") ?? "").split(";")[0];
+  assert("owner session established for the consent step", loginRes.status === 200 && ownerCookie.startsWith("switchboard_session=") && typeof owner.csrf === "string", String(loginRes.status));
+
   // 5) /authorize with PKCE → consent page (consent:true)
   const verifier = b64url(randomBytes(32));
   const challenge = b64url(createHash("sha256").update(verifier).digest());
   const state = b64url(randomBytes(8));
   const authUrl = `${PUBLIC}/authorize?response_type=code&client_id=${encodeURIComponent(client.client_id)}&redirect_uri=${encodeURIComponent(redirectUri)}&code_challenge=${challenge}&code_challenge_method=S256&state=${state}&scope=read&resource=${encodeURIComponent(`${PUBLIC}/mcp`)}`;
-  const authRes = await fetch(authUrl, { redirect: "manual" });
+  const authRes = await fetch(authUrl, { redirect: "manual", headers: { cookie: ownerCookie } });
   const authHtml = await authRes.text();
   const pendingMatch = authHtml.match(/name="pending_id"\s+value="([^"]+)"/);
   assert("/authorize renders consent page with pending_id", authRes.status === 200 && !!pendingMatch, pendingMatch ? "pending_id found" : `status ${authRes.status}`);
@@ -77,8 +85,8 @@ try {
   // 6) Approve consent → 302 back to redirect_uri with ?code=
   const consentRes = await fetch(`${PUBLIC}/oauth/consent`, {
     method: "POST", redirect: "manual",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ pending_id: pendingMatch[1], decision: "approve" }).toString(),
+    headers: { "content-type": "application/x-www-form-urlencoded", cookie: ownerCookie },
+    body: new URLSearchParams({ pending_id: pendingMatch[1], decision: "approve", csrf: owner.csrf }).toString(),
   });
   const loc = consentRes.headers.get("location") ?? "";
   const code = new URL(loc, PUBLIC).searchParams.get("code");

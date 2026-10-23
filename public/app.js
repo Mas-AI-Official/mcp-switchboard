@@ -21,17 +21,48 @@ function attr(s) {
   return String(s ?? "").replace(/"/g, "&quot;");
 }
 
-async function api(path, opts) {
-  const res = await fetch(path, {
-    headers: { "content-type": "application/json" },
-    ...opts,
-  });
+// ----------------------------------------------------------------------------
+// Owner session. The admin API needs the HttpOnly session cookie (the browser sends it by itself) and,
+// on every mutating call, the CSRF value below. It is held in memory only; after a reload it is
+// recovered from GET /api/session. `switchboard dashboard login` opens this page at /#login=<code>.
+// ----------------------------------------------------------------------------
+let csrfToken = null;
+
+function showSignInBanner(detail) {
+  let el = $("#auth-banner");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "auth-banner";
+    el.className = "auth-banner";
+    el.setAttribute("role", "alert");
+    document.body.prepend(el);
+  }
+  el.innerHTML =
+    `<strong>Owner sign-in required.</strong> ${detail ? esc(detail) + " " : ""}` +
+    `Run <code>switchboard dashboard login</code> in a terminal on this machine; it opens this dashboard already signed in.`;
+}
+
+function hideSignInBanner() {
+  const el = $("#auth-banner");
+  if (el) el.remove();
+}
+
+// The ONE place the SPA talks to the server. Always sends the session cookie; adds the CSRF header on
+// anything that is not a read; a 401 shows the sign-in banner. `quiet` skips the banner (the sign-in
+// probe handles its own 401).
+async function api(path, opts = {}) {
+  const { quiet, ...init } = opts;
+  const method = String(init.method || "GET").toUpperCase();
+  const headers = { "content-type": "application/json", ...(init.headers || {}) };
+  if (method !== "GET" && method !== "HEAD" && csrfToken) headers["X-Switchboard-CSRF"] = csrfToken;
+  const res = await fetch(path, { ...init, method, headers, credentials: "same-origin" });
   let body = null;
   const text = await res.text();
   if (text) {
     try { body = JSON.parse(text); } catch { body = { raw: text }; }
   }
   if (!res.ok) {
+    if (res.status === 401 && !quiet) showSignInBanner();
     const msg = (body && body.error) || `${res.status} ${res.statusText}`;
     const err = new Error(msg);
     err.status = res.status;
@@ -39,6 +70,43 @@ async function api(path, opts) {
   }
   return body;
 }
+
+// Redeem a #login=<code> fragment (then drop it from the address bar at once, so the code never lingers
+// in history), or recover the CSRF value of an existing session. Never throws.
+async function establishSession() {
+  const m = /^#login=([A-Za-z0-9_-]{16,200})$/.exec(location.hash);
+  if (m) {
+    history.replaceState(null, "", location.pathname + location.search);
+    try {
+      const r = await api("/api/session", { method: "POST", body: JSON.stringify({ code: m[1] }), quiet: true });
+      csrfToken = r.csrf;
+      hideSignInBanner();
+    } catch {
+      showSignInBanner("That login code is invalid, expired or already used.");
+    }
+    return;
+  }
+  try {
+    const r = await api("/api/session", { quiet: true });
+    csrfToken = r.csrf;
+    hideSignInBanner();
+  } catch {
+    showSignInBanner();
+  }
+}
+
+// <img> error events do not bubble, so one capture-phase listener replaces the inline onerror
+// attributes (the page CSP allows no inline event handlers).
+document.addEventListener(
+  "error",
+  (ev) => {
+    const el = ev.target;
+    if (!(el instanceof HTMLImageElement)) return;
+    if (el.dataset.fallback !== undefined) el.replaceWith(document.createTextNode(el.dataset.fallback));
+    else if (el.hasAttribute("data-hide-on-error")) el.style.display = "none";
+  },
+  true
+);
 
 let toastTimer;
 function toast(message, kind) {
@@ -305,7 +373,7 @@ async function fetchCatalogPage(replace) {
 function toolkitCardHtml(tk) {
   const initial = (tk.name || "?").trim().charAt(0).toUpperCase();
   const logo = tk.logo
-    ? `<img src="${attr(tk.logo)}" alt="" loading="lazy" onerror="this.replaceWith(document.createTextNode('${esc(initial)}'))" />`
+    ? `<img src="${attr(tk.logo)}" alt="" loading="lazy" data-fallback="${attr(initial)}" />`
     : esc(initial);
   const originLabel = tk.origin === "mcp-registry" ? "MCP server" : "OpenAPI";
   const tags = (tk.tags || [])
@@ -842,7 +910,7 @@ async function renderSettingsAuthScreen() {
     const logo = $("#a-logo").value.trim();
     $("#a-preview").innerHTML = `
       <div style="border:1px solid var(--border);border-top:3px solid ${attr(safeAccent)};border-radius:14px;background:#0d1117;padding:26px 22px;text-align:center">
-        ${/^https?:\/\//.test(logo) ? `<img src="${attr(logo)}" alt="" style="max-height:36px;margin-bottom:12px" onerror="this.style.display='none'" />` : `<span style="display:inline-block;width:13px;height:13px;border-radius:50%;background:#3fb950;margin-bottom:12px"></span>`}
+        ${/^https?:\/\//.test(logo) ? `<img src="${attr(logo)}" alt="" style="max-height:36px;margin-bottom:12px" data-hide-on-error />` : `<span style="display:inline-block;width:13px;height:13px;border-radius:50%;background:#3fb950;margin-bottom:12px"></span>`}
         <div style="font-size:17px;font-weight:600;margin-bottom:6px">${esc(title)}</div>
         <div style="color:var(--muted);font-size:13px">Connected provider. You can close this tab.</div>
         ${sub ? `<div style="color:var(--muted);font-size:12px;margin-top:8px">${esc(sub)}</div>` : ""}
@@ -1743,15 +1811,18 @@ async function router() {
 }
 
 window.addEventListener("hashchange", router);
-window.addEventListener("DOMContentLoaded", () => {
-  if (!location.hash) location.hash = "#/catalog";
-  refreshSidebar();
-  router();
-});
 
-// DOMContentLoaded may have already fired (script is at end of body).
-if (document.readyState !== "loading") {
+let started = false;
+async function start() {
+  if (started) return;
+  started = true;
+  await establishSession(); // redeem #login=<code> or recover the CSRF value, before any view fetches
   if (!location.hash) location.hash = "#/catalog";
   refreshSidebar();
   router();
 }
+
+window.addEventListener("DOMContentLoaded", start);
+
+// DOMContentLoaded may have already fired (script is at end of body).
+if (document.readyState !== "loading") start();

@@ -5,6 +5,7 @@
  *   switchboard init                 scaffold a config + home dir
  *   switchboard serve                run the gateway (stdio and/or HTTP per config)
  *   switchboard dashboard            run only the HTTP endpoint + web console
+ *   switchboard dashboard login      mint a one-time owner login code (owner-presence checked)
  *   switchboard list                 mount everything and print the governed tool list
  *   switchboard doctor               check the environment + config
  *   switchboard catalog              list OAuth providers + connection status
@@ -21,6 +22,7 @@
  */
 
 import { existsSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -34,7 +36,9 @@ import {
   withActiveProfile,
 } from "./profiles.js";
 import { createGateway } from "./gateway.js";
-import { startDashboard } from "./dashboard.js";
+import { startDashboard, type DashboardHandle } from "./dashboard.js";
+import { LoginCodeStore, assertPortFree } from "./httpsec.js";
+import { randomChallenge, verifyOwnerPresence, type PresenceMethod } from "./presence.js";
 import { runExpose, TUNNEL_KINDS, type TunnelKind } from "./expose.js";
 import { Vault, HOME_DIR } from "./vault.js";
 import { OAuthStore } from "./oauth.js";
@@ -87,6 +91,31 @@ function bootConfig(path: string): SwitchboardConfig {
   return config;
 }
 
+/**
+ * Start the HTTP listener or stop the whole process. A busy port used to be reported as success
+ * (the listen error was swallowed), leaving a second instance that looked healthy beside a stranger.
+ * Now it logs the reason, tears the gateway down so no upstream child is orphaned, and exits non-zero.
+ */
+async function startHttpOrExit(gateway: Awaited<ReturnType<typeof createGateway>>, cfg: SwitchboardConfig, path: string): Promise<DashboardHandle> {
+  try {
+    return await startDashboard(gateway, cfg, path);
+  } catch (err) {
+    log.error(err instanceof Error ? err.message : String(err));
+    await gateway.shutdown().catch(() => {});
+    process.exit(1);
+  }
+}
+
+/** Check the HTTP port BEFORE mounting upstream servers, so a doomed start does not spawn them at all. */
+async function requireFreeHttpPort(cfg: SwitchboardConfig): Promise<void> {
+  try {
+    await assertPortFree(cfg.gateway.http.host, cfg.gateway.http.port);
+  } catch (err) {
+    log.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  }
+}
+
 program
   .command("init")
   .description("create a starter config and home directory")
@@ -108,12 +137,12 @@ program
   .action(async () => {
     const path = configPath();
     const cfg = bootConfig(path);
-    const gateway = await createGateway(cfg);
-
     const wantsHttp = cfg.gateway.transport.includes("http");
     const wantsStdio = cfg.gateway.transport.includes("stdio");
+    if (wantsHttp) await requireFreeHttpPort(cfg);
+    const gateway = await createGateway(cfg);
 
-    if (wantsHttp) await startDashboard(gateway, cfg, path);
+    if (wantsHttp) await startHttpOrExit(gateway, cfg, path);
 
     if (wantsStdio) {
       await gateway.serveStdio(); // resolves once connected; process stays alive on the transport
@@ -126,15 +155,66 @@ program
     // If only http, the express listener keeps the event loop alive.
   });
 
-program
+const dashboardCmd = program
   .command("dashboard")
   .description("run only the HTTP endpoint + web console")
   .action(async () => {
     const path = configPath();
     const cfg = bootConfig(path);
+    await requireFreeHttpPort(cfg);
     const gateway = await createGateway(cfg);
-    const handle = await startDashboard(gateway, cfg, path);
-    out(`Open ${handle.url}`);
+    const handle = await startHttpOrExit(gateway, cfg, path);
+    out(`Open ${handle.url}  (sign in first: \`switchboard dashboard login\`)`);
+  });
+
+/** Open a URL in the default browser without a shell (no quoting hazards for the `#login=` fragment). */
+function openInBrowser(url: string): void {
+  const [cmd, args]: [string, string[]] =
+    process.platform === "win32"
+      ? ["rundll32", ["url.dll,FileProtocolHandler", url]]
+      : process.platform === "darwin"
+        ? ["open", [url]]
+        : ["xdg-open", [url]];
+  const child = spawn(cmd, args, { stdio: "ignore", detached: true, windowsHide: true });
+  child.on("error", () => log.warn("could not open a browser; open the URL above by hand"));
+  child.unref();
+}
+
+dashboardCmd
+  .command("login")
+  .description("mint a one-time owner login code for the dashboard, after an owner-presence check")
+  .option("--presence <method>", "owner presence check: auto | hello | tty | none (none needs SWITCHBOARD_INSECURE_APPROVAL=1)", "auto")
+  .option("--no-open", "print the login URL but do not open the browser")
+  .action(async (opts: { presence: string; open: boolean }) => {
+    const methods = ["auto", "hello", "tty", "none"];
+    if (!methods.includes(opts.presence)) {
+      log.error(`unknown --presence '${opts.presence}': choose one of ${methods.join(", ")}`);
+      process.exitCode = 1;
+      return;
+    }
+    const cfg = loadConfig(configPath());
+    const presence = await verifyOwnerPresence(
+      opts.presence as PresenceMethod | "auto",
+      "Sign in to the MCP Switchboard dashboard",
+      randomChallenge(4),
+    );
+    if (!presence.ok) {
+      log.error(`owner presence check failed (${presence.method}): ${presence.reason}`);
+      process.exitCode = 1;
+      return;
+    }
+    const code = new LoginCodeStore().mint();
+    const url = `http://127.0.0.1:${cfg.gateway.http.port}/#login=${code}`;
+    log.ok(`login code minted (presence: ${presence.method}); it works once and expires in 120 seconds`);
+    out("");
+    out(`  ${url}`);
+    out("");
+    try {
+      await fetch(`http://127.0.0.1:${cfg.gateway.http.port}/healthz`, { signal: AbortSignal.timeout(1500) });
+    } catch {
+      log.warn(`no gateway answered on 127.0.0.1:${cfg.gateway.http.port}: start it with \`switchboard dashboard\` or \`switchboard serve\` before the code expires`);
+    }
+    if (opts.open) openInBrowser(url);
   });
 
 program
@@ -158,6 +238,15 @@ program
       return;
     }
 
+    // A busy port is checked before any key is minted or upstream mounted (fail loudly, exit non-zero).
+    try {
+      await assertPortFree("127.0.0.1", port);
+    } catch (err) {
+      log.error(err instanceof Error ? err.message : String(err));
+      process.exitCode = 1;
+      return;
+    }
+
     // Refuse to expose without auth: ensure at least one key exists. Mint+print one if the
     // store is empty (or the operator asked for a fresh one); otherwise reuse what's there.
     const apiKeys = new ApiKeyStore();
@@ -167,7 +256,14 @@ program
     }
 
     const gateway = await createGateway(cfg);
-    await runExpose(gateway, cfg, apiKeys, { tunnel, port, issuedToken });
+    try {
+      await runExpose(gateway, cfg, apiKeys, { tunnel, port, issuedToken });
+    } catch (err) {
+      // A busy port or a tunnel that never came up: say why, stop the upstream children, exit non-zero.
+      log.error(err instanceof Error ? err.message : String(err));
+      await gateway.shutdown().catch(() => {});
+      process.exit(1);
+    }
   });
 
 program

@@ -9,6 +9,7 @@
  */
 
 import { execFile } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { createInterface } from "node:readline";
 
 export type PresenceMethod = "hello" | "tty" | "none";
@@ -31,6 +32,13 @@ function runPowershell(script: string, timeoutMs: number): Promise<string> {
       (err, stdout) => resolve(err ? `ERROR:${err.message}` : String(stdout).trim()),
     );
   });
+}
+
+const BASE32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+/** A short random challenge for the TTY fallback: `len` base32 characters (256 is a multiple of 32, so no modulo bias). */
+export function randomChallenge(len = 4): string {
+  return Array.from(randomBytes(len), (b) => BASE32[b % 32]).join("");
 }
 
 /** Whether Windows Hello can be used right now (no prompt is shown). */

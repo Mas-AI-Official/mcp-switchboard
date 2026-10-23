@@ -7,6 +7,11 @@
  *
  * Bound to `gateway.http.host` (127.0.0.1 by default) — local-first means the
  * endpoint is not exposed to the network unless the operator deliberately changes it.
+ *
+ * Hardening (design vNext 3.2, see httpsec.ts): every route passes a Host allowlist and an Origin check;
+ * every response carries the security headers; every `/api/*` route except `/healthz` and
+ * `/api/health` needs an owner session cookie (plus a CSRF header when it mutates). Client API
+ * keys authenticate `/mcp` only and are never read by the admin API.
  */
 
 import { createHmac } from "node:crypto";
@@ -27,11 +32,39 @@ import { listTriggerTemplates } from "./trigger-templates.js";
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { resolveOAuthServerOptions, SwitchboardAuthProvider, OAUTH_SCOPES_SUPPORTED } from "./authserver.js";
+import {
+  CSRF_HEADER,
+  DcrLimiter,
+  HostGuard,
+  jsonErrorHandler,
+  LoginCodeStore,
+  OwnerSessions,
+  SESSION_COOKIE,
+  assertPortFree,
+  clearSessionCookie,
+  csrfMatches,
+  ownerSessionGate,
+  readCookie,
+  securityHeaders,
+  setSessionCookie,
+  type Clock,
+} from "./httpsec.js";
 import { log } from "./logger.js";
 
 export interface DashboardHandle {
   url: string;
   close: () => Promise<void>;
+}
+
+/**
+ * Test and embedding seams. Production passes none of these: defaults are the wall clock, the 120 s
+ * login-code TTL, the 12 h session TTL and the 50-client / 20-per-hour DCR limits from design 3.2.
+ */
+export interface DashboardOptions {
+  clock?: Clock;
+  loginCodeTtlMs?: number;
+  sessionTtlMs?: number;
+  dcr?: { maxClients?: number; perHour?: number };
 }
 
 /** Where the built SPA lives: `public/` at the package root (one level above dist/ or src/). */
@@ -61,10 +94,10 @@ function presentedToken(req: Request): string | null {
 }
 
 /**
- * True if the request originated from the local machine (loopback peer address). Every state-mutating
- * dashboard endpoint gates on this so a tunnelled/exposed dashboard can't mint a key, connect an
- * account, toggle/remove a server, or rewrite settings from off-box. Exported so the deterministic
- * oracle can prove the loopback verdict without a live server.
+ * True if the TCP peer is a loopback address. It is NO LONGER an authorization gate: a tunnel binary or a
+ * DNS-rebinding page also connects from loopback, so the peer address proves nothing about who is
+ * asking (defect D4). Admin routes are gated by the owner session in httpsec.ts. The predicate is kept
+ * exported, unchanged, only because the dashboard oracle pins its behaviour.
  */
 export function isLocalRequest(req: Request): boolean {
   const ip = req.ip ?? req.socket.remoteAddress ?? "";
@@ -294,12 +327,27 @@ export async function startDashboard(
   gateway: Gateway,
   cfg: SwitchboardConfig,
   configPath?: string,
+  opts: DashboardOptions = {},
 ): Promise<DashboardHandle> {
+  const { host, port } = cfg.gateway.http;
+  // Refuse to start beside another listener (including a wildcard or ::1 bind that would shadow us).
+  await assertPortFree(host, port);
+
+  const clock: Clock = opts.clock ?? Date.now;
   const app = express();
+  app.disable("x-powered-by");
+  app.use(securityHeaders());
+  // Host and Origin are checked before any body is parsed and before any route runs.
+  const guard = new HostGuard({ port });
+  app.use(guard.handler());
   app.use(express.json());
 
+  const sessions = new OwnerSessions({
+    clock,
+    ttlMs: opts.sessionTtlMs,
+    codes: new LoginCodeStore({ clock, ttlMs: opts.loginCodeTtlMs }),
+  });
   const apiKeys = new ApiKeyStore();
-  const { host, port } = cfg.gateway.http;
   // `let`, not `const`: a settings change to require_auth re-evaluates this live.
   let requireAuth = authRequired(cfg.gateway.http.require_auth, host);
 
@@ -318,7 +366,24 @@ export async function startDashboard(
   let oauthProvider: SwitchboardAuthProvider | undefined;
   let resourceMetadataUrl: string | undefined;
   if (oauthOpts) {
-    oauthProvider = new SwitchboardAuthProvider(oauthOpts, cfg.settings?.auth_screen);
+    oauthProvider = new SwitchboardAuthProvider(oauthOpts, cfg.settings?.auth_screen, {
+      sessionFor: (r) => sessions.fromRequest(r),
+      resumeUrl: (id) => `http://127.0.0.1:${port}/oauth/consent?pending_id=${encodeURIComponent(id)}`,
+    });
+    // The issuer host is reachable on /mcp and the OAuth routes only (never the dashboard or /api/*).
+    guard.addPublicUrl(oauthOpts.publicUrl);
+    if (!oauthOpts.consent) {
+      log.warn(
+        "settings.oauth_server.consent is false: every registered client is auto-approved WITHOUT an owner session. Set consent: true unless this is a throwaway instance",
+      );
+    }
+    // Registration is open by design (RFC 7591), so bound it: 20 attempts per hour, 50 clients total.
+    // This runs before the SDK router, whose own per-IP limiter is switched off below (behind a tunnel
+    // every caller shares one IP, so an IP key would mean nothing).
+    app.use(
+      "/register",
+      new DcrLimiter({ ...opts.dcr, clock, clientCount: () => oauthProvider!.clientCount() }).handler(),
+    );
     app.use(
       mcpAuthRouter({
         provider: oauthProvider,
@@ -329,14 +394,39 @@ export async function startDashboard(
         scopesSupported: [...OAUTH_SCOPES_SUPPORTED],
         resourceName: "MCP Switchboard",
         // Public clients (claude.ai) register without a secret; any issued secret never expires.
-        clientRegistrationOptions: { clientSecretExpirySeconds: 0 },
+        clientRegistrationOptions: { clientSecretExpirySeconds: 0, rateLimit: false },
       }),
     );
-    // The consent screen rendered by the provider's `authorize()` POSTs the human decision
-    // here. Finalize it and 302 the user-agent back to the client with a code, or 400 an
-    // expired/unknown request with a themed page.
+    // A signed-in owner who was bounced to the sign-in page resumes the pending request here.
+    app.get("/oauth/consent", (req: Request, res: Response) => {
+      const pendingId = typeof req.query.pending_id === "string" ? req.query.pending_id : "";
+      const owner = sessions.fromRequest(req);
+      res.set("Cache-Control", "no-store");
+      const html = owner ? oauthProvider!.renderPendingConsent(pendingId, owner.csrf) : oauthProvider!.renderOwnerRequired(pendingId);
+      if (!html) {
+        res.status(400).type("html").send(callbackPage("This authorization request expired. Start again from your client.", false, cfg.settings?.auth_screen));
+        return;
+      }
+      res.status(owner ? 200 : 401).type("html").send(html);
+    });
+    // The consent screen rendered by the provider's `authorize()` POSTs the owner's decision here. It needs
+    // an owner session AND the CSRF value (header or form field): the requester can never self-approve.
+    // Finalize it and 302 the user-agent back to the client with a code, or 400 an expired/unknown
+    // request with a themed page.
     app.post("/oauth/consent", express.urlencoded({ extended: false }), (req: Request, res: Response) => {
-      const body = req.body as { pending_id?: unknown; decision?: unknown };
+      const owner = sessions.fromRequest(req);
+      if (!owner) {
+        res
+          .status(401)
+          .type("html")
+          .send(callbackPage("Owner sign-in required: run `switchboard dashboard login` and approve from that browser.", false, cfg.settings?.auth_screen));
+        return;
+      }
+      const body = (req.body ?? {}) as { pending_id?: unknown; decision?: unknown; csrf?: unknown };
+      if (!csrfMatches(owner, req.get(CSRF_HEADER) ?? body.csrf)) {
+        res.status(403).type("html").send(callbackPage("This consent request was rejected: missing or invalid CSRF value.", false, cfg.settings?.auth_screen));
+        return;
+      }
       const pendingId = typeof body.pending_id === "string" ? body.pending_id : "";
       const url = oauthProvider!.completeConsent(pendingId, body.decision === "approve");
       if (!url) {
@@ -364,6 +454,68 @@ export async function startDashboard(
     apiKeys,
     verifyOAuthToken: oauthProvider ? (t) => oauthProvider!.verifyToken(t) : undefined,
     resourceMetadataUrl,
+  });
+
+  // ====================================================================
+  // Routes outside the owner gate, on purpose: liveness, health, and the login exchange itself.
+  // Registered BEFORE the gate below; Express runs middleware in registration order, so every
+  // /api route registered after `app.use("/api", ...)` is owner-session protected by construction.
+  // ====================================================================
+  // --- Liveness probe: a tiny, dependency-free 200 for uptime monitors / `docker healthcheck` /
+  // k8s readiness. Reveals only the service name + version + process uptime: no config, no server
+  // ids. Registered before the SPA catch-all so the exact path wins over the fallback handler. ---
+  app.get("/healthz", (_req: Request, res: Response) => {
+    res.json({ status: "ok", service: "switchboard", version: VERSION, uptime_s: Math.round(process.uptime()) });
+  });
+
+  // --- Readiness/health: per-server mount + circuit-breaker roll-up with one ok/degraded verdict.
+  // Unauthenticated by design (monitors poll it); it exposes only server ids + circuit state, never
+  // secrets. This is the endpoint that wires the otherwise-dead Router.serverHealth() into an
+  // operator-visible surface. ---
+  app.get("/api/health", (_req: Request, res: Response) => {
+    const configured = cfg.servers.map((s) => ({ id: s.id, source: s.source, enabled: s.enabled !== false }));
+    const mounted = new Map<string, number>();
+    for (const s of cfg.servers) {
+      const m = gateway.registry.get(s.id);
+      if (m) mounted.set(s.id, m.tools.length);
+    }
+    const report = buildHealthReport(configured, mounted, gateway.router.serverHealth());
+    // 200 when ready, 503 when degraded, so a monitor polling /api/health gets an honest HTTP signal,
+    // not a green 200 hiding an unmounted/tripped upstream.
+    res.status(report.status === "ok" ? 200 : 503).json(report);
+  });
+
+  // Exchange a one-time login code (minted by `switchboard dashboard login`) for the owner session.
+  app.post("/api/session", (req: Request, res: Response) => {
+    res.set("Cache-Control", "no-store");
+    const body = (req.body ?? {}) as { code?: unknown };
+    const session = sessions.login(body.code);
+    if (!session) {
+      res.status(401).json({ error: "invalid, expired or already used login code", code: "SB_LOGIN_CODE" });
+      return;
+    }
+    setSessionCookie(res, session.sid, sessions.sessionTtlMs, req.secure);
+    res.json({ csrf: session.csrf, expires_at: new Date(session.expires).toISOString() });
+  });
+
+  // ====================================================================
+  // Owner gate: every /api route below needs a valid owner session cookie, and every mutating one the
+  // X-Switchboard-CSRF header. Client API keys are never read here (defect D4: a loopback peer is not
+  // the owner).
+  // ====================================================================
+  app.use("/api", ownerSessionGate(sessions));
+
+  // Who am I: lets the SPA recover its CSRF value after a reload (the cookie is HttpOnly).
+  app.get("/api/session", (_req: Request, res: Response) => {
+    const owner = res.locals.ownerSession as { csrf: string; expires: number };
+    res.json({ authenticated: true, csrf: owner.csrf, expires_at: new Date(owner.expires).toISOString() });
+  });
+
+  // Sign out: drops the session server side and expires the cookie.
+  app.delete("/api/session", (req: Request, res: Response) => {
+    sessions.revoke(readCookie(req, SESSION_COOKIE));
+    clearSessionCookie(res, req.secure);
+    res.json({ ok: true });
   });
 
   // ====================================================================
@@ -424,46 +576,18 @@ export async function startDashboard(
     res.json(usageStats());
   });
 
-  // --- Liveness probe: a tiny, dependency-free 200 for uptime monitors / `docker healthcheck` /
-  // k8s readiness. Reveals only the service name + version + process uptime — no config, no server
-  // ids. Registered before the SPA catch-all so the exact path wins over the fallback handler. ---
-  app.get("/healthz", (_req: Request, res: Response) => {
-    res.json({ status: "ok", service: "switchboard", version: VERSION, uptime_s: Math.round(process.uptime()) });
-  });
-
-  // --- Readiness/health: per-server mount + circuit-breaker roll-up with one ok/degraded verdict.
-  // Read-only and unauthenticated like /api/state and /api/audit (the dashboard binds loopback by
-  // default); it exposes only server ids + circuit state, never secrets. This is the endpoint that
-  // wires the otherwise-dead Router.serverHealth() into an operator-visible surface. ---
-  app.get("/api/health", (_req: Request, res: Response) => {
-    const configured = cfg.servers.map((s) => ({ id: s.id, source: s.source, enabled: s.enabled !== false }));
-    const mounted = new Map<string, number>();
-    for (const s of cfg.servers) {
-      const m = gateway.registry.get(s.id);
-      if (m) mounted.set(s.id, m.tools.length);
-    }
-    const report = buildHealthReport(configured, mounted, gateway.router.serverHealth());
-    // 200 when ready, 503 when degraded — so a monitor polling /api/health gets an honest HTTP signal,
-    // not a green 200 hiding an unmounted/tripped upstream.
-    res.status(report.status === "ok" ? 200 : 503).json(report);
-  });
-
   // ====================================================================
   // Playground: try any exposed tool against the live gateway. Listing reuses the
   // router's governed tool surface (so `search` mode shows the two meta-tools, namespaced
   // mode shows `server__tool`, etc.); execution routes through `router.callTool`, so policy
   // + approval + audit all apply exactly as they would for a downstream agent. Running a
-  // tool is loopback-only — a tunnelled dashboard must never be able to drive real calls.
+  // tool needs an owner session and CSRF header: nothing else may drive real calls.
   // ====================================================================
   app.get("/api/playground/tools", (_req: Request, res: Response) => {
     res.json({ tools: gateway.router.listTools(), tool_exposure: cfg.gateway.tool_exposure });
   });
 
   app.post("/api/playground/call", async (req: Request, res: Response) => {
-    if (!isLocalRequest(req)) {
-      res.status(403).json({ error: "the playground can only run tools from the local machine" });
-      return;
-    }
     const name = typeof req.body?.name === "string" ? req.body.name : "";
     if (!name) {
       res.status(400).json({ error: "missing tool 'name'" });
@@ -530,14 +654,9 @@ export async function startDashboard(
     res.json(tk);
   });
 
-  // Add a catalog toolkit as a mounted (disabled) server. Loopback-only: a tunnelled
-  // dashboard must not be able to add servers. The new server starts disabled so the
+  // Add a catalog toolkit as a mounted (disabled) server. The new server starts disabled so the
   // operator wires credentials and flips it on deliberately.
   app.post("/api/toolkits/:slug/add", async (req: Request, res: Response) => {
-    if (!isLocalRequest(req)) {
-      res.status(403).json({ error: "servers can only be added from the local machine" });
-      return;
-    }
     if (catalog.toolkits.length === 0) catalog = loadCatalog();
     const tk = catalog.toolkits.find((t) => t.slug === String(req.params.slug));
     if (!tk) {
@@ -575,17 +694,12 @@ export async function startDashboard(
   // ====================================================================
   // API keys: bearer tokens that authenticate `/mcp` (Composio "API Keys" page)
   // ====================================================================
-  // Listing is redacted (never the hash). Issuing/revoking mutate local state and are
-  // restricted to loopback callers so a tunnelled dashboard can't mint itself a key.
+  // Listing is redacted (never the hash). Issuing/revoking mutate local state and sit behind the owner gate.
   app.get("/api/apikeys", (_req: Request, res: Response) => {
     res.json({ keys: apiKeys.list(), require_auth: cfg.gateway.http.require_auth, enforced: requireAuth });
   });
 
   app.post("/api/apikeys", (req: Request, res: Response) => {
-    if (!isLocalRequest(req)) {
-      res.status(403).json({ error: "API keys can only be issued from the local machine" });
-      return;
-    }
     const name = typeof req.body?.name === "string" ? req.body.name : "";
     const { token, record } = apiKeys.issue(name);
     // The plaintext token is returned ONCE here and never again.
@@ -593,10 +707,6 @@ export async function startDashboard(
   });
 
   app.delete("/api/apikeys/:id", (req: Request, res: Response) => {
-    if (!isLocalRequest(req)) {
-      res.status(403).json({ error: "API keys can only be revoked from the local machine" });
-      return;
-    }
     const removed = apiKeys.revoke(String(req.params.id));
     if (!removed) {
       res.status(404).json({ error: `unknown key '${req.params.id}'` });
@@ -644,12 +754,8 @@ export async function startDashboard(
     });
   });
 
-  // Persist a partial settings/gateway update. Loopback-only (it writes config.yaml).
+  // Persist a partial settings/gateway update (it writes config.yaml).
   app.put("/api/settings", (req: Request, res: Response) => {
-    if (!isLocalRequest(req)) {
-      res.status(403).json({ error: "settings can only be changed from the local machine" });
-      return;
-    }
     const body = (req.body ?? {}) as {
       settings?: SettingsConfig;
       gateway?: { require_auth?: "auto" | "always" | "never"; tool_exposure?: "namespaced" | "flat" | "search"; default_policy?: "read" | "write" | "full" };
@@ -679,11 +785,7 @@ export async function startDashboard(
   });
 
   // Send a sample event to the configured webhook so the operator can verify it end to end.
-  app.post("/api/webhook/test", async (req: Request, res: Response) => {
-    if (!isLocalRequest(req)) {
-      res.status(403).json({ error: "webhook tests can only be triggered from the local machine" });
-      return;
-    }
+  app.post("/api/webhook/test", async (_req: Request, res: Response) => {
     const wh = cfg.settings?.webhook;
     if (!wh?.url) {
       res.status(400).json({ error: "no webhook URL configured" });
@@ -721,7 +823,7 @@ export async function startDashboard(
   // Triggers (poll-first change detection). The definitions live in
   // `settings.triggers` and round-trip to config.yaml like webhook/council;
   // the live poller state (last poll/fire, errors, recent fires) is read from
-  // the running TriggerManager. Mutating endpoints are loopback-only.
+  // the running TriggerManager. Mutating endpoints need the CSRF header on top of the owner session.
   // ====================================================================
   app.get("/api/triggers", (_req: Request, res: Response) => {
     res.json(gateway.triggers.state());
@@ -731,10 +833,6 @@ export async function startDashboard(
   // Validated with the same strict schema used at startup, persisted, then the
   // poller is reloaded so the change takes effect without a restart.
   app.put("/api/triggers", (req: Request, res: Response) => {
-    if (!isLocalRequest(req)) {
-      res.status(403).json({ error: "triggers can only be changed from the local machine" });
-      return;
-    }
     let parsed;
     try {
       parsed = parseTriggersConfig(req.body?.triggers ?? req.body ?? {});
@@ -754,13 +852,9 @@ export async function startDashboard(
     res.json({ ok: true, state: gateway.triggers.state() });
   });
 
-  // Run one trigger's poll right now (the "Poll now" button). Loopback-only because
-  // a poll is a real governed tool call. Returns the PollResult (fired? new_count? error?).
+  // Run one trigger's poll right now (the "Poll now" button). A poll is a real governed tool call.
+  // Returns the PollResult (fired? new_count? error?).
   app.post("/api/triggers/:id/poll", async (req: Request, res: Response) => {
-    if (!isLocalRequest(req)) {
-      res.status(403).json({ error: "triggers can only be polled from the local machine" });
-      return;
-    }
     try {
       const result = await gateway.triggers.pollOnce(String(req.params.id));
       res.json(result);
@@ -772,13 +866,9 @@ export async function startDashboard(
 
   // Pause / resume a single trigger WITHOUT removing its definition. Pause short-circuits the
   // poller before the governed tool call, so the trigger stays configured but goes quiet; resume
-  // re-arms it. Loopback-only (both change live poller behavior). A 404 when the id is unknown so
+  // re-arms it (both change live poller behavior). A 404 when the id is unknown so
   // the dashboard never silently no-ops a typo'd id. Pause state is in-memory and resets on reload.
   app.post("/api/triggers/:id/pause", (req: Request, res: Response) => {
-    if (!isLocalRequest(req)) {
-      res.status(403).json({ error: "triggers can only be paused from the local machine" });
-      return;
-    }
     const id = String(req.params.id);
     if (!gateway.triggers.pauseTrigger(id)) {
       res.status(404).json({ error: `unknown trigger '${id}'` });
@@ -788,10 +878,6 @@ export async function startDashboard(
   });
 
   app.post("/api/triggers/:id/resume", (req: Request, res: Response) => {
-    if (!isLocalRequest(req)) {
-      res.status(403).json({ error: "triggers can only be resumed from the local machine" });
-      return;
-    }
     const id = String(req.params.id);
     if (!gateway.triggers.resumeTrigger(id)) {
       res.status(404).json({ error: `unknown trigger '${id}'` });
@@ -808,7 +894,7 @@ export async function startDashboard(
   });
 
   // ====================================================================
-  // OAuth catalog (Connected Accounts): browse providers, connect via loopback
+  // OAuth catalog (Connected Accounts): browse providers, connect via the loopback callback
   // ====================================================================
   const redirectUri = `http://${cfg.gateway.http.host}:${cfg.gateway.http.port}/oauth/callback`;
 
@@ -817,10 +903,6 @@ export async function startDashboard(
   });
 
   app.post("/api/connect/:provider", (req: Request, res: Response) => {
-    if (!isLocalRequest(req)) {
-      res.status(403).json({ error: "accounts can only be connected from the local machine" });
-      return;
-    }
     try {
       const { authorizeUrl } = gateway.oauth.beginAuth(String(req.params.provider), redirectUri);
       res.json({ authorizeUrl });
@@ -855,10 +937,6 @@ export async function startDashboard(
   });
 
   app.post("/api/servers/:id/toggle", async (req: Request, res: Response) => {
-    if (!isLocalRequest(req)) {
-      res.status(403).json({ error: "servers can only be toggled from the local machine" });
-      return;
-    }
     const id = req.params.id;
     const server = cfg.servers.find((s) => s.id === id);
     if (!server) {
@@ -878,12 +956,8 @@ export async function startDashboard(
     }
   });
 
-  // Remove a server entirely (loopback-only). Unmounts it first if it's live.
+  // Remove a server entirely. Unmounts it first if it's live.
   app.delete("/api/servers/:id", async (req: Request, res: Response) => {
-    if (!isLocalRequest(req)) {
-      res.status(403).json({ error: "servers can only be removed from the local machine" });
-      return;
-    }
     const id = String(req.params.id);
     const idx = cfg.servers.findIndex((s) => s.id === id);
     if (idx === -1) {
@@ -915,6 +989,13 @@ export async function startDashboard(
     });
   });
 
+  // Terminal handlers, registered last. Without them Express answers an unmatched route with its own
+  // HTML page (which replaces our CSP) and prints a stack trace, with file paths, for a malformed JSON body.
+  app.use((_req: Request, res: Response) => {
+    res.status(404).json({ error: "not found" });
+  });
+  app.use(jsonErrorHandler());
+
   // Surface the auth posture loudly at startup so a misconfigured exposure is obvious.
   if (requireAuth) {
     if (apiKeys.count === 0 && !oauthProvider) {
@@ -938,10 +1019,24 @@ export async function startDashboard(
     log.info(`toolkit catalog: ${catalog.counts.total} entries (${catalog.counts.mcp_registry} MCP, ${catalog.counts.apis_guru} OpenAPI)`);
   }
 
-  return new Promise<DashboardHandle>((resolve) => {
-    const httpServer = app.listen(port, host, () => {
+  // No callback on listen: Express 5 invokes a listen callback with the error too, so a callback that
+  // resolves would report "listening" when the bind failed. Resolve on 'listening', reject on 'error'.
+  return new Promise<DashboardHandle>((resolve, reject) => {
+    const httpServer = app.listen(port, host);
+    httpServer.once("error", (err: NodeJS.ErrnoException) => {
+      reject(
+        new Error(
+          err.code === "EADDRINUSE"
+            ? `port ${port} on ${host} is already in use: stop the other process or change gateway.http.port`
+            : `cannot listen on ${host}:${port}: ${err.message}`,
+        ),
+      );
+    });
+    httpServer.once("listening", () => {
+      httpServer.on("error", (err) => log.error(`HTTP server error: ${err.message}`));
       const url = `http://${host}:${port}`;
       log.ok(`dashboard + HTTP endpoint on ${url}`);
+      log.info("the admin API needs an owner session: run `switchboard dashboard login` to sign in");
       resolve({
         url,
         close: () =>

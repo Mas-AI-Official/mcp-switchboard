@@ -138,7 +138,7 @@ npm uninstall -g mcp-switchboard
 Remove-Item -Recurse -Force "$env:USERPROFILE\.switchboard"
 ```
 
-Open the dashboard at **http://127.0.0.1:8088**, then point an agent at the MCP endpoint. Wire a
+Open the dashboard at **http://127.0.0.1:8088** and sign in (see [Dashboard sign-in](#dashboard-sign-in)), then point an agent at the MCP endpoint. Wire a
 client in one command with `switchboard install <client>` (see [below](#wire-it-into-your-client--one-command)).
 
 ### Fastest start — one click (no terminal)
@@ -175,7 +175,26 @@ node dist/cli.js list
 node dist/cli.js serve
 ```
 
-Open the dashboard at **http://127.0.0.1:8088**, then point an agent at the MCP endpoint.
+Open the dashboard at **http://127.0.0.1:8088** and sign in (see [Dashboard sign-in](#dashboard-sign-in)), then point an agent at the MCP endpoint.
+
+### Dashboard sign-in
+
+The admin API behind the dashboard (settings, audit, API keys, running tools, adding servers) needs an
+**owner session**. Being on localhost is not enough: a tunnel, a DNS-rebinding page or another local
+process also looks like localhost. Sign in from a terminal on the machine that runs Switchboard:
+
+```bash
+switchboard dashboard login          # checks you are present (Windows Hello, else a typed code), then opens the dashboard signed in
+switchboard dashboard login --no-open   # print the one-time URL instead of opening a browser
+```
+
+The URL carries a login code that works once and expires after 120 seconds; it is exchanged for an
+HttpOnly, SameSite=Strict session cookie that lasts 12 hours. Every mutating call also needs a CSRF
+header, which the dashboard handles for you. Client API keys authenticate `/mcp` only and are never
+accepted by the admin API. Every request must also carry a Host header that names this listener
+(`127.0.0.1`, `localhost` or `[::1]` with the right port, plus the public issuer host on `/mcp` and the
+OAuth routes), and a browser Origin on writes must match it; anything else gets a 403. If the port is
+already taken, `switchboard serve`, `dashboard` and `expose` print the reason and exit non-zero.
 
 ### Wire it into your client — one command
 
@@ -547,6 +566,7 @@ is verified end-to-end by a deterministic oracle: `npm run verify:oauth` (20/20)
 | `switchboard init` | Scaffold `switchboard.config.yaml` + the `~/.switchboard` home |
 | `switchboard serve` | Run the gateway (stdio and/or HTTP, per config) |
 | `switchboard dashboard` | Run only the HTTP endpoint + web console |
+| `switchboard dashboard login` | Mint a one-time owner login code (after an owner-presence check) and open the dashboard signed in; `--presence` takes auto, hello, tty or none; `--no-open` only prints the URL |
 | `switchboard install <client>` | Wire MCP Switchboard into a client (`claude-desktop`, `claude-code`, `cursor`, `vscode`, `codex`) — `--global` / `--dir` / `--name` / `--print` |
 | `switchboard expose` | Open an HTTPS tunnel to the local endpoint (for claude.ai web / ChatGPT / remote clients) |
 | `switchboard list` | Mount everything and print the governed tool list, then exit |

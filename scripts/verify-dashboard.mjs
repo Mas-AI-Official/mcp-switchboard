@@ -20,14 +20,16 @@
 //                           getTriggerTemplate resolves/΄misses, and templateToDefinition stamps a
 //                           ready definition (args merge, name/interval override, hash recipes carry
 //                           no item wiring, unknown id throws).
-//   isLocalRequest        — the loopback predicate every state-mutating endpoint gates on: IPv4/IPv6
-//                           loopback (incl. the IPv4-mapped form and the 127/8 block) is local; public
-//                           addresses are not; it falls back to socket.remoteAddress when req.ip is unset.
-//   mutator gating (wiring)— a STATIC scan of the compiled dist/dashboard.js proves every state-mutating
-//                           route handler contains an isLocalRequest guard, while read endpoints and the
-//                           deliberately tunnel-reachable OAuth-flow endpoints (/oauth/consent, /oauth/
-//                           callback — protected by pending_id/state, not loopback) carry none. This is
-//                           the regression guard against a new mutator shipping ungated.
+//   isLocalRequest        : the loopback predicate: IPv4/IPv6 loopback (incl. the IPv4-mapped form and the
+//                           127/8 block) is local; public addresses are not; it falls back to
+//                           socket.remoteAddress when req.ip is unset. Since design vNext 3.2 it is NO
+//                           LONGER an authorization gate (a tunnel peer is loopback too); the predicate's
+//                           behaviour is still pinned here.
+//   admin gating (wiring) : a STATIC scan of the compiled dist/dashboard.js proves the owner-session gate
+//                           (`app.use("/api", ownerSessionGate(...))`) is registered before every /api
+//                           route except liveness, health and the login exchange, and that /oauth/consent
+//                           needs an owner session + CSRF. Behaviour is proven by verify-http-security.mjs;
+//                           this is the cheap regression guard against a route registered ahead of the gate.
 // Zero deps (node stdlib + the package's compiled output). Build first.
 import { readFileSync } from "node:fs";
 import { correlateMountedSlugs, pageCount, councilSummary, isLocalRequest } from "../dist/dashboard.js";
@@ -235,12 +237,13 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   assert("an empty peer (no ip, no remoteAddress) is NOT local", isLocalRequest(reqOf(undefined, undefined)) === false);
 }
 
-// --- 10. mutator gating (static wiring scan of compiled dist/dashboard.js) ------------------------
+// --- 10. admin gating (static wiring scan of compiled dist/dashboard.js) -------------------------------
 {
-  // tsc emits readable JS (no minification/renaming), so the loopback guard survives verbatim as
-  // `isLocalRequest(`. We scan every route registration in source order, slice each handler up to the
-  // NEXT registration, and assert the guard is present exactly where it must be. This is the
-  // regression guard: a freshly-added mutating endpoint that forgets the guard fails this oracle.
+  // tsc emits readable JS (no minification/renaming). We scan every route registration in source order and
+  // compare it with the position of the owner-session gate. Express runs middleware in registration order,
+  // so a route registered AFTER `app.use("/api", ownerSessionGate(...))` is behind the gate by construction
+  // and a route registered BEFORE it is not. (The design changed this from a per-handler loopback guard to
+  // a single owner-session gate: defect D4, a loopback peer is not the owner.)
   const src = readFileSync(new URL("../dist/dashboard.js", import.meta.url), "utf8");
 
   // Every `app.<verb>("<path>", ...)` registration, in file order. (app.use(express.json()) etc. have
@@ -251,16 +254,17 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   while ((m = routeRe.exec(src)) !== null) routes.push({ verb: m[1], path: m[3], index: m.index });
   assert("route scan found the dashboard's registrations", routes.length >= 14, `found=${routes.length}`);
 
-  // Map each route to its handler body (slice to the next registration) and whether it's guarded.
+  const gateIdx = src.indexOf('app.use("/api", ownerSessionGate(');
+  assert("the owner-session gate is registered on /api", gateIdx !== -1);
+
+  // true = registered after the gate (owner-session-gated), false = before it (deliberately outside), null = missing.
   const gatedOf = (verb, path) => {
     const i = routes.findIndex((r) => r.verb === verb && r.path === path);
     if (i === -1) return null; // not found — caller asserts on null to surface the miss
-    const start = routes[i].index;
-    const end = i + 1 < routes.length ? routes[i + 1].index : src.length;
-    return src.slice(start, end).includes("isLocalRequest(");
+    return gateIdx !== -1 && routes[i].index > gateIdx;
   };
 
-  // Every state-mutating endpoint MUST carry the loopback guard.
+  // Every state-mutating endpoint MUST sit behind the gate.
   const MUST_GATE = [
     ["post", "/api/playground/call"],
     ["post", "/api/toolkits/:slug/add"],
@@ -277,27 +281,32 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
     ["delete", "/api/servers/:id"],
   ];
   for (const [verb, path] of MUST_GATE) {
-    assert(`mutator ${verb.toUpperCase()} ${path} is loopback-gated`, gatedOf(verb, path) === true, gatedOf(verb, path) === null ? "ROUTE NOT FOUND" : "");
+    assert(`mutator ${verb.toUpperCase()} ${path} is owner-session-gated`, gatedOf(verb, path) === true, gatedOf(verb, path) === null ? "ROUTE NOT FOUND" : "");
   }
 
-  // Read endpoints are intentionally ungated (no isLocalRequest) — proves the scan discriminates and
-  // that we didn't over-gate read traffic a tunnelled dashboard legitimately serves.
-  const MUST_NOT_GATE = [
+  // Read endpoints that reveal settings, audit, usage, keys or tools are gated too (they were open under
+  // the loopback model; the design now requires an owner session for them).
+  const MUST_GATE_READS = [
     ["get", "/api/state"],
     ["get", "/api/audit"],
     ["get", "/api/usage"],
     ["get", "/api/catalog"],
-    ["get", "/api/apikeys"], // listing keys (metadata only) is intentionally readable
+    ["get", "/api/apikeys"], // listing keys (metadata only) now needs the owner session
   ];
-  for (const [verb, path] of MUST_NOT_GATE) {
-    assert(`read ${verb.toUpperCase()} ${path} is intentionally NOT loopback-gated`, gatedOf(verb, path) === false, gatedOf(verb, path) === null ? "ROUTE NOT FOUND" : "");
+  for (const [verb, path] of MUST_GATE_READS) {
+    assert(`read ${verb.toUpperCase()} ${path} is owner-session-gated`, gatedOf(verb, path) === true, gatedOf(verb, path) === null ? "ROUTE NOT FOUND" : "");
   }
 
-  // The OAuth authorization-server flow MUST be tunnel-reachable (a remote agent completes consent),
-  // so it deliberately carries NO loopback guard — it's protected by pending_id/state validation
-  // instead. Asserting the absence documents the design decision and prevents an accidental gate that
-  // would break the OAuth handshake.
-  assert("OAuth POST /oauth/consent is deliberately NOT loopback-gated (state-protected, tunnel-reachable)", gatedOf("post", "/oauth/consent") === false, gatedOf("post", "/oauth/consent") === null ? "ROUTE NOT FOUND" : "");
+  // The only routes deliberately outside the gate: liveness, health and the login exchange itself.
+  for (const [verb, path] of [["get", "/healthz"], ["get", "/api/health"], ["post", "/api/session"]]) {
+    assert(`${verb.toUpperCase()} ${path} is deliberately outside the owner gate`, gatedOf(verb, path) === false, gatedOf(verb, path) === null ? "ROUTE NOT FOUND" : "");
+  }
+
+  // The OAuth consent step used to be satisfied by the requester (defect D3). It now needs an owner
+  // session AND the CSRF value, and still carries no peer-address test (a tunnel peer is loopback too).
+  const consentIdx = routes.findIndex((r) => r.verb === "post" && r.path === "/oauth/consent");
+  const consentSrc = consentIdx === -1 ? "" : src.slice(routes[consentIdx].index, consentIdx + 1 < routes.length ? routes[consentIdx + 1].index : src.length);
+  assert("OAuth POST /oauth/consent requires an owner session and a CSRF value (not a peer-address test)", consentIdx !== -1 && consentSrc.includes("sessions.fromRequest(req)") && consentSrc.includes("csrfMatches(") && !consentSrc.includes("isLocalRequest("), consentIdx === -1 ? "ROUTE NOT FOUND" : "");
 }
 
 const failed = checks.filter((c) => !c.ok);
