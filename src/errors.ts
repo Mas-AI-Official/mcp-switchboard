@@ -35,7 +35,7 @@ export const SB_HINTS: Record<SbErrorCode, string> = {
   [SB_ERR.UNKNOWN_TOOL]:
     "No tool by that name is exposed. Call find_tools (or list tools) to see current names — the server may be disabled or the tool dropped.",
   [SB_ERR.POLICY_DENY]:
-    "This tool's scope exceeds the server policy ceiling. Raise the server `policy` (read < write < full) or pin the tool's `policy` in config — least privilege is the default.",
+    "This tool's scope exceeds a ceiling (the server `policy`, the active profile, or the calling client's `max_scope`), or it is hidden from the calling client. Raise the server `policy` (read < write < full), pin the tool's `policy`, or change the client's servers, tools and max_scope (`switchboard client list`) in config. Least privilege is the default.",
   [SB_ERR.APPROVAL_DENIED]:
     "A human declined (or did not approve in time) the approval gate. Re-issue the call and approve it in the dashboard, or relax `approval.require_for`.",
   [SB_ERR.UPSTREAM_ERROR]:

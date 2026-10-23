@@ -9,6 +9,9 @@
 /** Access level a tool is allowed to operate at. Ordered: read < write < full. */
 export type Scope = "read" | "write" | "full";
 
+/** Risk of a call (design 3.4): low, medium or high. Decides approval; scope stays the ceiling check. */
+export type Risk = "low" | "medium" | "high";
+
 /** Per-tool override inside a server block. */
 export interface ToolOverride {
   /** `false` hard-blocks the tool — it never reaches the agent or the upstream. */
@@ -418,6 +421,29 @@ export interface ProfileConfig {
 }
 
 /**
+ * A registered client (design 3.1): the profile a principal acts under. It controls what a caller may SEE
+ * (servers, tools) and CALL, and a scope ceiling that, like a profile, can only LOWER what the server and
+ * the active profile already allow. The effective ceiling is the tightest of server, active profile and
+ * client. Unlike a profile, an omitted `servers` list means NO server: a client sees only what it is given.
+ */
+export interface ClientConfig {
+  /** Human note shown in `switchboard client list` and the dashboard. */
+  description?: string;
+  /** Server id globs this client may see and call (`*` any run, `?` one character). Empty or omitted = none. */
+  servers: string[];
+  /** Optional allowlist of EXPOSED tool names (globs). Omitted or empty = every tool of the allowed servers. */
+  tools?: string[];
+  /** Exposed tool names (globs) hidden and refused even when `servers` and `tools` would allow them. */
+  exclude_tools?: string[];
+  /** Scope ceiling for this client; can only lower the server and profile ceilings. Omitted = no extra cap. */
+  max_scope?: Scope;
+  /** Highest risk this client may request (design 3.4). Stored now; enforced when risk lands. Omitted = high. */
+  max_risk?: Risk;
+  /** Rate limits and spend budgets for this client, same shape as a server's. A call must also pass every other level. */
+  limits?: LimitSpec;
+}
+
+/**
  * Poll-first triggers. Each enabled definition is polled on its own interval by calling a
  * read-scoped tool through the SAME policy → approval → audit path as any agent call; when the
  * result changes (a new list item, or a changed whole-response hash) a `switchboard.trigger`
@@ -539,4 +565,10 @@ export interface SwitchboardConfig {
   servers: ServerConfig[];
   /** Dashboard-editable settings. Optional so pre-existing configs remain valid. */
   settings?: SettingsConfig;
+  /**
+   * Registered clients (design 3.1), keyed by client id (^[a-z0-9][a-z0-9_-]{0,63}$). Optional: while it is
+   * absent or empty the gateway is in legacy single-user mode. The moment it holds one entry, `/mcp` requires a
+   * principal bound to a configured client on every request, whatever the bind host.
+   */
+  clients?: Record<string, ClientConfig>;
 }

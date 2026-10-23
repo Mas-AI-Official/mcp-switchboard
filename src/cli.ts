@@ -12,6 +12,7 @@
  *   switchboard connect <provider>   authorize a provider via local loopback OAuth
  *   switchboard install <client>     wire MCP Switchboard into an MCP client's config
  *   switchboard bridge --client <id> relay a client's stdio to the shared HTTP gateway as that client
+ *   switchboard client add|list|rotate|rm   register clients (who may call /mcp) and manage their keys
  *   switchboard local-llm            detect a local LLM server for the offline council
  *   switchboard local-llm wire       wire a detected local server into the council
  *   switchboard toolkits sync        rebuild the integration catalog from open indexes
@@ -47,6 +48,9 @@ import { ensureDir } from "./atomicfile.js";
 import { Vault, HOME_DIR } from "./vault.js";
 import { OAuthStore } from "./oauth.js";
 import { ApiKeyStore } from "./apikeys.js";
+import { ClientAdmin, ClientAdminError, NEW_CLIENT_DEFAULTS, type ClientSpec } from "./clientadmin.js";
+import { ClientConfigWatcher } from "./clientconfig.js";
+import { BAD_CLIENT_ID, isValidClientId, type Principal } from "./principal.js";
 import { inferScope } from "./policy.js";
 import { killFilePath, killStatus, setKillFile } from "./killswitch.js";
 import { verifyAudit } from "./audit.js";
@@ -156,18 +160,42 @@ program
 program
   .command("serve")
   .description("run the gateway (transports come from config)")
-  .action(async () => {
+  .option("--client <id>", "act as this registered client on the stdio transport (an assertion by the launching process; use `bridge` for an authenticated path)")
+  .action(async (opts: { client?: string }) => {
     const path = configPath();
     const cfg = bootConfig(path);
     const wantsHttp = cfg.gateway.transport.includes("http");
-    const wantsStdio = cfg.gateway.transport.includes("stdio");
+    let wantsStdio = cfg.gateway.transport.includes("stdio");
+
+    // Who the stdio transport speaks to (design 3.1). It is the launching process's own assertion, recorded as
+    // via "stdio". Clients configured and no --client: stdio is not served unidentified.
+    let stdioPrincipal: Principal | undefined;
+    if (opts.client !== undefined) {
+      if (!isValidClientId(opts.client)) {
+        log.error(BAD_CLIENT_ID);
+        process.exit(1);
+      }
+      if (!Object.prototype.hasOwnProperty.call(cfg.clients ?? {}, opts.client)) {
+        log.error(`client '${opts.client}' is not configured: run \`switchboard client add ${opts.client}\` first`);
+        process.exit(1);
+      }
+      stdioPrincipal = { id: opts.client, client: opts.client, via: "stdio" };
+    } else if (wantsStdio && Object.keys(cfg.clients ?? {}).length > 0) {
+      if (!wantsHttp) {
+        log.error("clients are configured, so the stdio transport needs --client <id> (or use `switchboard bridge --client <id>` against a running gateway)");
+        process.exit(1);
+      }
+      log.warn("clients are configured: the stdio transport is not served without --client <id>; the HTTP endpoint continues");
+      wantsStdio = false;
+    }
+
     if (wantsHttp) await requireFreeHttpPort(cfg);
     const gateway = await createGateway(cfg);
 
     if (wantsHttp) await startHttpOrExit(gateway, cfg, path);
 
     if (wantsStdio) {
-      await gateway.serveStdio(); // resolves once connected; process stays alive on the transport
+      await gateway.serveStdio(stdioPrincipal); // resolves once connected; process stays alive on the transport
     } else if (!wantsHttp) {
       log.error("no transports enabled in config (gateway.transport) — nothing to do");
       process.exitCode = 1;
@@ -274,13 +302,25 @@ program
     // store is empty (or the operator asked for a fresh one); otherwise reuse what's there.
     const apiKeys = new ApiKeyStore();
     let issuedToken: string | null = null;
-    if (opts.newToken || apiKeys.count === 0) {
+    if (Object.keys(cfg.clients ?? {}).length > 0) {
+      // With clients configured an unbound key is refused on /mcp, so minting one would hand out a dead credential.
+      log.info("clients are configured: connect with a client key (`switchboard client add <id>`, or `switchboard client rotate <id> --print`)");
+    } else if (opts.newToken || apiKeys.count === 0) {
       issuedToken = apiKeys.issue("expose").token;
     }
 
     const gateway = await createGateway(cfg);
+    const clientWatcher = new ClientConfigWatcher(cfg, configPath());
     try {
-      await runExpose(gateway, cfg, apiKeys, { tunnel, port, issuedToken });
+      await runExpose(gateway, cfg, apiKeys, {
+        tunnel,
+        port,
+        issuedToken,
+        clients: () => {
+          clientWatcher.sync();
+          return cfg.clients;
+        },
+      });
     } catch (err) {
       // A busy port or a tunnel that never came up: say why, stop the upstream children, exit non-zero.
       log.error(err instanceof Error ? err.message : String(err));
@@ -881,9 +921,30 @@ const apikeyCmd = program
 apikeyCmd
   .command("new <name>")
   .description("issue a new API key — the token is shown once and stored only as a one-way hash")
-  .action((name: string) => {
-    const { token, record } = new ApiKeyStore().issue(name);
-    log.ok(`issued API key '${record.name}' (id ${record.id})`);
+  .option("--client <id>", "bind the key to a registered client (every key must be bound once clients are configured; prefer `switchboard client add`)")
+  .action((name: string, opts: { client?: string }) => {
+    if (opts.client !== undefined) {
+      if (!isValidClientId(opts.client)) {
+        log.error(BAD_CLIENT_ID);
+        process.exitCode = 1;
+        return;
+      }
+      let known = false;
+      try {
+        known = Object.prototype.hasOwnProperty.call(loadConfig(configPath()).clients ?? {}, opts.client);
+      } catch (err) {
+        log.error(err instanceof Error ? err.message : String(err));
+        process.exitCode = 1;
+        return;
+      }
+      if (!known) {
+        log.error(`client '${opts.client}' is not configured: run \`switchboard client add ${opts.client}\` first`);
+        process.exitCode = 1;
+        return;
+      }
+    }
+    const { token, record } = new ApiKeyStore().issue(name, opts.client ? { client: opts.client } : {});
+    log.ok(`issued API key '${record.name}' (id ${record.id}${record.client ? `, client ${record.client}` : ""})`);
     out("");
     out("  Token (shown once — copy it now):");
     out("");
@@ -906,7 +967,7 @@ apikeyCmd
     }
     for (const k of keys) {
       const used = k.last_used ? `last used ${k.last_used}` : "never used";
-      out(`  ${k.id}  ${k.name.padEnd(16)} ${k.prefix}…  (created ${k.created}, ${used})`);
+      out(`  ${k.id}  ${k.name.padEnd(16)} ${k.prefix}…  (created ${k.created}, ${used}${k.client ? `, client ${k.client}` : ""})`);
     }
   });
 
@@ -921,6 +982,117 @@ apikeyCmd
       process.exitCode = 1;
     }
   });
+
+// ── clients (design 3.1) ─────────────────────────────────────────────────────────────────────────
+
+const clientCmd = program
+  .command("client")
+  .description("register the clients that may call /mcp (servers, tools, scope ceiling) and manage their keys");
+
+/** Run a client subcommand: a failure is one clear line and exit code 1, never a stack. */
+function clientAction<A extends unknown[]>(fn: (admin: ClientAdmin, cfg: SwitchboardConfig, ...args: A) => void): (...args: A) => void {
+  return (...args: A) => {
+    try {
+      const path = configPath();
+      const cfg = loadConfig(path);
+      fn(new ClientAdmin({ cfg, configPath: path, apiKeys: new ApiKeyStore() }), cfg, ...args);
+    } catch (err) {
+      log.error(err instanceof ClientAdminError || err instanceof Error ? err.message : String(err));
+      process.exitCode = 1;
+    }
+  };
+}
+
+const csv = (v: string): string[] => v.split(",").map((x) => x.trim()).filter(Boolean);
+
+function showToken(token: string): void {
+  out("");
+  out("  Token (shown once, copy it now):");
+  out("");
+  out(`    ${token}`);
+  out("");
+  out("  Stored one-way hashed in the key store; the bridge reads its own copy from the client key file.");
+}
+
+clientCmd
+  .command("add <id>")
+  .description("create or update a client and issue its key (stored for `switchboard bridge --client <id>`; printed only with --print)")
+  .option("--servers <list>", `comma separated server id globs the client may see and call (new client default: ${NEW_CLIENT_DEFAULTS.servers.join(",")})`)
+  .option("--max-scope <scope>", `scope ceiling: read | write | full (new client default: ${NEW_CLIENT_DEFAULTS.max_scope})`)
+  .option("--max-risk <risk>", `highest risk it may request: low | medium | high (new client default: ${NEW_CLIENT_DEFAULTS.max_risk}; stored now, enforced later)`)
+  .option("--print", "print the token once (otherwise it goes only to the client key file)")
+  .action(
+    clientAction((admin, _cfg, id: string, opts: { servers?: string; maxScope?: string; maxRisk?: string; print?: boolean }) => {
+      const spec: ClientSpec = {};
+      if (opts.servers !== undefined) spec.servers = csv(opts.servers);
+      if (opts.maxScope !== undefined) {
+        if (!["read", "write", "full"].includes(opts.maxScope)) throw new Error("--max-scope must be read, write or full");
+        spec.max_scope = opts.maxScope as ClientSpec["max_scope"];
+      }
+      if (opts.maxRisk !== undefined) {
+        if (!["low", "medium", "high"].includes(opts.maxRisk)) throw new Error("--max-risk must be low, medium or high");
+        spec.max_risk = opts.maxRisk as ClientSpec["max_risk"];
+      }
+      const r = admin.add(id, spec);
+      const c = r.client;
+      log.ok(`client '${id}' ${r.created ? "created" : "updated"}: servers ${c.servers.join(",") || "(none)"}, max_scope ${c.max_scope ?? "(server ceiling)"}, max_risk ${c.max_risk ?? "high"}`);
+      if (r.keyKept) {
+        out(`  key: the existing key is kept (${r.keyFile}); \`switchboard client rotate ${id}\` issues a new one`);
+        if (opts.print) log.warn("--print: nothing to print, the existing token cannot be recovered");
+      } else {
+        out(`  key: issued and stored for the bridge (${r.keyFile})${r.revoked ? `; replaced ${r.revoked} earlier key(s)` : ""}`);
+        if (opts.print && r.token) showToken(r.token);
+      }
+      out(`  next: \`switchboard bridge --client ${id}\`. A running gateway picks this client and its key up without a restart.`);
+    }),
+  );
+
+clientCmd
+  .command("list")
+  .description("list registered clients and their keys (no secrets)")
+  .action(
+    clientAction((admin) => {
+      const { clients, orphan_keys } = admin.list();
+      if (clients.length === 0) {
+        out("no clients registered: /mcp is in single-user mode. Register one with `switchboard client add <id>`.");
+      }
+      for (const c of clients) {
+        const cfgc = c.config;
+        out(`  ${c.id}${cfgc.description ? `  ${cfgc.description}` : ""}`);
+        out(`      servers: ${cfgc.servers.join(", ") || "(none)"}${cfgc.tools?.length ? `  tools: ${cfgc.tools.join(", ")}` : ""}${cfgc.exclude_tools?.length ? `  exclude: ${cfgc.exclude_tools.join(", ")}` : ""}`);
+        out(`      max_scope: ${cfgc.max_scope ?? "(server ceiling)"}  max_risk: ${cfgc.max_risk ?? "high"}${cfgc.limits ? `  limits: ${JSON.stringify(cfgc.limits)}` : ""}`);
+        const keys = c.keys.map((k) => `${k.id} (created ${k.created}${k.last_used ? `, last used ${k.last_used}` : ", never used"})`);
+        out(`      keys: ${keys.length ? keys.join("; ") : "none"}   key file: ${c.key_file ? "present" : "missing"}`);
+      }
+      if (orphan_keys.length > 0) {
+        log.warn(`${orphan_keys.length} key(s) are bound to a client that is not configured and are refused: ${orphan_keys.map((k) => `${k.id} -> ${k.client}`).join(", ")}`);
+      }
+    }),
+  );
+
+clientCmd
+  .command("rotate <id>")
+  .description("issue a new key for a client; its earlier keys stop working at once, on a running gateway too")
+  .option("--print", "print the token once (otherwise it goes only to the client key file)")
+  .action(
+    clientAction((admin, _cfg, id: string, opts: { print?: boolean }) => {
+      const r = admin.rotate(id);
+      log.ok(`rotated the key of client '${id}': new key stored (${r.keyFile}), ${r.revoked} earlier key(s) revoked`);
+      if (opts.print) showToken(r.token);
+    }),
+  );
+
+clientCmd
+  .command("rm <id>")
+  .description("revoke a client's keys and delete its key file; the config entry is removed only with --purge")
+  .option("--purge", "also remove the client from the config file")
+  .action(
+    clientAction((admin, _cfg, id: string, opts: { purge?: boolean }) => {
+      const r = admin.remove(id, { purge: opts.purge === true });
+      log.ok(`client '${id}': ${r.revokedKeys} key(s) revoked, key file ${r.keyFileRemoved ? "removed" : "was absent"}${r.purged ? ", config entry removed" : ""}`);
+      if (!r.purged) out("  the config entry stays (it grants nothing without a key); add --purge to remove it too.");
+    }),
+  );
 
 /** Read a secret from a pipe (preferred) or an interactive prompt. */
 function readSecret(prompt: string): Promise<string> {

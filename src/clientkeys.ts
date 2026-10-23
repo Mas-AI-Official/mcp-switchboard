@@ -11,24 +11,18 @@ import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, un
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { protectForUser, unprotectForUser } from "./oscrypt.js";
+import { BAD_CLIENT_ID, CLIENT_ID_RE, isValidClientId } from "./principal.js";
 import { HOME_DIR } from "./vault.js";
 
-/** The documented client id shape (design 3.1). */
-export const CLIENT_ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
-/** Windows treats these as devices whatever the extension (`nul.key` would silently swallow the key). */
-const RESERVED_DEVICE_RE = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/;
 /** A bearer token: printable ASCII with no whitespace, so it is always a valid header value. */
 const TOKEN_RE = /^[\x21-\x7e]{1,4096}$/;
 
-const BAD_ID = "invalid client id: use 1 to 64 characters from a-z, 0-9, '-' and '_', starting with a letter or digit";
-
-export function isValidClientId(id: unknown): id is string {
-  return typeof id === "string" && CLIENT_ID_RE.test(id) && !RESERVED_DEVICE_RE.test(id);
-}
+// The id rule lives in principal.ts (pure, shared with the config schema); re-exported so this module keeps its API.
+export { CLIENT_ID_RE, isValidClientId };
 
 /** Where a client's key lives. Throws for an invalid id, so a path can never escape the directory. */
 export function clientKeyPath(clientId: string): string {
-  if (!isValidClientId(clientId)) throw new Error(BAD_ID);
+  if (!isValidClientId(clientId)) throw new Error(BAD_CLIENT_ID);
   return join(HOME_DIR, "clients", `${clientId}.key`);
 }
 
@@ -96,4 +90,16 @@ export function readClientKey(clientId: string): string | null {
   }
   if (!TOKEN_RE.test(token)) throw new Error(`the key file for client '${clientId}' does not hold a valid token; re-register the client`);
   return token;
+}
+
+/** Delete a client's key file. True when a file was removed, false when there was none. */
+export function removeClientKey(clientId: string): boolean {
+  const file = clientKeyPath(clientId);
+  try {
+    unlinkSync(file);
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw new Error(`cannot remove the key file for client '${clientId}'`);
+  }
 }

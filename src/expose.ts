@@ -22,7 +22,7 @@ import express from "express";
 import type { Gateway } from "./gateway.js";
 import type { SwitchboardConfig } from "./types.js";
 import { ApiKeyStore } from "./apikeys.js";
-import { mountMcpEndpoint } from "./dashboard.js";
+import { mountMcpEndpoint, type McpEndpointOptions } from "./dashboard.js";
 import { HostGuard, assertPortFree, jsonErrorHandler, securityHeaders, urlLengthGuard } from "./httpsec.js";
 import { log, out } from "./logger.js";
 
@@ -81,6 +81,8 @@ export async function startMcpListener(
   host: string,
   port: number,
   apiKeys: ApiKeyStore,
+  /** The clients source (design 3.1): with clients configured this public listener only admits keys bound to one. */
+  endpoint: Pick<McpEndpointOptions, "clients" | "oauthClientName"> = {},
 ): Promise<{ url: string; close: () => Promise<void>; allowPublicUrl: (url: string) => void }> {
   // Refuse a busy port up front, including a wildcard or ::1 listener that would shadow ours.
   await assertPortFree(host, port);
@@ -93,7 +95,7 @@ export async function startMcpListener(
   app.use(guard.handler());
   app.use(express.json());
   // Auth is unconditionally required here — this listener is, by definition, public.
-  mountMcpEndpoint(app, gateway, { requireAuth: () => true, apiKeys, enableJsonResponse: true });
+  mountMcpEndpoint(app, gateway, { requireAuth: () => true, apiKeys, enableJsonResponse: true, ...endpoint });
   app.use((_req, res) => res.status(404).json({ error: "not found — only /mcp is exposed" }));
   app.use(jsonErrorHandler());
 
@@ -203,6 +205,8 @@ export interface ExposeOptions {
   port: number;
   /** If a fresh key was just minted, the plaintext token to print once; else null. */
   issuedToken: string | null;
+  /** Live source of the configured clients (the CLI passes one that follows the config file). Default: `cfg.clients` as loaded. */
+  clients?: McpEndpointOptions["clients"];
 }
 
 /**
@@ -212,14 +216,14 @@ export interface ExposeOptions {
  */
 export async function runExpose(
   gateway: Gateway,
-  _cfg: SwitchboardConfig,
+  cfg: SwitchboardConfig,
   apiKeys: ApiKeyStore,
   opts: ExposeOptions,
 ): Promise<void> {
   const host = "127.0.0.1";
   const spec = TUNNELS[opts.tunnel];
 
-  const listener = await startMcpListener(gateway, host, opts.port, apiKeys);
+  const listener = await startMcpListener(gateway, host, opts.port, apiKeys, { clients: opts.clients ?? (() => cfg.clients) });
   log.ok(`/mcp listener up on ${listener.url} (auth required; dashboard/console stay local and un-tunnelled)`);
 
   if (spec.note) log.warn(spec.note);

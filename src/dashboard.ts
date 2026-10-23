@@ -20,7 +20,7 @@ import express, { type Request, type Response } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Gateway } from "./gateway.js";
 import { VERSION } from "./gateway.js";
-import type { SwitchboardConfig, SettingsConfig, ServerConfig, CouncilConfig } from "./types.js";
+import type { SwitchboardConfig, SettingsConfig, ServerConfig, CouncilConfig, ClientConfig } from "./types.js";
 import type { BreakerHealth, BreakerState } from "./breaker.js";
 import { writeConfig, parseTriggersConfig } from "./config.js";
 import { recentAudit, usageStats } from "./audit.js";
@@ -28,6 +28,9 @@ import { resolveToolScope } from "./policy.js";
 import { killStatus } from "./killswitch.js";
 import { activeProfileName, describeProfile } from "./profiles.js";
 import { ApiKeyStore } from "./apikeys.js";
+import { ClientAdmin, ClientAdminError } from "./clientadmin.js";
+import { ClientConfigWatcher } from "./clientconfig.js";
+import { establishPrincipal, isValidClientId } from "./principal.js";
 import { loadCatalog, queryCatalog, type CatalogSnapshot, type Toolkit } from "./catalog.js";
 import { listTriggerTemplates } from "./trigger-templates.js";
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
@@ -272,6 +275,14 @@ export interface McpEndpointOptions {
    */
   resourceMetadataUrl?: string;
   /**
+   * The configured clients right now (design 3.1), read on every request so a reload takes effect at once.
+   * While it holds an entry, `/mcp` requires a principal bound to a configured client, whatever `requireAuth`
+   * says and whatever the bind host is. Omitted = no clients (the 0.1.0 behavior).
+   */
+  clients?: () => Record<string, ClientConfig> | undefined;
+  /** The name an OAuth client registered with (RFC 7591), used to map an OAuth token to a configured client. */
+  oauthClientName?: (oauthClientId: string) => string | undefined;
+  /**
    * Respond with plain JSON instead of an SSE stream. Needed behind tunnels that do not
    * support Server-Sent Events (e.g. cloudflared quick tunnels). Safe for the stateless
    * server pattern, where each `/mcp` POST is a single request/response.
@@ -287,31 +298,48 @@ export interface McpEndpointOptions {
 export function mountMcpEndpoint(app: express.Express, gateway: Gateway, opts: McpEndpointOptions): void {
   app.all("/mcp", async (req: Request, res: Response) => {
     // Gate before doing any work. Fail closed: a missing/invalid key is a 401, and we
-    // never echo or log the presented token.
-    if (opts.requireAuth()) {
-      const token = presentedToken(req);
-      // Accept either a local API key or — when the OAuth AS is enabled — a valid OAuth
-      // access token. The token value is never echoed or logged.
-      const apiKeyOk = !!token && opts.apiKeys.verify(token);
-      const oauthOk = !apiKeyOk && !!token && !!opts.verifyOAuthToken && (await opts.verifyOAuthToken(token)) !== null;
-      if (!apiKeyOk && !oauthOk) {
+    // never echo or log the presented token. A presented credential is always checked (even when auth is
+    // not required) so the call is attributed to its key; a bad one only matters when a principal is needed.
+    const clients = opts.clients?.();
+    const token = presentedToken(req);
+    let apiKey: ReturnType<ApiKeyStore["authenticate"]> = null;
+    let oauth: { clientId: string; clientName?: string } | null = null;
+    if (token) {
+      apiKey = opts.apiKeys.authenticate(token);
+      if (!apiKey && opts.verifyOAuthToken) {
+        // Never throws (the provider's verifyToken swallows errors -> null). The token is not echoed or logged.
+        const info = await opts.verifyOAuthToken(token);
+        if (info) oauth = { clientId: info.clientId, clientName: opts.oauthClientName?.(info.clientId) };
+      }
+    }
+    const decision = establishPrincipal({
+      clients,
+      apiKey: apiKey ? { id: apiKey.id, client: apiKey.client } : null,
+      oauth,
+      authRequired: opts.requireAuth(),
+    });
+    if (!decision.ok) {
+      if (decision.status === 401) {
         // RFC 9728: point spec clients at the protected-resource metadata so they can
         // discover the Authorization Server and run the PKCE flow.
         const challenge = opts.resourceMetadataUrl
           ? `Bearer realm="switchboard", resource_metadata="${opts.resourceMetadataUrl}"`
           : 'Bearer realm="switchboard"';
         res.set("WWW-Authenticate", challenge);
-        res.status(401).json({ error: "unauthorized: missing or invalid API key or OAuth token" });
-        return;
+        res.status(401).json({ error: decision.error });
+      } else {
+        res.status(403).json({ error: decision.error, code: decision.code, hint: decision.hint });
       }
+      return;
     }
+    const principal = decision.principal;
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       ...(opts.enableJsonResponse ? { enableJsonResponse: true } : {}),
     });
     res.on("close", () => void transport.close());
     try {
-      const server = gateway.buildServer();
+      const server = gateway.buildServer(principal);
       await server.connect(transport);
       await transport.handleRequest(req, res, req.body);
     } catch (err) {
@@ -353,6 +381,14 @@ export async function startDashboard(
     codes: new LoginCodeStore({ clock, ttlMs: opts.loginCodeTtlMs }),
   });
   const apiKeys = new ApiKeyStore();
+  // The clients section follows the config file (design 3.1): `switchboard client add` on the CLI reaches this
+  // running gateway without a restart. Only `clients` is reloaded; every other setting needs a restart.
+  const clientWatcher = new ClientConfigWatcher(cfg, configPath);
+  const clientAdmin = new ClientAdmin({ cfg, configPath, apiKeys, watcher: clientWatcher, actor: "dashboard" });
+  const liveClients = (): Record<string, ClientConfig> | undefined => {
+    clientWatcher.sync();
+    return cfg.clients;
+  };
   // `let`, not `const`: a settings change to require_auth re-evaluates this live.
   let requireAuth = authRequired(cfg.gateway.http.require_auth, host);
 
@@ -458,6 +494,8 @@ export async function startDashboard(
     requireAuth: () => requireAuth,
     apiKeys,
     verifyOAuthToken: oauthProvider ? (t) => oauthProvider!.verifyToken(t) : undefined,
+    oauthClientName: oauthProvider ? (id) => oauthProvider!.clientNameOf(id) : undefined,
+    clients: liveClients,
     resourceMetadataUrl,
   });
 
@@ -519,6 +557,11 @@ export async function startDashboard(
   // the owner).
   // ====================================================================
   app.use("/api", ownerSessionGate(sessions));
+  // Pick up a clients change made on the CLI before any admin route reads or rewrites the config.
+  app.use("/api", (_req: Request, _res: Response, next: () => void) => {
+    clientWatcher.sync();
+    next();
+  });
 
   // Who am I: lets the SPA recover its CSRF value after a reload (the cookie is HttpOnly).
   app.get("/api/session", (_req: Request, res: Response) => {
@@ -717,7 +760,12 @@ export async function startDashboard(
 
   app.post("/api/apikeys", (req: Request, res: Response) => {
     const name = typeof req.body?.name === "string" ? req.body.name : "";
-    const { token, record } = apiKeys.issue(name);
+    const client = typeof req.body?.client === "string" && req.body.client !== "" ? req.body.client : undefined;
+    if (client !== undefined && (!isValidClientId(client) || !Object.prototype.hasOwnProperty.call(cfg.clients ?? {}, client))) {
+      res.status(400).json({ error: `unknown client '${client}': add it first with POST /api/clients` });
+      return;
+    }
+    const { token, record } = apiKeys.issue(name, client ? { client } : {});
     // The plaintext token is returned ONCE here and never again.
     res.json({ token, key: record });
   });
@@ -729,6 +777,85 @@ export async function startDashboard(
       return;
     }
     res.json({ revoked: req.params.id });
+  });
+
+  // ====================================================================
+  // Clients (design 3.1): the principals that may call /mcp, and the keys bound to them. Owner session and
+  // CSRF as for every /api route. No route here ever returns a token: a new or rotated key goes only to the
+  // client's key file (the bridge reads it), exactly as `switchboard client add` does without --print.
+  // ====================================================================
+  const CLIENT_FIELDS = ["description", "servers", "tools", "exclude_tools", "max_scope", "max_risk", "limits"] as const;
+  const clientFields = (body: Record<string, unknown>, extra: readonly string[] = []): Record<string, unknown> => {
+    const unknown = Object.keys(body).filter((k) => !(CLIENT_FIELDS as readonly string[]).includes(k) && !extra.includes(k));
+    if (unknown.length > 0) throw new ClientAdminError(`unknown field '${unknown[0]}'`, 400);
+    const out: Record<string, unknown> = {};
+    for (const k of CLIENT_FIELDS) if (k in body) out[k] = body[k];
+    return out;
+  };
+  const clientError = (res: Response, err: unknown): void => {
+    if (err instanceof ClientAdminError) {
+      res.status(err.status).json({ error: err.message });
+      return;
+    }
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  };
+  const bodyOf = (req: Request): Record<string, unknown> =>
+    req.body && typeof req.body === "object" && !Array.isArray(req.body) ? (req.body as Record<string, unknown>) : {};
+
+  app.get("/api/clients", (_req: Request, res: Response) => {
+    const { clients, orphan_keys } = clientAdmin.list();
+    res.json({
+      clients: clients.map((c) => ({ id: c.id, ...c.config, keys: c.keys, key_file: c.key_file })),
+      orphan_keys,
+      // True while /mcp demands a principal bound to one of these clients.
+      enforced: clients.length > 0,
+    });
+  });
+
+  app.post("/api/clients", (req: Request, res: Response) => {
+    try {
+      const body = bodyOf(req);
+      const spec = clientFields(body, ["id"]);
+      const id = typeof body.id === "string" ? body.id : "";
+      if (Object.prototype.hasOwnProperty.call(cfg.clients ?? {}, id)) {
+        res.status(409).json({ error: `client '${id}' already exists: change it with PUT /api/clients/${id}` });
+        return;
+      }
+      const r = clientAdmin.add(id, spec);
+      res.status(201).json({ id, client: r.client, key: r.key ?? null, key_file: true });
+    } catch (err) {
+      clientError(res, err);
+    }
+  });
+
+  app.put("/api/clients/:id", (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const client = clientAdmin.update(id, clientFields(bodyOf(req)));
+      res.json({ id, client });
+    } catch (err) {
+      clientError(res, err);
+    }
+  });
+
+  app.post("/api/clients/:id/rotate", (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const r = clientAdmin.rotate(id);
+      res.json({ rotated: id, key: r.key, revoked: r.revoked });
+    } catch (err) {
+      clientError(res, err);
+    }
+  });
+
+  app.delete("/api/clients/:id", (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const r = clientAdmin.remove(id, { purge: true });
+      res.json({ removed: id, revoked_keys: r.revokedKeys, key_file_removed: r.keyFileRemoved });
+    } catch (err) {
+      clientError(res, err);
+    }
   });
 
   // ====================================================================
@@ -1009,7 +1136,15 @@ export async function startDashboard(
   app.use(jsonErrorHandler());
 
   // Surface the auth posture loudly at startup so a misconfigured exposure is obvious.
-  if (requireAuth) {
+  const startClients = Object.keys(cfg.clients ?? {});
+  if (startClients.length > 0) {
+    log.info(
+      `${startClients.length} client${startClients.length === 1 ? "" : "s"} configured (${startClients.join(", ")}): /mcp requires a key bound to one of them, on every bind host`,
+    );
+    if (apiKeys.count === 0 && !oauthProvider) {
+      log.warn("no client key exists yet: run `switchboard client add <id>` (or rotate) so a client can connect");
+    }
+  } else if (requireAuth) {
     if (apiKeys.count === 0 && !oauthProvider) {
       log.warn(
         `/mcp requires an API key but none exist — run \`switchboard apikey new <name>\` to issue one; clients cannot connect until you do`,

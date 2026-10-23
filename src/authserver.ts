@@ -245,6 +245,16 @@ export class SwitchboardAuthProvider implements OAuthServerProvider {
     return Object.keys(this.state.clients).length;
   }
 
+  /**
+   * The `client_name` an OAuth client registered with (RFC 7591), or undefined. The gateway maps it to a
+   * configured client only when it equals a client id exactly (design 3.1). The name is chosen by whoever
+   * registered, so the owner's consent is what makes the mapping trustworthy: nothing is issued without it.
+   */
+  clientNameOf(clientId: string): string | undefined {
+    const rec = Object.prototype.hasOwnProperty.call(this.state.clients, clientId) ? this.state.clients[clientId] : undefined;
+    return typeof rec?.client_name === "string" ? rec.client_name : undefined;
+  }
+
   // ── OAuthRegisteredClientsStore (RFC 7591 Dynamic Client Registration) ──────────────
   get clientsStore(): OAuthRegisteredClientsStore {
     return {

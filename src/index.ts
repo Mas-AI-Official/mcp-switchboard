@@ -17,6 +17,18 @@ export { approve, setStdioActive } from "./approval.js";
 export { audit, recentAudit, verifyAudit, AuditLog, type AuditEntry, type AuditVerifyResult } from "./audit.js";
 export { startDashboard, type DashboardHandle } from "./dashboard.js";
 export {
+  isValidClientId,
+  globMatch,
+  resolveClientGate,
+  establishPrincipal,
+  principalLabel,
+  type Principal,
+  type PrincipalVia,
+  type ClientGate,
+} from "./principal.js";
+export { ClientAdmin, ClientAdminError, type ClientSummary } from "./clientadmin.js";
+export { ClientConfigWatcher } from "./clientconfig.js";
+export {
   loadCatalog,
   writeCatalog,
   ingestCatalog,

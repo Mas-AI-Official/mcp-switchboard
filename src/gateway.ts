@@ -33,6 +33,7 @@ import { TriggerManager } from "./triggers.js";
 import { setStdioActive } from "./approval.js";
 import { buildCouncilServer, COUNCIL_SERVER_ID } from "./council.js";
 import { retryDelay, resolveMountRetry } from "./retry.js";
+import type { Principal } from "./principal.js";
 import { log } from "./logger.js";
 
 const NAME = "switchboard";
@@ -151,53 +152,58 @@ export class Gateway {
    *  Declares all three content capabilities — tools, resources, prompts — so a full MCP client
    *  (Claude Desktop, Cursor) discovers every governed upstream surface through the one endpoint,
    *  not just tools. (The SDK refuses to register a resources/* or prompts/* handler unless the
-   *  matching capability is declared here.) */
-  buildServer(): Server {
+   *  matching capability is declared here.)
+   *
+   *  `principal` is who this server speaks to (design 3.1): every handler passes it to the router, which
+   *  filters listings and refuses hidden calls by the principal's client. Omitted = an internal, unfiltered
+   *  caller (the owner's own tooling), never an HTTP or stdio client. */
+  buildServer(principal?: Principal): Server {
     const server = new Server(
       { name: NAME, version: VERSION },
       { capabilities: { tools: {}, resources: {}, prompts: {} } },
     );
 
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: this.router.listTools(),
+      tools: this.router.listTools(principal),
     }));
 
     server.setRequestHandler(CallToolRequestSchema, async (req): Promise<CallToolResult> => {
       const { name, arguments: args } = req.params;
-      return this.router.callTool(name, args ?? {});
+      return this.router.callTool(name, args ?? {}, principal);
     });
 
     // Resources — opaque URIs, aggregated across upstreams and read back by URI (not namespaced).
     server.setRequestHandler(ListResourcesRequestSchema, async () => ({
-      resources: await this.router.listResources(),
+      resources: await this.router.listResources(principal),
     }));
 
     server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({
-      resourceTemplates: await this.router.listResourceTemplates(),
+      resourceTemplates: await this.router.listResourceTemplates(principal),
     }));
 
     server.setRequestHandler(ReadResourceRequestSchema, async (req) =>
-      this.router.readResource(req.params.uri),
+      this.router.readResource(req.params.uri, principal),
     );
 
     // Prompts — namespaced `serverId__name`, aggregated across upstreams.
     server.setRequestHandler(ListPromptsRequestSchema, async () => ({
-      prompts: await this.router.listPrompts(),
+      prompts: await this.router.listPrompts(principal),
     }));
 
     server.setRequestHandler(GetPromptRequestSchema, async (req) =>
-      this.router.getPrompt(req.params.name, req.params.arguments),
+      this.router.getPrompt(req.params.name, req.params.arguments, principal),
     );
 
     return server;
   }
 
-  /** Serve the stdio transport. Blocks for the life of the process. */
-  async serveStdio(): Promise<void> {
+  /** Serve the stdio transport. Blocks for the life of the process. `principal` comes from `serve --client <id>`
+   *  (via "stdio": an assertion by the launching process, not an authentication). */
+  async serveStdio(principal?: Principal): Promise<void> {
     setStdioActive(true);
-    const server = this.buildServer();
+    const server = this.buildServer(principal);
     await server.connect(new StdioServerTransport());
-    log.ok(`stdio transport ready — ${this.router.listTools().length} tools exposed`);
+    log.ok(`stdio transport ready: ${this.router.listTools(principal).length} tools exposed${principal?.client ? ` to client '${principal.client}'` : ""}`);
   }
 
   async shutdown(): Promise<void> {

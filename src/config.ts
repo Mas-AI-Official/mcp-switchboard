@@ -11,9 +11,10 @@ import { existsSync, readFileSync } from "node:fs";
 import { parse, stringify } from "yaml";
 import { z } from "zod";
 import { atomicWriteFileSync } from "./atomicfile.js";
-import type { SwitchboardConfig, TriggersConfig } from "./types.js";
+import type { ClientConfig, SwitchboardConfig, TriggersConfig } from "./types.js";
 import { passthroughProblem } from "./childenv.js";
 import { parseAllowEntry } from "./netguard.js";
+import { BAD_CLIENT_ID, MAX_GLOB_PATTERNS, MAX_GLOB_LENGTH, isValidClientId, isValidGlob } from "./principal.js";
 
 const scope = z.enum(["read", "write", "full"]);
 
@@ -363,29 +364,81 @@ const settings = z
   })
   .optional();
 
+// A registered client (design 3.1). Patterns are bounded and printable; ids are the documented shape.
+const globPattern = z.string().refine(isValidGlob, {
+  message: `must be 1 to ${MAX_GLOB_LENGTH} printable characters ("*" matches any run, "?" one character)`,
+});
+const globList = z.array(globPattern).max(MAX_GLOB_PATTERNS);
+
+const clientConfig = z
+  .object({
+    description: z.string().max(200).optional(),
+    // No default list of servers: a client sees only what it is explicitly given.
+    servers: globList.default([]),
+    tools: globList.optional(),
+    exclude_tools: globList.optional(),
+    max_scope: scope.optional(),
+    max_risk: z.enum(["low", "medium", "high"]).optional(),
+    limits: limitSpec.optional(),
+  })
+  .strict();
+
+const clientId = z.string().refine(isValidClientId, { message: BAD_CLIENT_ID });
+
 const configSchema = z
   .object({
     gateway,
     vault,
     servers: z.array(serverConfig).default([]),
     settings,
+    // Keys are checked in a refinement, not as the record's key schema: zod reports a bad record key as
+    // "Invalid key in record", which would hide the rule from the person who typed the id.
+    // A bare `clients:` key (every entry removed or commented out) is the same as no clients.
+    clients: z
+      .preprocess(
+        (v) => (v === null ? undefined : v),
+        z
+          .record(z.string(), clientConfig)
+          .superRefine((clients, ctx) => {
+            for (const id of Object.keys(clients)) {
+              if (!isValidClientId(id)) ctx.addIssue({ code: "custom", message: BAD_CLIENT_ID, path: [id] });
+            }
+          })
+          .optional(),
+      )
+      .optional(),
   })
   .strict();
 
-/** Parse + validate a YAML config file into a typed config. Throws on any error. */
-export function loadConfig(path: string): SwitchboardConfig {
-  if (!existsSync(path)) {
-    throw new Error(`config not found: ${path} — run \`switchboard init\` to create one`);
+/** Validate one client entry (its id and its body) exactly as the config schema would. Throws a readable error. */
+export function parseClientEntry(id: string, raw: unknown): ClientConfig {
+  const idResult = clientId.safeParse(id);
+  if (!idResult.success) throw new Error(BAD_CLIENT_ID);
+  const result = clientConfig.safeParse(raw ?? {});
+  if (!result.success) {
+    throw new Error(result.error.issues.map((i) => `${i.path.join(".") || "(client)"}: ${i.message}`).join("; "));
   }
-  const raw = parse(readFileSync(path, "utf8")) ?? {};
-  const result = configSchema.safeParse(raw);
+  return result.data as ClientConfig;
+}
+
+/** Validate an already parsed config document against the strict schema. `label` names the source in errors. */
+export function validateConfig(raw: unknown, label: string): SwitchboardConfig {
+  const result = configSchema.safeParse(raw ?? {});
   if (!result.success) {
     const issues = result.error.issues
       .map((i) => `  - ${i.path.join(".") || "(root)"}: ${i.message}`)
       .join("\n");
-    throw new Error(`invalid config (${path}):\n${issues}`);
+    throw new Error(`invalid config (${label}):\n${issues}`);
   }
   return result.data as SwitchboardConfig;
+}
+
+/** Parse + validate a YAML config file into a typed config. Throws on any error. */
+export function loadConfig(path: string): SwitchboardConfig {
+  if (!existsSync(path)) {
+    throw new Error(`config not found: ${path}: run \`switchboard init\` to create one`);
+  }
+  return validateConfig(parse(readFileSync(path, "utf8")) ?? {}, path);
 }
 
 /**

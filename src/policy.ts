@@ -110,6 +110,12 @@ export interface PolicyDecision {
   reason: string;
 }
 
+/** A caller's client and the scope ceiling its profile sets (design 3.1); an extra cap beside the server and the profile. */
+export interface ClientCeiling {
+  scope: Scope;
+  client: string;
+}
+
 export function evaluate(
   server: ServerConfig,
   toolName: string,
@@ -117,6 +123,7 @@ export function evaluate(
   scopeHint?: Scope,
   profileCeiling?: Scope,
   annotations?: ToolAnnotationsLike,
+  clientCeiling?: ClientCeiling,
 ): PolicyDecision {
   const override = server.tools?.[toolName];
 
@@ -128,17 +135,22 @@ export function evaluate(
   // name-based inference, then upstream annotations tighten (never loosen) the result. The hint lets
   // OpenAPI HTTP verbs drive scope when the tool name alone (e.g. `findPetsByStatus`) would be misread.
   const scope: Scope = resolveToolScope(toolName, override, scopeHint, annotations);
-  // The effective ceiling is the TIGHTEST of the server/gateway cap and the active profile's cap.
-  // A profile can only ever LOWER the ceiling (read < write < full), never raise it — so a
-  // `read` profile forces read-only even on a server configured for `full`.
+  // The effective ceiling is the TIGHTEST of the server/gateway cap, the active profile's cap and the
+  // calling client's cap. A profile or a client can only ever LOWER the ceiling (read < write < full),
+  // never raise it, so a `read` profile forces read-only even on a server configured for `full`.
   const serverCeiling: Scope = server.policy ?? cfg.gateway.default_policy;
-  const ceiling: Scope =
-    profileCeiling !== undefined && SCOPE_RANK[profileCeiling] < SCOPE_RANK[serverCeiling]
-      ? profileCeiling
-      : serverCeiling;
+  let ceiling: Scope = serverCeiling;
+  let cappedBy = `server '${server.id}'`;
+  if (profileCeiling !== undefined && SCOPE_RANK[profileCeiling] < SCOPE_RANK[ceiling]) {
+    ceiling = profileCeiling;
+    cappedBy = "active profile";
+  }
+  if (clientCeiling !== undefined && SCOPE_RANK[clientCeiling.scope] < SCOPE_RANK[ceiling]) {
+    ceiling = clientCeiling.scope;
+    cappedBy = `client '${clientCeiling.client}'`;
+  }
 
   if (SCOPE_RANK[scope] > SCOPE_RANK[ceiling]) {
-    const cappedBy = ceiling === profileCeiling && ceiling !== serverCeiling ? "active profile" : `server '${server.id}'`;
     return {
       decision: "deny",
       scope,

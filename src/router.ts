@@ -30,8 +30,18 @@ import type {
   GetPromptResult,
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Registry, MountedServer } from "./registry.js";
-import type { Scope, SwitchboardConfig } from "./types.js";
+import type { LimitSpec, Scope, SwitchboardConfig } from "./types.js";
 import { evaluate, resolveToolScope } from "./policy.js";
+import {
+  gateAllowsServer,
+  gateAllowsTool,
+  gateLabel,
+  gateScopeCeiling,
+  principalAudit,
+  resolveClientGate,
+  type ClientGate,
+  type Principal,
+} from "./principal.js";
 import { isKilled, killStatus } from "./killswitch.js";
 import {
   getActiveProfile,
@@ -97,6 +107,17 @@ interface ExposedTool {
   tool: Tool;
 }
 
+/**
+ * Who is calling, resolved once per Router entry: the principal (absent for an internal call such as the
+ * owner's playground or a trigger poll, which no client filter applies to), the gate its client imposes
+ * (design 3.1), and the audit fields every row of this call carries.
+ */
+interface Caller {
+  principal?: Principal;
+  gate?: ClientGate;
+  attr: { principal?: string; client?: string };
+}
+
 export class Router {
   /** Rate-limit + spend-budget enforcement, built once from the immutable config for this Router. */
   private readonly governor: Governor;
@@ -145,10 +166,17 @@ export class Router {
     return items.length ? new Set(items) : undefined;
   }
 
-  /** Build the governed tool list exposed to downstream clients. */
-  listTools(): Tool[] {
+  /** Resolve the caller of a Router entry. The clients map is read live, so a reload takes effect on the next call. */
+  private callerOf(principal?: Principal): Caller {
+    return { principal, gate: resolveClientGate(this.cfg.clients, principal), attr: principalAudit(principal) };
+  }
+
+  /** Build the governed tool list exposed to downstream clients, filtered by the caller's client (design 3.1). */
+  listTools(principal?: Principal): Tool[] {
+    const gate = this.callerOf(principal).gate;
+    if (gate && gate.deny !== null) return [];
     if (this.mode === "search") return this.metaTools();
-    return this.exposed().map(({ exposedName, tool }) => ({ ...tool, name: exposedName }));
+    return this.exposed(gate).map(({ exposedName, tool }) => ({ ...tool, name: exposedName }));
   }
 
   /** The two meta-tools presented in `search` mode. */
@@ -239,7 +267,7 @@ export class Router {
     ];
   }
 
-  private exposed(): ExposedTool[] {
+  private exposed(gate?: ClientGate): ExposedTool[] {
     // `search` mode still namespaces internally so `call_tool` / `find_tools` can resolve
     // a unique name back to its upstream; only `flat` collapses to bare tool names.
     const flat = this.mode === "flat";
@@ -253,6 +281,9 @@ export class Router {
       if (server.config.enabled === false) continue;
       // A profile's server allowlist hides whole servers before we ever shape their tools.
       if (!profileAllowsServer(active, server.config.id)) continue;
+      // The caller's client may hide a server too. Its tools still claim their names below, so a flat-mode
+      // name resolves to the same owner here as in resolve() whoever is asking.
+      const serverHidden = gate !== undefined && !gateAllowsServer(gate, server.config.id);
       for (const tool of server.tools) {
         const override = server.config.tools?.[tool.name];
         // A tool explicitly disabled in config is never exposed at all.
@@ -266,6 +297,8 @@ export class Router {
           continue;
         }
         claimed.add(exposedName);
+        // The caller's client: its server globs (above) and its tool allowlist and denylist, by exposed name.
+        if (gate && (serverHidden || !gateAllowsTool(gate, exposedName))) continue;
 
         // If shaping removes a required param without injecting a value, agents can't satisfy
         // the upstream call — warn once so the misconfiguration is visible (the tool is still
@@ -294,10 +327,11 @@ export class Router {
     limit: number,
     serverFilter?: Set<string>,
     tagFilter?: Set<string>,
+    gate?: ClientGate,
   ): Tool[] {
     const lcQuery = query.trim().toLowerCase();
 
-    let pool = this.exposed();
+    let pool = this.exposed(gate);
     if (serverFilter && serverFilter.size) pool = pool.filter((e) => serverFilter.has(e.server.id));
     if (tagFilter && tagFilter.size) {
       pool = pool.filter((e) => {
@@ -351,21 +385,22 @@ export class Router {
 
   /** Entry point for a downstream tool call. In `search` mode this also services the
    *  `find_tools` / `call_tool` meta-tools; otherwise it forwards directly. */
-  async callTool(exposedName: string, args: Record<string, unknown>): Promise<CallToolResult> {
+  async callTool(exposedName: string, args: Record<string, unknown>, principal?: Principal): Promise<CallToolResult> {
+    const caller = this.callerOf(principal);
     // Kill switch first (design 3.8): it stops the discovery meta-tools too, not just upstream calls.
-    const killed = this.refuseIfKilled(exposedName);
+    const killed = this.refuseIfKilled(exposedName, caller);
     if (killed) return killed;
     if (this.mode === "search") {
-      if (exposedName === FIND_TOOLS) return this.handleFind(args);
-      if (exposedName === CALL_TOOL) return this.handleCall(args);
-      if (exposedName === BATCH_CALL) return this.handleBatch(args);
+      if (exposedName === FIND_TOOLS) return this.handleFind(args, caller);
+      if (exposedName === CALL_TOOL) return this.handleCall(args, caller);
+      if (exposedName === BATCH_CALL) return this.handleBatch(args, caller);
       // Direct call by namespaced name still works as a convenience.
     }
-    return this.forward(exposedName, args);
+    return this.forward(exposedName, args, caller);
   }
 
   /** `find_tools` meta-tool — discovery only, never touches an upstream. */
-  private handleFind(args: Record<string, unknown>): CallToolResult {
+  private handleFind(args: Record<string, unknown>, caller: Caller): CallToolResult {
     const query = typeof args.query === "string" ? args.query : "";
     if (!query.trim()) return this.error("find_tools requires a non-empty 'query'", SB_ERR.BAD_REQUEST);
     const rawLimit = typeof args.limit === "number" ? args.limit : DEFAULT_SEARCH_LIMIT;
@@ -373,30 +408,30 @@ export class Router {
     const serverFilter = this.stringSet(args.servers);
     const tagFilter = this.stringSet(args.tags);
 
-    const matches = this.search(query, limit, serverFilter, tagFilter).map((t) => ({
+    const matches = this.search(query, limit, serverFilter, tagFilter, caller.gate).map((t) => ({
       name: t.name,
       description: t.description ?? "",
       inputSchema: t.inputSchema,
     }));
-    this.safeAudit({ server: "switchboard", tool: FIND_TOOLS, scope: "read", decision: "allow", reason: `query=${query}` });
+    this.safeAudit({ server: "switchboard", tool: FIND_TOOLS, scope: "read", decision: "allow", reason: `query=${query}`, ...caller.attr });
     return { content: [{ type: "text", text: JSON.stringify({ matches }, null, 2) }] };
   }
 
   /** `call_tool` meta-tool — unwrap the target and route it through the governed path. */
-  private handleCall(args: Record<string, unknown>): Promise<CallToolResult> {
+  private handleCall(args: Record<string, unknown>, caller: Caller): Promise<CallToolResult> {
     const name = typeof args.name === "string" ? args.name : "";
     if (!name) return Promise.resolve(this.error("call_tool requires a 'name'", SB_ERR.BAD_REQUEST));
     const inner =
       args.arguments && typeof args.arguments === "object"
         ? (args.arguments as Record<string, unknown>)
         : {};
-    return this.forward(name, inner);
+    return this.forward(name, inner, caller);
   }
 
   /** `batch_call` meta-tool — run several governed calls in one request. Each entry goes through
    *  the SAME forward() path (policy → approval → audit), so a batch is just a convenience over N
    *  call_tool invocations: one failing call never aborts the rest. */
-  private async handleBatch(args: Record<string, unknown>): Promise<CallToolResult> {
+  private async handleBatch(args: Record<string, unknown>, caller: Caller): Promise<CallToolResult> {
     const calls = Array.isArray(args.calls) ? args.calls : null;
     if (!calls) return this.error("batch_call requires a 'calls' array", SB_ERR.BAD_REQUEST);
     if (calls.length === 0) return this.error("batch_call 'calls' array is empty", SB_ERR.BAD_REQUEST);
@@ -416,7 +451,7 @@ export class Router {
           entry.arguments && typeof entry.arguments === "object"
             ? (entry.arguments as Record<string, unknown>)
             : {};
-        const res = await this.forward(name, inner);
+        const res = await this.forward(name, inner, caller);
         return { name, isError: res.isError === true, content: res.content };
       }),
     );
@@ -424,10 +459,13 @@ export class Router {
   }
 
   /** Govern, then forward, a real tool call to its upstream server. */
-  private async forward(exposedName: string, args: Record<string, unknown>): Promise<CallToolResult> {
+  private async forward(exposedName: string, args: Record<string, unknown>, caller: Caller): Promise<CallToolResult> {
+    // Every audit row of this call carries the caller's principal and client.
+    const rec = (e: AuditInput): void => this.record(e, caller);
+    const gate = caller.gate;
     // Checked again here, not only in callTool(): each entry of a batch_call is its own call, and the
     // switch can be thrown between two of them.
-    const killed = this.refuseIfKilled(exposedName);
+    const killed = this.refuseIfKilled(exposedName, caller);
     if (killed) return killed;
 
     const target = this.resolve(exposedName);
@@ -444,6 +482,7 @@ export class Router {
       server.scopeHints?.[toolName],
       profileScopeCeiling(active),
       this.annotationsOf(server, toolName),
+      gateScopeCeiling(gate),
     );
 
     // Defense in depth: a tool hidden by the active profile must also be UNCALLABLE, not merely
@@ -451,21 +490,31 @@ export class Router {
     // hidden tool directly would otherwise bypass the view. Deny it with the same audit trail.
     const exposedForProfile = this.mode === "flat" ? toolName : `${server.config.id}${SEP}${toolName}`;
     if (!profileAllowsServer(active, server.config.id) || !profileAllowsTool(active, exposedForProfile)) {
-      this.record({ server: server.id, tool: toolName, scope: verdict.scope, decision: "deny", reason: "hidden by active profile", error_code: SB_ERR.POLICY_DENY });
+      rec({ server: server.id, tool: toolName, scope: verdict.scope, decision: "deny", reason: "hidden by active profile", error_code: SB_ERR.POLICY_DENY });
       return this.error(`denied by policy: '${exposedName}' is not available in the active profile`, SB_ERR.POLICY_DENY);
     }
 
+    // The same for the caller's client (design 3.1): hidden must also be uncallable, and the client is named.
+    if (gate && (gate.deny !== null || !gateAllowsServer(gate, server.config.id) || !gateAllowsTool(gate, exposedForProfile))) {
+      const why = gate.deny ?? `hidden from ${gateLabel(gate)}`;
+      rec({ server: server.id, tool: toolName, scope: verdict.scope, decision: "deny", reason: why, error_code: SB_ERR.POLICY_DENY });
+      return this.error(
+        gate.deny !== null ? `denied by policy: ${gate.deny}` : `denied by policy: '${exposedName}' is not available to ${gateLabel(gate)}`,
+        SB_ERR.POLICY_DENY,
+      );
+    }
+
     if (verdict.decision === "deny") {
-      this.record({ server: server.id, tool: toolName, scope: verdict.scope, decision: "deny", reason: verdict.reason, error_code: SB_ERR.POLICY_DENY });
+      rec({ server: server.id, tool: toolName, scope: verdict.scope, decision: "deny", reason: verdict.reason, error_code: SB_ERR.POLICY_DENY });
       return this.error(`denied by policy: ${verdict.reason}`, SB_ERR.POLICY_DENY);
     }
 
     // Rate limits + spend budgets — charged BEFORE the approval gate so a throttled call never wakes
     // a human, and conservatively (a denied call still counts) so a runaway loop is capped, not billed
     // precisely. Fails closed: any exceeded ceiling (global/server/tool) stops the call here.
-    const gov = this.governor.consume(server.id, toolName, Date.now());
+    const gov = this.governor.consume(server.id, toolName, Date.now(), this.clientLimitsOf(gate));
     if (!gov.ok) {
-      this.record({ server: server.id, tool: toolName, scope: verdict.scope, decision: "deny", reason: gov.reason, error_code: SB_ERR.RATE_LIMITED });
+      rec({ server: server.id, tool: toolName, scope: verdict.scope, decision: "deny", reason: gov.reason, error_code: SB_ERR.RATE_LIMITED });
       const retry = gov.retryAfterMs && isFinite(gov.retryAfterMs) ? ` (retry after ~${Math.ceil(gov.retryAfterMs / 1000)}s)` : "";
       return this.error(`rate limited: ${gov.reason}${retry}`, SB_ERR.RATE_LIMITED);
     }
@@ -476,7 +525,7 @@ export class Router {
     // settings.resilience / server.resilience; inert (constant-true) when unconfigured.
     const health = this.breaker.allow(server.id, Date.now());
     if (!health.ok) {
-      this.record({ server: server.id, tool: toolName, scope: verdict.scope, decision: "deny", reason: health.reason, error_code: SB_ERR.UPSTREAM_UNAVAILABLE });
+      rec({ server: server.id, tool: toolName, scope: verdict.scope, decision: "deny", reason: health.reason, error_code: SB_ERR.UPSTREAM_UNAVAILABLE });
       const retry = health.retryAfterMs && isFinite(health.retryAfterMs) ? ` (retry after ~${Math.ceil(health.retryAfterMs / 1000)}s)` : "";
       return this.error(`upstream '${server.id}' is unavailable (circuit open)${retry}: ${health.reason}`, SB_ERR.UPSTREAM_UNAVAILABLE);
     }
@@ -492,7 +541,7 @@ export class Router {
       this.fireWebhook({ decision: "approval_required", server: server.id, tool: toolName, scope: verdict.scope, reason: verdict.reason });
       const allowed = await approve(server.id, toolName, verdict.scope, verdict.reason);
       if (!allowed) {
-        this.record({ server: server.id, tool: toolName, scope: verdict.scope, decision: "deny", reason: "approval denied/unavailable", error_code: SB_ERR.APPROVAL_DENIED });
+        rec({ server: server.id, tool: toolName, scope: verdict.scope, decision: "deny", reason: "approval denied/unavailable", error_code: SB_ERR.APPROVAL_DENIED });
         return this.error(`approval required and not granted for '${exposedName}'`, SB_ERR.APPROVAL_DENIED);
       }
       reason = "approved";
@@ -506,7 +555,7 @@ export class Router {
       finalArgs = applyArgTransforms(args, server.config, override, this.resolveSecret);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      this.record({ server: server.id, tool: toolName, scope: verdict.scope, decision: "deny", reason: `arg transform failed: ${msg}`, error_code: SB_ERR.BAD_REQUEST });
+      rec({ server: server.id, tool: toolName, scope: verdict.scope, decision: "deny", reason: `arg transform failed: ${msg}`, error_code: SB_ERR.BAD_REQUEST });
       return this.error(`could not prepare arguments for '${exposedName}': ${msg}`, SB_ERR.BAD_REQUEST);
     }
 
@@ -529,7 +578,7 @@ export class Router {
       this.breaker.record(server.id, true, Date.now());
       // Redact configured top-level response fields before the agent (or the audit row) sees them.
       const result = applyResponseRedaction(raw, server.config, override);
-      this.record({
+      rec({
         server: server.id,
         tool: toolName,
         scope: verdict.scope,
@@ -547,7 +596,7 @@ export class Router {
       const timedOut = err instanceof McpError && err.code === ErrorCode.RequestTimeout;
       const code: SbErrorCode = timedOut ? SB_ERR.UPSTREAM_TIMEOUT : SB_ERR.UPSTREAM_ERROR;
       const msg = err instanceof Error ? err.message : String(err);
-      this.record({
+      rec({
         server: server.id,
         tool: toolName,
         scope: verdict.scope,
@@ -571,16 +620,22 @@ export class Router {
   // `subscribe` capability is advertised; an operator hides sensitive data by disabling the server.)
   // ---------------------------------------------------------------------------------------------
 
+  /** The per-client limits to charge for this caller: its client id and the limits its profile sets right now. */
+  private clientLimitsOf(gate: ClientGate | undefined): { id: string; limits?: LimitSpec } | undefined {
+    return gate?.profile && gate.client ? { id: gate.client, limits: gate.profile.limits } : undefined;
+  }
+
   /** A server is visible iff it is enabled AND not hidden by the active profile (profiles can only
    *  HIDE — never reveal a disabled server). `active` is threaded in so a sweep resolves it once. */
   private isVisible(server: MountedServer, active = getActiveProfile(this.cfg)?.profile): boolean {
     return server.config.enabled !== false && profileAllowsServer(active, server.config.id);
   }
 
-  /** Every mounted server that is enabled and not hidden by the active profile. */
-  private visibleServers(): MountedServer[] {
+  /** Every mounted server that is enabled and not hidden by the active profile, and, when a caller's gate is
+   *  given, by that caller's client. */
+  private visibleServers(gate?: ClientGate): MountedServer[] {
     const active = getActiveProfile(this.cfg)?.profile;
-    return this.registry.list().filter((s) => this.isVisible(s, active));
+    return this.registry.list().filter((s) => this.isVisible(s, active) && (!gate || gateAllowsServer(gate, s.id)));
   }
 
   /** URI → owning serverId, rebuilt on every listResources() so readResource() routes correctly.
@@ -591,7 +646,10 @@ export class Router {
   /** Aggregate resources across every visible, resource-capable server. Rebuilds the URI→owner
    *  map; a URI collision is first-wins + logged (we never silently shadow one resource with
    *  another). A per-server list failure is isolated — it never sinks the whole aggregation. */
-  async listResources(): Promise<Resource[]> {
+  async listResources(principal?: Principal): Promise<Resource[]> {
+    const gate = this.callerOf(principal).gate;
+    // The owner map is the same whoever asks (it routes reads; the caller's client is checked at read time),
+    // so it is always rebuilt over every visible server. Only the answer is narrowed to the caller's client.
     this.resourceOwner.clear();
     const out: Resource[] = [];
     for (const server of this.visibleServers()) {
@@ -606,6 +664,7 @@ export class Router {
             continue;
           }
           this.resourceOwner.set(resource.uri, server.id);
+          if (gate && !gateAllowsServer(gate, server.id)) continue;
           out.push(resource);
         }
       } catch (err) {
@@ -618,9 +677,9 @@ export class Router {
   /** Aggregate resource templates across every visible, resource-capable server. Templates are
    *  parameterized URIs (never concrete identities), so there is no owner map to maintain — a read
    *  of a template-expanded URI resolves via readResource()'s try-each fallback. */
-  async listResourceTemplates(): Promise<ResourceTemplate[]> {
+  async listResourceTemplates(principal?: Principal): Promise<ResourceTemplate[]> {
     const out: ResourceTemplate[] = [];
-    for (const server of this.visibleServers()) {
+    for (const server of this.visibleServers(this.callerOf(principal).gate)) {
       if (!server.client.getServerCapabilities()?.resources) continue;
       try {
         const { resourceTemplates } = await server.client.listResourceTemplates();
@@ -641,8 +700,10 @@ export class Router {
    * policy, the governor and the approval gate (see governRead). resources/read is result-or-error,
    * so every refusal is a thrown McpError carrying the SB_* code in `data.code`.
    */
-  async readResource(uri: string): Promise<ReadResourceResult> {
-    this.assertNotKilled("resources/read", uri);
+  async readResource(uri: string, principal?: Principal): Promise<ReadResourceResult> {
+    const caller = this.callerOf(principal);
+    const rec = (e: AuditInput): void => this.record(e, caller);
+    this.assertNotKilled("resources/read", uri, caller);
     let ownerId = this.resourceOwner.get(uri);
     if (!ownerId) {
       await this.listResources();
@@ -652,14 +713,14 @@ export class Router {
     const server = ownerId ? this.registry.get(ownerId) : undefined;
     if (!server) throw new McpError(ErrorCode.InvalidParams, `[switchboard] unknown resource '${uri}'`);
 
-    await this.governRead(server, "resources/read", uri);
+    await this.governRead(server, "resources/read", uri, caller);
     const start = Date.now();
     try {
       const result = (await server.client.readResource({ uri })) as ReadResourceResult;
-      this.record({ server: server.id, tool: "resources/read", scope: "read", decision: "allow", reason: uri, duration_ms: Date.now() - start });
+      rec({ server: server.id, tool: "resources/read", scope: "read", decision: "allow", reason: uri, duration_ms: Date.now() - start });
       return result;
     } catch (err) {
-      this.record({
+      rec({
         server: server.id,
         tool: "resources/read",
         scope: "read",
@@ -698,9 +759,9 @@ export class Router {
   /** Aggregate prompts across every visible, prompt-capable server, namespaced `serverId__name`.
    *  Prompts ARE namespaced (like tools) because a prompt name is a short, collision-prone label
    *  (many servers expose a "summarize"); getPrompt() strips the prefix before routing. */
-  async listPrompts(): Promise<Prompt[]> {
+  async listPrompts(principal?: Principal): Promise<Prompt[]> {
     const out: Prompt[] = [];
-    for (const server of this.visibleServers()) {
+    for (const server of this.visibleServers(this.callerOf(principal).gate)) {
       if (!server.client.getServerCapabilities()?.prompts) continue;
       try {
         const { prompts } = await server.client.listPrompts();
@@ -718,20 +779,22 @@ export class Router {
    *  routing. A bare (un-prefixed) name is matched against the prompts each visible server LISTS and
    *  only the server that lists it is asked. Same gates as resources/read (see governRead); an
    *  unresolved name throws McpError(InvalidParams), a refused one McpError(InvalidRequest). */
-  async getPrompt(name: string, args?: Record<string, string>): Promise<GetPromptResult> {
-    this.assertNotKilled("prompts/get", name);
+  async getPrompt(name: string, args?: Record<string, string>, principal?: Principal): Promise<GetPromptResult> {
+    const caller = this.callerOf(principal);
+    this.assertNotKilled("prompts/get", name, caller);
     const idx = name.indexOf(SEP);
     if (idx !== -1) {
       const serverId = name.slice(0, idx);
       const promptName = name.slice(idx + SEP.length);
       const server = this.registry.get(serverId);
       if (server && server.client.getServerCapabilities()?.prompts) {
-        await this.governRead(server, "prompts/get", promptName);
-        return this.fetchPrompt(server, promptName, args);
+        await this.governRead(server, "prompts/get", promptName, caller);
+        return this.fetchPrompt(server, promptName, args, caller);
       }
     }
-    // Fallback: treat `name` as a bare prompt name and find the first visible server that lists it.
-    for (const server of this.visibleServers()) {
+    // Fallback: treat `name` as a bare prompt name and find the first visible server that lists it. Only the
+    // servers the caller's client may see are asked, so it never matches (or is refused for) another client's server.
+    for (const server of this.visibleServers(caller.gate)) {
       if (!server.client.getServerCapabilities()?.prompts) continue;
       let listed: string[];
       try {
@@ -741,24 +804,25 @@ export class Router {
         continue; // not this server
       }
       if (!listed.includes(name)) continue;
-      await this.governRead(server, "prompts/get", name);
-      return this.fetchPrompt(server, name, args);
+      await this.governRead(server, "prompts/get", name, caller);
+      return this.fetchPrompt(server, name, args, caller);
     }
     throw new McpError(ErrorCode.InvalidParams, `[switchboard] unknown prompt '${name}'`);
   }
 
   /** The upstream half of prompts/get: call it, audit the outcome, rethrow an upstream failure. */
-  private async fetchPrompt(server: MountedServer, promptName: string, args?: Record<string, string>): Promise<GetPromptResult> {
+  private async fetchPrompt(server: MountedServer, promptName: string, args: Record<string, string> | undefined, caller: Caller): Promise<GetPromptResult> {
+    const rec = (e: AuditInput): void => this.record(e, caller);
     const start = Date.now();
     try {
       const result = (await server.client.getPrompt({
         name: promptName,
         ...(args ? { arguments: args } : {}),
       })) as GetPromptResult;
-      this.record({ server: server.id, tool: "prompts/get", scope: "read", decision: "allow", reason: promptName, duration_ms: Date.now() - start });
+      rec({ server: server.id, tool: "prompts/get", scope: "read", decision: "allow", reason: promptName, duration_ms: Date.now() - start });
       return result;
     } catch (err) {
-      this.record({
+      rec({
         server: server.id,
         tool: "prompts/get",
         scope: "read",
@@ -780,9 +844,10 @@ export class Router {
    * buckets a tool call draws from), then the approval gate. Every refusal is audited and thrown as an
    * McpError(InvalidRequest) with the SB_* code in `data.code`.
    */
-  private async governRead(server: MountedServer, tool: ReadSurface, detail: string): Promise<void> {
+  private async governRead(server: MountedServer, tool: ReadSurface, detail: string, caller: Caller): Promise<void> {
+    const gate = caller.gate;
     const deny = (code: SbErrorCode, why: string, message: string): never => {
-      this.record({ server: server.id, tool, scope: "read", decision: "deny", reason: `${why}: ${detail}`, error_code: code });
+      this.record({ server: server.id, tool, scope: "read", decision: "deny", reason: `${why}: ${detail}`, error_code: code }, caller);
       throw this.refusal(code, message);
     };
     const active = getActiveProfile(this.cfg)?.profile;
@@ -792,11 +857,19 @@ export class Router {
     if (!profileAllowsServer(active, server.id)) {
       return deny(SB_ERR.POLICY_DENY, "hidden by active profile", `denied by policy: '${server.id}' is not available in the active profile`);
     }
-    const verdict = evaluate(server.config, tool, this.cfg, "read", profileScopeCeiling(active));
+    // The caller's client (design 3.1): resources and prompts follow its server globs; its tool lists do not apply.
+    if (gate && (gate.deny !== null || !gateAllowsServer(gate, server.id))) {
+      return deny(
+        SB_ERR.POLICY_DENY,
+        gate.deny ?? `server hidden from ${gateLabel(gate)}`,
+        gate.deny !== null ? `denied by policy: ${gate.deny}` : `denied by policy: '${server.id}' is not available to ${gateLabel(gate)}`,
+      );
+    }
+    const verdict = evaluate(server.config, tool, this.cfg, "read", profileScopeCeiling(active), undefined, gateScopeCeiling(gate));
     if (verdict.decision === "deny") {
       return deny(SB_ERR.POLICY_DENY, verdict.reason, `denied by policy: ${verdict.reason}`);
     }
-    const gov = this.governor.consume(server.id, tool, Date.now());
+    const gov = this.governor.consume(server.id, tool, Date.now(), this.clientLimitsOf(gate));
     if (!gov.ok) {
       const retry = gov.retryAfterMs && isFinite(gov.retryAfterMs) ? ` (retry after ~${Math.ceil(gov.retryAfterMs / 1000)}s)` : "";
       return deny(SB_ERR.RATE_LIMITED, gov.reason ?? "limit exceeded", `rate limited: ${gov.reason ?? "limit exceeded"}${retry}`);
@@ -814,7 +887,7 @@ export class Router {
   // ---------------------------------------------------------------------------------------------
 
   /** If the kill switch is on, audit a deny row and return the refusal result for a tool call. */
-  private refuseIfKilled(exposedName: string): CallToolResult | undefined {
+  private refuseIfKilled(exposedName: string, caller: Caller): CallToolResult | undefined {
     if (!isKilled(this.cfg)) return undefined;
     const reason = `kill switch is on (${killStatus(this.cfg).source})`;
     // Attribution only: the target is resolved to name the server in the audit row, never called.
@@ -826,15 +899,15 @@ export class Router {
       decision: "deny",
       reason,
       error_code: SB_ERR.KILL_SWITCH,
-    });
+    }, caller);
     return this.error(`${reason}: refusing '${exposedName}'`, SB_ERR.KILL_SWITCH);
   }
 
   /** The resources/read and prompts/get form of the kill switch: audit, then throw. */
-  private assertNotKilled(tool: ReadSurface, detail: string): void {
+  private assertNotKilled(tool: ReadSurface, detail: string, caller: Caller): void {
     if (!isKilled(this.cfg)) return;
     const reason = `kill switch is on (${killStatus(this.cfg).source})`;
-    this.record({ server: "switchboard", tool, scope: "read", decision: "deny", reason: `${reason}: ${detail}`, error_code: SB_ERR.KILL_SWITCH });
+    this.record({ server: "switchboard", tool, scope: "read", decision: "deny", reason: `${reason}: ${detail}`, error_code: SB_ERR.KILL_SWITCH }, caller);
     throw this.refusal(SB_ERR.KILL_SWITCH, `${reason}: refusing ${tool}`);
   }
 
@@ -868,8 +941,8 @@ export class Router {
    *  decision in forward() goes through here so a delivered event always mirrors an audited
    *  row. The webhook carries decision metadata only — `record` never forwards request/response
    *  to it, even when `capture_io` stored them on the audit row. */
-  private record(entry: AuditInput): void {
-    this.safeAudit(entry);
+  private record(entry: AuditInput, caller?: Caller): void {
+    this.safeAudit(caller ? { ...entry, ...caller.attr } : entry);
     this.fireWebhook({
       decision: entry.decision,
       server: entry.server,

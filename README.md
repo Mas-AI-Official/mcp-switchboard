@@ -718,15 +718,67 @@ the server **forces `/mcp` authentication on** (fail-closed — a public issuer 
 exposed). The full chain (metadata → DCR → PKCE → consent → token → authed `/mcp` → refresh → revoke)
 is verified end-to-end by a deterministic oracle: `npm run verify:oauth` (20/20).
 
+## Clients and principals
+
+Every caller of `/mcp` is a **principal**. Register the callers you trust as **clients**; each gets its own key,
+its own view of the tools and its own ceiling, so Claude Code, Codex, a local model and an agent platform are no
+longer one anonymous actor.
+
+```yaml
+# switchboard.config.yaml
+clients:
+  claude-code:
+    description: Claude Code CLI
+    servers: ["*"]              # server id globs this client may see and call (omitted or empty: none)
+    tools: []                   # optional allowlist of exposed tool names (globs); empty = all on those servers
+    exclude_tools: ["*__delete_*"]
+    max_scope: write            # ceiling: only LOWERS what the server and the active profile allow
+    max_risk: high              # stored now, enforced when risk lands
+    limits: { per_minute: 60 }  # same shape as a server's limits
+  local-model:
+    servers: [voice, youtube]
+    max_scope: read
+```
+
+- **One command per client.** `switchboard client add codex --servers voice,youtube --max-scope read` writes the
+  entry (comments in your YAML survive) and issues a key bound to it, stored for the current OS user in
+  `~/.switchboard/clients/codex.key`. The token is printed only with `--print`. Then wire the client with
+  `switchboard bridge --client codex`. A client created without flags sees every server, read only, low risk.
+- **Fail closed.** The moment one client exists, `/mcp` needs a key bound to a configured client on every request, on
+  loopback too (even with `require_auth: never`). No credential is 401; a valid key that names no configured client is
+  403. With no client configured nothing changes: the loopback single-user mode of 0.1.0.
+- **Hidden is uncallable.** Listings and calls are both filtered. A tool outside the client's servers or tools, or in
+  `exclude_tools`, is refused with `SB_POLICY_DENY` naming the client; `max_scope` caps calls the same way. Resources
+  and prompts follow the client's `servers`. `find_tools`, `call_tool` and `batch_call` apply the same filter.
+- **Audit.** Every row carries `principal` (`apikey:<key id>`, `oauth:<oauth client id>`, `stdio:<client>`,
+  `loopback-anonymous:loopback`) and `client`.
+- **OAuth.** A token maps to a client only when the OAuth client registered with a `client_name` equal to a configured
+  client id; the owner's consent is what makes that name trustworthy. Any other token is 403 while clients exist.
+- **stdio.** `switchboard serve --client <id>` runs the stdio transport as that client. It is the launching process's own
+  assertion (`via: stdio`), not an authentication; use `bridge` for an authenticated path. With clients configured,
+  stdio without `--client` is not served.
+- **No restart needed.** A running gateway re-reads keys on every request and watches the config file: when its
+  mtime, size or inode changes it re-parses the whole file through the strict schema and swaps in **only the `clients`
+  section**, atomically. A file that does not parse or validate is ignored (a warning says why) and the previous clients
+  stay in force. Servers, settings and the gateway block still need a restart. The file is therefore authoritative at
+  runtime for who may call: protect it like the key store (a process running as you can edit both).
+- **Admin API** (owner session + CSRF, never a client key, never returns a token): `GET /api/clients`,
+  `POST /api/clients`, `PUT /api/clients/:id`, `POST /api/clients/:id/rotate`, `DELETE /api/clients/:id`.
+
+`switchboard client list` shows clients and keys without secrets, `client rotate <id>` replaces the key (the old one
+stops working at once, on a running gateway too), `client rm <id>` revokes its keys and deletes the key file
+(`--purge` also removes the config entry). `npm run verify:principals` proves all of the above end to end.
+
 ## CLI
 
 | Command | What it does |
 |---|---|
 | `switchboard init` | Scaffold `switchboard.config.yaml` + the `~/.switchboard` home |
-| `switchboard serve` | Run the gateway (stdio and/or HTTP, per config) |
+| `switchboard serve` | Run the gateway (stdio and/or HTTP, per config); `--client <id>` runs the stdio transport as a registered client |
 | `switchboard dashboard` | Run only the HTTP endpoint + web console |
 | `switchboard dashboard login` | Mint a one-time owner login code (after an owner-presence check) and open the dashboard signed in; `--presence` takes auto, hello, tty or none; `--no-open` only prints the URL |
 | `switchboard install <client>` | Wire MCP Switchboard into a client (`claude-desktop`, `claude-code`, `cursor`, `vscode`, `codex`) — `--global` / `--dir` / `--name` / `--print` |
+| `switchboard client add <id>\|list\|rotate <id>\|rm <id>` | Register clients (who may call `/mcp`, with which servers, tools and ceiling) and manage their keys: `add` takes `--servers`, `--max-scope`, `--max-risk`, `--print`; `rm` takes `--purge` |
 | `switchboard bridge --client <id>` | Relay a client's stdio to the shared HTTP gateway as that client (`--url`, `--key-file`) |
 | `switchboard expose` | Open an HTTPS tunnel to the local endpoint (for claude.ai web / ChatGPT / remote clients) |
 | `switchboard list` | Mount everything and print the governed tool list, then exit |
@@ -736,7 +788,7 @@ is verified end-to-end by a deterministic oracle: `npm run verify:oauth` (20/20)
 | `switchboard toolkits sync\|stats` | Rebuild / inspect the browsable integration catalog (MCP Registry + APIs.guru) |
 | `switchboard local-llm [wire]` | Auto-detect an offline OpenAI-compatible LLM; `wire` writes it into the council |
 | `switchboard profile list\|show <name>\|use <name>\|clear` | Manage named, switchable views over your servers/tools |
-| `switchboard apikey new <name>\|list\|rm <id>` | Manage `/mcp` bearer API keys for local & cloud clients |
+| `switchboard apikey new <name>\|list\|rm <id>` | Manage `/mcp` bearer API keys for local & cloud clients; `new --client <id>` binds a key to a registered client |
 | `switchboard vault set\|list\|rm <name>` | Manage locally-stored secrets |
 
 Global flag: `-c, --config <path>` (default `switchboard.config.yaml`).

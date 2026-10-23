@@ -92,6 +92,28 @@ clients:
 - stdio serve mode takes `--client <id>`; it is recorded as `via: "stdio"` (an assertion by the launching
   process, documented as such). The bridge is the authenticated path.
 
+Implementation notes (step 2, `src/principal.ts`, `clientconfig.ts`, `clientadmin.ts`; oracle `verify:principals`). Where the
+code makes a choice the text above leaves open, it is recorded here:
+
+- `servers` omitted or empty means no server (a client sees only what it is given). `client add <id>` with no flags creates
+  `servers: ["*"]`, `max_scope: read`, `max_risk: low`; on an existing client it changes only the flags given and keeps a
+  working key. `max_risk` is stored and shown now; it is enforced when risk (3.4) lands.
+- `max_scope` joins the server and the active profile: the tightest wins and the denial names which one binds. `limits` is
+  a fourth governor level, read live, so a reload changes it. `tools` and `exclude_tools` are exposed-name globs (`*`, `?`)
+  and apply to tools; resources and prompts follow the client's `servers`.
+- `/mcp` with clients configured: no valid credential is 401; a valid credential that names no configured client is 403
+  (`SB_NO_CLIENT`, `SB_UNKNOWN_CLIENT`), because the caller is known but has no profile. This holds with `require_auth: never`.
+  A key bound to a client that is no longer configured is refused even when no client is configured.
+- stdio: with clients configured, `serve` without `--client` does not serve stdio (HTTP, if enabled, continues); stdio only
+  and no `--client` exits 1. `--client` must name a configured client.
+- OAuth: the token's OAuth client maps to a client only by exact equality of its registered `client_name` and a client id.
+- Live changes: the key store is re-read on every request. A gateway watches the config file's mtime, size and inode and, on a
+  change, re-parses the whole file through the strict schema and swaps in only `clients` with one assignment; an invalid file
+  is ignored and the previous clients stay. Everything else in the config still needs a restart. `client add|rotate|rm` and
+  the admin API edit the YAML in place (comments and order kept), validate before writing, and write atomically with a `.bak`.
+- Every change to the client set writes an audit row (`client.add`, `client.update`, `client.rotate`, `client.remove`,
+  principal `owner:cli` or `owner:dashboard`), never with a token.
+
 ### 3.2 HTTP hardening
 
 - Host allowlist on every route: `127.0.0.1:<port>`, `localhost:<port>`, `[::1]:<port>`, plus the host of
