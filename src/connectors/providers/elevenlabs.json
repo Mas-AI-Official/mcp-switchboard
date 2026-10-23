@@ -1,0 +1,41 @@
+{
+  "$schema": "../schemas/provider.schema.json",
+  "slug": "elevenlabs",
+  "name": "ElevenLabs",
+  "categories": ["voice", "audio"],
+  "api_hosts": ["api.elevenlabs.io"],
+  "docs_url": "https://elevenlabs.io/docs/api-reference/authentication",
+  "owner_setup": {
+    "console_url": "https://elevenlabs.io/app/settings/api-keys",
+    "steps": [
+      "Create an API key in your ElevenLabs account settings, with the monthly credit limit you are willing to spend",
+      "You enter the key yourself: switchboard connect elevenlabs --token-stdin  (paste it; no agent should ever be asked for it)",
+      "The probe calls GET /v1/models, which reads the model list and spends no credits"
+    ],
+    "redirect_uris": [],
+    "notes": [
+      "Observed 2026-10-23 (ElevenLabs authentication doc): the key travels in the xi-api-key header to https://api.elevenlabs.io, and the doc's own example is GET /v1/models.",
+      "LOCKED DECISION (owner, 2026-10-23, CLAUDE.md ELEVENLABS-API EXCEPTION): voice generation calls go only through the local elevenlabs-api guard MCP server, which holds its own key in Windows Credential Manager. This definition exists so an account can be custodied and probed here; ADR section 7 mounts the guard as a binary upstream instead of calling ElevenLabs from a Switchboard toolkit. Do not wire generation actions to this provider.",
+      "The API has no account identity endpoint in the doc fetched, so the identity is the constant 'api-key' and the probe only proves the key is valid.",
+      "UNVERIFIED: the console URL above was not fetched when this file was written."
+    ]
+  },
+  "identity_probe": {
+    "method": "GET",
+    "url": "https://api.elevenlabs.io/v1/models",
+    "id_static": "api-key"
+  },
+  "auth": [
+    {
+      "id": "api_key",
+      "mode": "api_key",
+      "label": "API key",
+      "default": true,
+      "inject": { "in": "header", "name": "xi-api-key", "template": "{token}" },
+      "fields": {
+        "auth_config_creation": [],
+        "connected_account_initiation": [{ "name": "api_key", "label": "ElevenLabs API key", "required": true, "secret": true }]
+      }
+    }
+  ]
+}

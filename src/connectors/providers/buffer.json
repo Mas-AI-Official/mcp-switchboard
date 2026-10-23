@@ -1,0 +1,78 @@
+{
+  "$schema": "../schemas/provider.schema.json",
+  "slug": "buffer",
+  "name": "Buffer",
+  "categories": ["social", "scheduling"],
+  "api_hosts": ["api.buffer.com"],
+  "docs_url": "https://developers.buffer.com/guides/authentication.html",
+  "owner_setup": {
+    "console_url": "https://developers.buffer.com/",
+    "steps": [
+      "Simplest: create a personal API key in Buffer (Settings, API) and connect it: switchboard connect buffer --token-stdin",
+      "OAuth instead: register a Buffer OAuth app, store its client id (and secret if it is a confidential app) in the vault, register it with switchboard authconfig add buffer ..., then switchboard connect buffer --auth oauth2",
+      "A refresh token is only returned when the offline_access scope is requested"
+    ],
+    "redirect_uris": ["{loopback_redirect}"],
+    "notes": [
+      "Observed 2026-10-23 (Buffer authentication guide): PKCE S256 is required for every OAuth client; authorize at https://auth.buffer.com/auth and exchange at https://auth.buffer.com/token; a confidential client sends client_secret as a form field and a public client sends none; scopes are space separated; refresh tokens are single use and replaying an old one revokes every token of the grant.",
+      "Observed (same guide): the API is POST https://api.buffer.com with a JSON body and Authorization: Bearer (a personal API key goes in the same header). Identity is the GraphQL query { account { id email } }.",
+      "UNVERIFIED: where the OAuth app is registered and whether an http loopback redirect URI is accepted (the guide only says the redirect URI must match the registered one). The console URL above is the developer docs home, not a verified app console."
+    ]
+  },
+  "identity_probe": {
+    "method": "POST",
+    "url": "https://api.buffer.com",
+    "body": { "query": "{ account { id email } }" },
+    "id_path": "data.account.id",
+    "name_path": "data.account.email"
+  },
+  "auth": [
+    {
+      "id": "api_key",
+      "mode": "api_key",
+      "label": "Personal API key",
+      "default": true,
+      "inject": { "in": "header", "name": "Authorization", "template": "Bearer {token}" },
+      "fields": {
+        "auth_config_creation": [],
+        "connected_account_initiation": [{ "name": "api_key", "label": "Buffer API key", "required": true, "secret": true }]
+      }
+    },
+    {
+      "id": "oauth2",
+      "mode": "oauth2",
+      "label": "OAuth 2.0 with PKCE",
+      "oauth2": {
+        "authorize_url": "https://auth.buffer.com/auth",
+        "token_url": "https://auth.buffer.com/token",
+        "pkce": "required",
+        "client_auth": "body",
+        "client_secret_at_exchange": "optional",
+        "scope_separator": " ",
+        "default_scopes": ["account:read", "posts:read", "posts:write", "offline_access"],
+        "scope_catalog": [
+          { "scope": "account:read", "description": "Read the account" },
+          { "scope": "account:write", "description": "Modify the account" },
+          { "scope": "posts:read", "description": "Read posts" },
+          { "scope": "posts:write", "description": "Create and change posts" },
+          { "scope": "ideas:read", "description": "Read ideas" },
+          { "scope": "ideas:write", "description": "Create and change ideas" },
+          { "scope": "snippets:read", "description": "Read snippets" },
+          { "scope": "snippets:write", "description": "Create and change snippets" },
+          { "scope": "offline_access", "description": "Issue a refresh token" }
+        ],
+        "redirect": "loopback",
+        "accept_json": true,
+        "refresh": { "kind": "refresh_token", "rotates": true }
+      },
+      "inject": { "in": "header", "name": "Authorization", "template": "Bearer {token}" },
+      "fields": {
+        "auth_config_creation": [
+          { "name": "client_id", "label": "Client ID", "required": true, "secret": false },
+          { "name": "client_secret", "label": "Client secret (confidential apps only)", "required": false, "secret": true }
+        ],
+        "connected_account_initiation": []
+      }
+    }
+  ]
+}

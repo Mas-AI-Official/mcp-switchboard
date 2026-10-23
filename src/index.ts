@@ -8,6 +8,7 @@ export { Registry, type MountedServer } from "./registry.js";
 export { Router } from "./router.js";
 export { Vault, HOME_DIR } from "./vault.js";
 export { OAuthStore, type ProviderStatus } from "./oauth.js";
+export { Connectors, ConnectorError, CONNECTOR_ERR } from "./connectors/index.js";
 export { buildOpenApiServer, type OpenApiServer } from "./openapi.js";
 export { guardedFetch, NetGuardError, classifyAddress, type GuardedInit, type GuardedResponse } from "./netguard.js";
 export { loadConfig, writeConfig, starterConfig } from "./config.js";

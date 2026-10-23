@@ -1,0 +1,81 @@
+{
+  "$schema": "../schemas/provider.schema.json",
+  "slug": "google",
+  "name": "Google",
+  "toolkits": ["youtube", "gmail", "drive"],
+  "categories": ["video", "email", "storage"],
+  "api_hosts": ["www.googleapis.com", "youtube.googleapis.com", "gmail.googleapis.com", "openidconnect.googleapis.com"],
+  "docs_url": "https://developers.google.com/identity/protocols/oauth2/native-app",
+  "owner_setup": {
+    "console_url": "https://console.cloud.google.com/apis/credentials",
+    "steps": [
+      "Create or pick a Google Cloud project",
+      "Enable the YouTube Data API v3, the Gmail API and the Google Drive API for it",
+      "Configure the OAuth consent screen, then move it out of Testing publishing status (see the 7-day note below)",
+      "Create an OAuth client ID of type Desktop app and copy the client id and secret",
+      "Store them: switchboard vault set google_client_id and switchboard vault set google_client_secret",
+      "Register them: switchboard authconfig add google --client-id-ref google_client_id --client-secret-ref google_client_secret",
+      "Connect with the scopes you need: switchboard connect google --account work --scopes @youtube,@gmail,@drive"
+    ],
+    "redirect_uris": ["{loopback_redirect}"],
+    "notes": [
+      "A Desktop app client accepts a loopback redirect (http://127.0.0.1 with any free port) without registering it (docs: OAuth 2.0 for desktop apps).",
+      "Observed 2026-10-23 (ADR section 8): a project whose publishing status is Testing gets refresh tokens that expire after 7 days unless only name, email and profile scopes are requested. The day-8 refresh test in ADR phase P3 is the check that this is fixed.",
+      "UNVERIFIED: whether an unverified production consent screen or an Internal one (Workspace organization) is the better setting for mas-ai.co; decide at setup and prove it with the day-8 test.",
+      "Scope names below are Google's published scope URLs and were not re-fetched when this file was written."
+    ]
+  },
+  "identity_probe": {
+    "method": "GET",
+    "url": "https://openidconnect.googleapis.com/v1/userinfo",
+    "id_path": "sub",
+    "name_path": "email",
+    "avatar_path": "picture"
+  },
+  "auth": [
+    {
+      "id": "oauth2",
+      "mode": "oauth2",
+      "label": "OAuth client (Desktop app)",
+      "default": true,
+      "oauth2": {
+        "authorize_url": "https://accounts.google.com/o/oauth2/v2/auth",
+        "token_url": "https://oauth2.googleapis.com/token",
+        "revoke": { "url": "https://oauth2.googleapis.com/revoke", "auth": "none", "token_param": "token" },
+        "pkce": "required",
+        "client_auth": "body",
+        "client_secret_at_exchange": "always",
+        "scope_separator": " ",
+        "default_scopes": ["openid", "email", "profile"],
+        "required_scopes": ["openid", "email", "profile"],
+        "scope_catalog": [
+          { "scope": "openid", "description": "Identify the account" },
+          { "scope": "email", "description": "Read the account email address" },
+          { "scope": "profile", "description": "Read the account name and picture" },
+          { "scope": "https://www.googleapis.com/auth/youtube.readonly", "description": "View the YouTube account", "group": "youtube" },
+          { "scope": "https://www.googleapis.com/auth/youtube.upload", "description": "Upload YouTube videos", "group": "youtube" },
+          { "scope": "https://www.googleapis.com/auth/youtube", "description": "Manage the YouTube account", "group": "youtube" },
+          { "scope": "https://www.googleapis.com/auth/gmail.readonly", "description": "Read Gmail", "group": "gmail" },
+          { "scope": "https://www.googleapis.com/auth/gmail.compose", "description": "Create and send drafts", "group": "gmail" },
+          { "scope": "https://www.googleapis.com/auth/gmail.send", "description": "Send email", "group": "gmail" },
+          { "scope": "https://www.googleapis.com/auth/gmail.modify", "description": "Read, label and modify Gmail", "group": "gmail" },
+          { "scope": "https://www.googleapis.com/auth/drive.file", "description": "Files created or opened by this app", "group": "drive" },
+          { "scope": "https://www.googleapis.com/auth/drive.readonly", "description": "Read all Drive files", "group": "drive" },
+          { "scope": "https://www.googleapis.com/auth/drive", "description": "Full Drive access", "group": "drive" }
+        ],
+        "extra_auth_params": { "access_type": "offline", "prompt": "consent" },
+        "redirect": "loopback",
+        "accept_json": true,
+        "refresh": { "kind": "refresh_token", "rotates": false }
+      },
+      "inject": { "in": "header", "name": "Authorization", "template": "Bearer {token}" },
+      "fields": {
+        "auth_config_creation": [
+          { "name": "client_id", "label": "Client ID", "required": true, "secret": false },
+          { "name": "client_secret", "label": "Client secret", "required": true, "secret": true }
+        ],
+        "connected_account_initiation": []
+      }
+    }
+  ]
+}

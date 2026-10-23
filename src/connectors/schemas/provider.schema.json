@@ -1,0 +1,229 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/Mas-AI-Official/mcp-switchboard/schemas/provider.schema.json",
+  "title": "Switchboard ProviderDef",
+  "description": "A provider's auth definition as data. No field may hold a secret: client secrets live in the vault and are referenced by name from an AuthConfig.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["slug", "name", "categories", "api_hosts", "docs_url", "owner_setup", "auth"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "slug": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$" },
+    "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "toolkits": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$" }
+    },
+    "categories": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 40 }
+    },
+    "api_hosts": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^(\\*\\.)?[a-z0-9]([a-z0-9.-]*[a-z0-9])?$" }
+    },
+    "docs_url": { "type": "string", "pattern": "^https://[^\\s]+$" },
+    "api_version_header": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "value"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "value": { "type": "string", "minLength": 1 }
+      }
+    },
+    "api_headers": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "owner_setup": { "$ref": "#/definitions/ownerSetup" },
+    "identity_probe": { "$ref": "#/definitions/identityProbe" },
+    "auth": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/definitions/authDef" }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["derived_from"],
+      "properties": {
+        "derived_from": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+        "license": { "type": "string" },
+        "attribution": { "type": "string" }
+      }
+    }
+  },
+  "definitions": {
+    "url": { "type": "string", "pattern": "^https?://[^\\s]+$" },
+    "ownerSetup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["console_url", "steps", "redirect_uris", "notes"],
+      "properties": {
+        "console_url": { "type": "string", "pattern": "^https://[^\\s]+$" },
+        "steps": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "redirect_uris": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "notes": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "identityProbe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "url"],
+      "properties": {
+        "method": { "enum": ["GET", "POST"] },
+        "url": { "$ref": "#/definitions/url" },
+        "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+        "query": { "type": "object", "additionalProperties": { "type": "string" } },
+        "body": {},
+        "ok_field": { "type": "string" },
+        "id_path": { "type": "string" },
+        "id_static": { "type": "string" },
+        "name_path": { "type": "string" },
+        "avatar_path": { "type": "string" },
+        "scopes_header": { "type": "string" }
+      },
+      "anyOf": [{ "required": ["id_path"] }, { "required": ["id_static"] }]
+    },
+    "field": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "required", "secret"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "label": { "type": "string" },
+        "description": { "type": "string" },
+        "required": { "type": "boolean" },
+        "secret": { "type": "boolean" }
+      }
+    },
+    "httpStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "url", "params"],
+      "properties": {
+        "method": { "enum": ["GET", "POST"] },
+        "url": { "$ref": "#/definitions/url" },
+        "params": { "type": "object", "additionalProperties": { "type": "string" } }
+      }
+    },
+    "revoke": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "auth", "token_param"],
+      "properties": {
+        "url": { "$ref": "#/definitions/url" },
+        "auth": { "enum": ["none", "client_basic", "client_body", "bearer"] },
+        "token_param": { "type": ["string", "null"] }
+      }
+    },
+    "oauth2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "token_url",
+        "pkce",
+        "client_auth",
+        "client_secret_at_exchange",
+        "scope_separator",
+        "default_scopes",
+        "scope_catalog",
+        "redirect",
+        "accept_json",
+        "refresh"
+      ],
+      "properties": {
+        "authorize_url": { "$ref": "#/definitions/url" },
+        "token_url": { "$ref": "#/definitions/url" },
+        "revoke": { "$ref": "#/definitions/revoke" },
+        "pkce": { "enum": ["required", "supported", "unsupported"] },
+        "client_auth": { "enum": ["body", "basic"] },
+        "client_secret_at_exchange": { "enum": ["always", "without_pkce", "optional"] },
+        "scope_separator": { "enum": [" ", ",", null] },
+        "default_scopes": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "required_scopes": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "scope_catalog": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["scope"],
+            "properties": {
+              "scope": { "type": "string", "minLength": 1 },
+              "description": { "type": "string" },
+              "group": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" }
+            }
+          }
+        },
+        "extra_auth_params": { "type": "object", "additionalProperties": { "type": "string" } },
+        "token_request_params": { "type": "object", "additionalProperties": { "type": "string" } },
+        "redirect": { "enum": ["loopback", "https", "custom"] },
+        "accept_json": { "type": "boolean" },
+        "token_http_method": { "enum": ["GET", "POST"] },
+        "token_response_path": { "type": "string", "pattern": "^[A-Za-z0-9_.]+$" },
+        "post_exchange": { "$ref": "#/definitions/httpStep" },
+        "client_id_param": { "enum": ["client_id", "client_key"] },
+        "token_shape": { "enum": ["standard", "slack"] },
+        "refresh": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "rotates"],
+          "properties": {
+            "kind": { "enum": ["refresh_token", "exchange", "none"] },
+            "exchange": { "$ref": "#/definitions/httpStep" },
+            "rotates": { "type": "boolean" },
+            "lifetime_s": { "type": "integer", "minimum": 1 },
+            "expired_errors": { "type": "array", "minItems": 1, "items": { "type": "string" } }
+          }
+        }
+      }
+    },
+    "authDef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "mode", "inject", "fields"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "mode": { "enum": ["oauth2", "oauth2_cc", "oauth1", "api_key", "bearer", "basic", "custom"] },
+        "label": { "type": "string" },
+        "default": { "type": "boolean" },
+        "oauth2": { "$ref": "#/definitions/oauth2" },
+        "inject": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["in", "name", "template"],
+          "properties": {
+            "in": { "enum": ["header", "query"] },
+            "name": { "type": "string", "minLength": 1 },
+            "template": { "type": "string", "minLength": 1 }
+          }
+        },
+        "fields": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["auth_config_creation", "connected_account_initiation"],
+          "properties": {
+            "auth_config_creation": { "type": "array", "items": { "$ref": "#/definitions/field" } },
+            "connected_account_initiation": { "type": "array", "items": { "$ref": "#/definitions/field" } }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "mode": { "enum": ["oauth2", "oauth2_cc"] } }, "required": ["mode"] },
+          "then": { "required": ["oauth2"] }
+        },
+        {
+          "if": { "properties": { "mode": { "const": "oauth2" } }, "required": ["mode"] },
+          "then": { "properties": { "oauth2": { "type": "object", "required": ["authorize_url"] } } }
+        }
+      ]
+    }
+  }
+}

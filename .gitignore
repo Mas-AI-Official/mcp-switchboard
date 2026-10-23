@@ -41,3 +41,11 @@ launch-report.*
 # local operator notes and config backups (never published)
 switchboard.config.yaml.bak*
 docs/STATUS-*
+
+# --- generated connector toolkits (vendor-spec derived) ---
+# `switchboard toolkits sync` writes toolkit definitions generated from providers' public specs (X, Google
+# Discovery, ...) under SWITCHBOARD_HOME/toolkits/ on the operator's machine. Their redistribution terms are
+# not ours to grant, so they are NEVER committed: only our code, overlays, recipes and provider definitions are.
+/toolkits/
+**/toolkits/generated/
+*.generated.json

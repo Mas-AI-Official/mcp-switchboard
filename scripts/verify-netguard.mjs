@@ -708,7 +708,12 @@ async function connect(server) {
 // ====================================================================================================
 {
   const srcDir = join(ROOT, "src");
-  const files = readdirSync(srcDir).filter((f) => f.endsWith(".ts"));
+  // src/*.ts plus src/connectors/*.ts: the connector layer (token exchange, refresh, revoke, identity probe,
+  // authenticated calls) is where oauth.ts's network calls went, so it is held to the same rule.
+  const files = [
+    ...readdirSync(srcDir).filter((f) => f.endsWith(".ts")),
+    ...readdirSync(join(srcDir, "connectors")).filter((f) => f.endsWith(".ts")).map((f) => `connectors/${f}`),
+  ];
   const bare = [];
   for (const f of files) {
     if (f === "netguard.ts") continue;
@@ -720,7 +725,7 @@ async function connect(server) {
     });
   }
   assert("no module outside netguard.ts calls fetch() directly", bare.length === 0, bare.join(", "));
-  const users = ["httptool.ts", "openapi.ts", "webhook.ts", "oauth.ts", "council.ts", "catalog.ts", "localllm.ts", "dashboard.ts"];
+  const users = ["httptool.ts", "openapi.ts", "webhook.ts", "connectors/tokenclient.ts", "connectors/probe.ts", "connectors/accounts.ts", "council.ts", "catalog.ts", "localllm.ts", "dashboard.ts"];
   const missing = users.filter((f) => !/guardedFetch\(/.test(readFileSync(join(srcDir, f), "utf8")));
   assert("every outbound module uses guardedFetch", missing.length === 0, missing.join(", "));
   const tlsOff = files.filter((f) => /rejectUnauthorized|NODE_TLS_REJECT_UNAUTHORIZED/.test(readFileSync(join(srcDir, f), "utf8")));

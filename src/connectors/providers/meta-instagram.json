@@ -1,0 +1,90 @@
+{
+  "$schema": "../schemas/provider.schema.json",
+  "slug": "meta-instagram",
+  "name": "Instagram (Meta)",
+  "toolkits": ["instagram"],
+  "categories": ["social"],
+  "api_hosts": ["graph.instagram.com", "rupload.facebook.com"],
+  "docs_url": "https://developers.facebook.com/docs/instagram-platform/instagram-api-with-instagram-login/business-login",
+  "owner_setup": {
+    "console_url": "https://developers.facebook.com/apps/",
+    "steps": [
+      "Create a Meta developer app and add the Instagram product with Instagram API setup with Instagram login",
+      "Add the Instagram professional (Business or Creator) account as a tester or role user; Instagram needs a professional account",
+      "Register the redirect URI below under the Instagram business login settings",
+      "Store the Instagram app id and secret: switchboard vault set ig_app_id and switchboard vault set ig_app_secret",
+      "Register them: switchboard authconfig add meta-instagram --client-id-ref ig_app_id --client-secret-ref ig_app_secret",
+      "Connect: switchboard connect meta-instagram --account brand --scopes instagram_business_basic,instagram_business_content_publish"
+    ],
+    "redirect_uris": ["{loopback_redirect}"],
+    "notes": [
+      "Observed 2026-10-23 (Meta Instagram business login doc): authorize at https://www.instagram.com/oauth/authorize; the code is exchanged with POST https://api.instagram.com/oauth/access_token (client_id, client_secret, grant_type, redirect_uri, code) and the answer wraps the token in a data array; the short-lived token is traded at GET https://graph.instagram.com/access_token with grant_type=ig_exchange_token for a 60 day token, and refreshed at GET https://graph.instagram.com/refresh_access_token with grant_type=ig_refresh_token once it is at least 24 hours old and unexpired. Tokens not refreshed within 60 days expire. The old business_* scope names are deprecated since 2025-01-27.",
+      "Observed (Meta Instagram get-started doc): identity comes from GET https://graph.instagram.com/v26.0/me?fields=user_id,username, and the examples pass the token as the access_token query parameter, so this file injects the query parameter.",
+      "UNVERIFIED: the docs fetched do not state redirect URI rules (https, localhost). Meta apps may require https outside Development mode; use an https tunnel via switchboard authconfig add ... --redirect-uri if the console rejects the loopback URI.",
+      "Publishing limits are stated as 100 posts per 24 hours in one section of the content publishing doc and 50 in another; check content_publishing_limit before publishing (ADR section 8).",
+      "Images must be reachable at a public URL (JPEG) unless the app uses Facebook Login for Business with resumable upload; that is the media staging decision in ADR section 6.6, not part of connecting."
+    ]
+  },
+  "identity_probe": {
+    "method": "GET",
+    "url": "https://graph.instagram.com/v26.0/me",
+    "query": { "fields": "user_id,username" },
+    "id_path": "user_id",
+    "name_path": "username"
+  },
+  "auth": [
+    {
+      "id": "oauth2",
+      "mode": "oauth2",
+      "label": "Instagram business login",
+      "default": true,
+      "oauth2": {
+        "authorize_url": "https://www.instagram.com/oauth/authorize",
+        "token_url": "https://api.instagram.com/oauth/access_token",
+        "pkce": "unsupported",
+        "client_auth": "body",
+        "client_secret_at_exchange": "always",
+        "scope_separator": ",",
+        "default_scopes": ["instagram_business_basic"],
+        "scope_catalog": [
+          { "scope": "instagram_business_basic", "description": "Read the professional account profile" },
+          { "scope": "instagram_business_content_publish", "description": "Publish media" },
+          { "scope": "instagram_business_manage_comments", "description": "Read and manage comments" },
+          { "scope": "instagram_business_manage_messages", "description": "Read and send messages" }
+        ],
+        "token_response_path": "data.0",
+        "post_exchange": {
+          "method": "GET",
+          "url": "https://graph.instagram.com/access_token",
+          "params": {
+            "grant_type": "ig_exchange_token",
+            "client_secret": "{client_secret}",
+            "access_token": "{access_token}"
+          }
+        },
+        "redirect": "loopback",
+        "accept_json": true,
+        "refresh": {
+          "kind": "exchange",
+          "rotates": false,
+          "exchange": {
+            "method": "GET",
+            "url": "https://graph.instagram.com/refresh_access_token",
+            "params": {
+              "grant_type": "ig_refresh_token",
+              "access_token": "{access_token}"
+            }
+          }
+        }
+      },
+      "inject": { "in": "query", "name": "access_token", "template": "{token}" },
+      "fields": {
+        "auth_config_creation": [
+          { "name": "client_id", "label": "Instagram app ID", "required": true, "secret": false },
+          { "name": "client_secret", "label": "Instagram app secret", "required": true, "secret": true }
+        ],
+        "connected_account_initiation": []
+      }
+    }
+  ]
+}

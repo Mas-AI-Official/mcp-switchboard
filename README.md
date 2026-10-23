@@ -360,19 +360,31 @@ or base64url tokens next to the words key / token / secret) at any depth and rep
 `[redacted:<kind>]`; values under secret-looking key names are masked as before. Upstream error text is
 scrubbed the same way even when capture is off.
 
-### Connecting an OAuth provider (Phase 3)
+### Connecting a provider account
 
-For the five managed providers you don't paste a token — you authorize once and MCP Switchboard seals
-the result in the vault. Store the provider's client credentials, then run the loopback flow:
+How each provider is connected (authorize and token URLs, PKCE, client auth, scope separator, refresh rules,
+which hosts its credentials may reach, and what you must create in its console) is **data**:
+`src/connectors/providers/*.json`, validated against `src/connectors/schemas/provider.schema.json`. Register
+your own OAuth app once (secrets stay in the vault and are referenced, never copied), then connect:
 
 ```bash
-# one-time: store the OAuth app's client id/secret (names are a fixed convention)
-printf '%s' '<client-id>'     | node dist/cli.js vault set oauth_github_client_id
-printf '%s' '<client-secret>' | node dist/cli.js vault set oauth_github_client_secret
+# one-time: put the OAuth app's client id/secret in the vault, then register them by reference
+printf '%s' '<client-id>'     | node dist/cli.js vault set gh_client_id
+printf '%s' '<client-secret>' | node dist/cli.js vault set gh_client_secret
+node dist/cli.js authconfig add github --client-id-ref gh_client_id --client-secret-ref gh_client_secret
 
-node dist/cli.js catalog            # see provider status: ready / needs client id / connected
-node dist/cli.js connect github     # prints an authorize URL, waits on a local loopback callback
+node dist/cli.js providers show github        # what to create at the provider, redirect URIs, notes
+node dist/cli.js connect github               # prints an authorize URL, waits on the loopback callback
+node dist/cli.js connect github --auth pat --account ci --token-stdin   # or store a token you already hold
+node dist/cli.js accounts list                # several accounts per provider: status, identity, expiry
+node dist/cli.js accounts probe github/ci     # prove the credential is live
 ```
+
+The old convention (vault names `oauth_<provider>_client_id` / `_client_secret`) still works with no
+registration step, and an existing `oauth.json` is imported once as `default` accounts. A connect that is
+cancelled, expires after 10 minutes, is refused, or fails its identity probe stores nothing. Tokens are
+sealed with the vault key; an `invalid_grant` marks the account `EXPIRED` and the error names the exact
+reconnect command.
 
 Or click **Connect** in the dashboard's catalog card. The browser bounces through the provider and
 back to `127.0.0.1`, the token is sealed, and the row flips to **connected** — no token ever leaves
@@ -732,7 +744,10 @@ is verified end-to-end by a deterministic oracle: `npm run verify:oauth` (20/20)
 | `switchboard list` | Mount everything and print the governed tool list, then exit |
 | `switchboard doctor` | Check Node, config, transports, and that every secret resolves |
 | `switchboard catalog` | List the OAuth providers and their connection status |
-| `switchboard connect <provider>` | Authorize a provider locally (loopback OAuth → token sealed in the vault) |
+| `switchboard connect <provider>` | Connect an account: browser OAuth on the loopback callback, or a token / key you hold (`--account`, `--auth-config`, `--auth`, `--scopes`, `--token-ref`, `--token-stdin`, `--import`) |
+| `switchboard accounts list\|show\|default\|disable\|enable\|revoke\|probe` | Inspect and manage connected accounts (several per provider; revoke calls the provider when it supports that) |
+| `switchboard authconfig add\|list\|show\|rm` | Register the OAuth apps your connects use (client id and secret as vault references) |
+| `switchboard providers list\|show <slug>` | The provider definitions and what you must set up at each provider |
 | `switchboard toolkits sync\|stats` | Rebuild / inspect the browsable integration catalog (MCP Registry + APIs.guru) |
 | `switchboard local-llm [wire]` | Auto-detect an offline OpenAI-compatible LLM; `wire` writes it into the council |
 | `switchboard profile list\|show <name>\|use <name>\|clear` | Manage named, switchable views over your servers/tools |
@@ -776,9 +791,11 @@ tool-exposure modes, the encrypted vault, the approval gate, the audit log, the 
 one-command `install` into five clients. The full `find_tools → call_tool` round-trip works end-to-end
 through the governed path.
 
-- **Managed OAuth (Phase 3)** — local OAuth for **5 providers** (Google, GitHub, Slack, Notion, Linear)
-  via the catalog UI or `switchboard connect <provider>`; tokens are sealed in the same local vault as
-  BYO keys. Hand-rolled on Node `crypto` — no third-party auth service, zero native deps.
+- **Managed OAuth (Phase 3), now the connector core**: provider auth definitions are validated data
+  (13 bundled: Google, GitHub, Slack, Notion, Linear, Meta Facebook and Instagram, LinkedIn, TikTok, X,
+  ElevenLabs, Higgsfield, Buffer); connected accounts (several per provider) are sealed with the vault key,
+  refreshed single-flight and shown by `switchboard accounts`; connect through the catalog UI or
+  `switchboard connect <provider>`. Hand-rolled on Node `crypto`, with no third-party auth service and zero native deps.
 - **app2mcp (Phase 4)** — point `source: app2mcp` at an OpenAPI/Swagger spec and MCP Switchboard generates
   an in-process MCP server at mount, with verb→scope inference flowing into the **same** governance
   engine (a generated `deletepet` is denied under a `read` ceiling). A reference without a resolvable

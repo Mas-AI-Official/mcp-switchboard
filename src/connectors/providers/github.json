@@ -1,0 +1,79 @@
+{
+  "$schema": "../schemas/provider.schema.json",
+  "slug": "github",
+  "name": "GitHub",
+  "categories": ["developer"],
+  "api_hosts": ["api.github.com", "uploads.github.com"],
+  "docs_url": "https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps",
+  "api_headers": { "Accept": "application/vnd.github+json", "User-Agent": "mcp-switchboard" },
+  "owner_setup": {
+    "console_url": "https://github.com/settings/developers",
+    "steps": [
+      "Fine-grained token (simplest): github.com/settings/personal-access-tokens, create a token limited to the repositories and permissions the agents need, then run: switchboard connect github --auth pat --token-stdin",
+      "OAuth app (browser consent): github.com/settings/developers, New OAuth App, set the authorization callback URL to the redirect URI below",
+      "Store the OAuth app's client id and secret in the vault: switchboard vault set gh_client_id and switchboard vault set gh_client_secret",
+      "Register them: switchboard authconfig add github --client-id-ref gh_client_id --client-secret-ref gh_client_secret",
+      "Connect: switchboard connect github"
+    ],
+    "redirect_uris": ["{loopback_redirect}"],
+    "notes": [
+      "GitHub accepts a different loopback port than the one registered when the registered callback is a loopback address (docs: authorizing OAuth apps).",
+      "OAuth app tokens do not expire unless the app opts into expiring user tokens; then the access token lasts eight hours and the refresh token six months without use (same page).",
+      "GitHub answers token-exchange errors with HTTP 200 and an error field in the body; the engine reads the body, never the status alone."
+    ]
+  },
+  "identity_probe": {
+    "method": "GET",
+    "url": "https://api.github.com/user",
+    "id_path": "id",
+    "name_path": "login",
+    "avatar_path": "avatar_url",
+    "scopes_header": "x-oauth-scopes"
+  },
+  "auth": [
+    {
+      "id": "pat",
+      "mode": "bearer",
+      "label": "Personal access token",
+      "default": true,
+      "inject": { "in": "header", "name": "Authorization", "template": "Bearer {token}" },
+      "fields": {
+        "auth_config_creation": [],
+        "connected_account_initiation": [{ "name": "token", "label": "Personal access token", "required": true, "secret": true }]
+      }
+    },
+    {
+      "id": "oauth2",
+      "mode": "oauth2",
+      "label": "OAuth app",
+      "oauth2": {
+        "authorize_url": "https://github.com/login/oauth/authorize",
+        "token_url": "https://github.com/login/oauth/access_token",
+        "pkce": "supported",
+        "client_auth": "body",
+        "client_secret_at_exchange": "always",
+        "scope_separator": " ",
+        "default_scopes": ["repo", "read:user"],
+        "scope_catalog": [
+          { "scope": "repo", "description": "Full control of private and public repositories" },
+          { "scope": "read:user", "description": "Read profile data" },
+          { "scope": "user:email", "description": "Read email addresses" },
+          { "scope": "read:org", "description": "Read organization membership" },
+          { "scope": "workflow", "description": "Update GitHub Actions workflow files" },
+          { "scope": "gist", "description": "Create gists" }
+        ],
+        "redirect": "loopback",
+        "accept_json": true,
+        "refresh": { "kind": "refresh_token", "rotates": true }
+      },
+      "inject": { "in": "header", "name": "Authorization", "template": "Bearer {token}" },
+      "fields": {
+        "auth_config_creation": [
+          { "name": "client_id", "label": "Client ID", "required": true, "secret": false },
+          { "name": "client_secret", "label": "Client secret", "required": true, "secret": true }
+        ],
+        "connected_account_initiation": []
+      }
+    }
+  ]
+}
