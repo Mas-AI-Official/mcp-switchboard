@@ -10,19 +10,56 @@
  * one applies so callers can report it honestly.
  *
  * No secret ever travels through argv or the environment: the payload goes over stdin as base64.
+ *
+ * PowerShell is launched by ABSOLUTE path, never by bare name. Windows resolves a bare "powershell.exe"
+ * against the launch cwd first (unless NoDefaultCurrentDirectoryInExePath is set, which not every MCP
+ * client does), and a stdio server runs with cwd = the opened project. A project that shipped its own
+ * powershell.exe would otherwise receive the DPAPI blob (read) or the plaintext token (write) on stdin and
+ * could answer with a token of its choosing. The child also gets cwd System32 and the same variable.
  */
 
 import { execFileSync } from "node:child_process";
+import { statSync } from "node:fs";
+import { win32 } from "node:path";
 
 const ENTROPY = "mcp-switchboard/oscrypt/v1";
 const TIMEOUT_MS = 30_000;
 
+/**
+ * The system Windows PowerShell and the directory to run it in, from SystemRoot (windir as fallback).
+ * Throws, never falls back to a bare-name launch, when SystemRoot is not a local absolute path or the
+ * executable is not there.
+ */
+export function systemPowershell(): { exe: string; cwd: string } {
+  const sysRoot = process.env.SystemRoot || process.env.windir || "C:\\Windows";
+  if (!/^[A-Za-z]:[\\/]/.test(sysRoot)) throw new Error("SystemRoot is not a local absolute path; refusing to launch PowerShell");
+  const cwd = win32.join(sysRoot, "System32");
+  const exe = win32.join(cwd, "WindowsPowerShell", "v1.0", "powershell.exe");
+  let isFile = false;
+  try {
+    isFile = statSync(exe).isFile();
+  } catch {
+    /* reported below */
+  }
+  if (!isFile) throw new Error(`Windows PowerShell not found at ${exe}`);
+  return { exe, cwd };
+}
+
+/** The current environment with the launch-cwd executable search switched off (any spelling of the name replaced). */
+export function hardenedEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(process.env)) if (k.toUpperCase() !== "NODEFAULTCURRENTDIRECTORYINEXEPATH") env[k] = v;
+  env.NoDefaultCurrentDirectoryInExePath = "1";
+  return env;
+}
+
 function powershell(script: string, stdin: string): string {
+  const { exe, cwd } = systemPowershell();
   return execFileSync(
-    "powershell.exe",
+    exe,
     ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
     // stderr is captured (not inherited): a stdio MCP process must never write PowerShell noise.
-    { input: stdin, encoding: "utf8", windowsHide: true, timeout: TIMEOUT_MS, maxBuffer: 1 << 20, stdio: ["pipe", "pipe", "pipe"] },
+    { input: stdin, encoding: "utf8", windowsHide: true, timeout: TIMEOUT_MS, maxBuffer: 1 << 20, stdio: ["pipe", "pipe", "pipe"], cwd, env: hardenedEnv() },
   ).trim();
 }
 

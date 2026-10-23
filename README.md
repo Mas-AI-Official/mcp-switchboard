@@ -218,6 +218,52 @@ claude mcp add switchboard -- node /absolute/path/to/switchboard/dist/cli.js ser
 #   http://127.0.0.1:8088/mcp
 ```
 
+### Bridge: one stdio command for every client
+
+Every MCP client can launch a stdio command. `switchboard bridge --client <id>` is that command. It relays
+the client's JSON-RPC over stdio to the one shared HTTP gateway, authenticated as that client. One warm
+gateway (one set of upstream processes) then serves Claude Code, Claude Desktop, Codex, Gemini and your own
+agents, each with its own identity, and **the bridge keeps tokens out of client config files**: the config
+only names the client id, never a key.
+
+```bash
+# Claude Code
+claude mcp add switchboard -- node /absolute/path/to/switchboard/dist/cli.js bridge --client claude-code
+```
+
+```toml
+# Codex: ~/.codex/config.toml
+[mcp_servers.switchboard]
+command = "node"
+args = ["/absolute/path/to/switchboard/dist/cli.js", "bridge", "--client", "codex"]
+```
+
+Claude Desktop, in `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "switchboard": {
+      "command": "node",
+      "args": ["C:\\path\\to\\switchboard\\dist\\cli.js", "bridge", "--client", "claude-desktop"]
+    }
+  }
+}
+```
+
+The gateway must be running (`switchboard serve`); the bridge talks to `http://127.0.0.1:8088/mcp` unless you
+pass `--url`. The bridge finds the client's key in this order:
+
+1. the `SWITCHBOARD_KEY` environment variable,
+2. `--key-file <path>`, a plain text file holding the token,
+3. the client's stored key, `~/.switchboard/clients/<id>.key`, wrapped for your OS user (DPAPI on Windows,
+   mode 0600 elsewhere) and written by `switchboard client add <id>`. If your build has no `client add` yet,
+   issue a key with `switchboard apikey new <name>` and hand it over with `--key-file`.
+
+Nothing but JSON-RPC goes to stdout; diagnostics go to stderr. A wrong key or a gateway that is not running
+comes back to the client as a JSON-RPC error that says what to fix, never as a crash, and the bridge exits
+cleanly when the client closes stdin. Behaviour is pinned by `npm run verify:bridge`.
+
 ### Storing a secret (BYO keys)
 
 Secrets never appear in your config — the config holds only `${vault:name}` **references**.
@@ -681,6 +727,7 @@ is verified end-to-end by a deterministic oracle: `npm run verify:oauth` (20/20)
 | `switchboard dashboard` | Run only the HTTP endpoint + web console |
 | `switchboard dashboard login` | Mint a one-time owner login code (after an owner-presence check) and open the dashboard signed in; `--presence` takes auto, hello, tty or none; `--no-open` only prints the URL |
 | `switchboard install <client>` | Wire MCP Switchboard into a client (`claude-desktop`, `claude-code`, `cursor`, `vscode`, `codex`) — `--global` / `--dir` / `--name` / `--print` |
+| `switchboard bridge --client <id>` | Relay a client's stdio to the shared HTTP gateway as that client (`--url`, `--key-file`) |
 | `switchboard expose` | Open an HTTPS tunnel to the local endpoint (for claude.ai web / ChatGPT / remote clients) |
 | `switchboard list` | Mount everything and print the governed tool list, then exit |
 | `switchboard doctor` | Check Node, config, transports, and that every secret resolves |

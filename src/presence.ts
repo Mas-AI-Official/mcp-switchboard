@@ -9,6 +9,7 @@
  */
 
 import { execFile } from "node:child_process";
+import { hardenedEnv, systemPowershell } from "./oscrypt.js";
 import { randomBytes } from "node:crypto";
 import { createInterface } from "node:readline";
 
@@ -25,10 +26,19 @@ const HELLO_PREAMBLE =
 
 function runPowershell(script: string, timeoutMs: number): Promise<string> {
   return new Promise((resolve) => {
+    // Absolute System32 path and hardened env, as in oscrypt.ts: a bare "powershell.exe" would resolve
+    // against the launch cwd first, letting a planted exe answer "Verified" for the owner.
+    let ps: { exe: string; cwd: string };
+    try {
+      ps = systemPowershell();
+    } catch (err) {
+      resolve(`ERROR:${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
     execFile(
-      "powershell.exe",
+      ps.exe,
       ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
-      { windowsHide: false, timeout: timeoutMs },
+      { windowsHide: false, timeout: timeoutMs, cwd: ps.cwd, env: hardenedEnv() },
       (err, stdout) => resolve(err ? `ERROR:${err.message}` : String(stdout).trim()),
     );
   });
