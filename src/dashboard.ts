@@ -19,6 +19,8 @@ import { fileURLToPath } from "node:url";
 import express, { type Request, type Response } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { mountMediaRoutes } from "./connectors/mediastage.js";
+import { AdminError, ConnectorAdmin, type ConnectBody } from "./connectors/admin.js";
+import { isConnectorError } from "./connectors/errors.js";
 import type { Gateway } from "./gateway.js";
 import { VERSION } from "./gateway.js";
 import type { SwitchboardConfig, SettingsConfig, ServerConfig, CouncilConfig } from "./types.js";
@@ -953,6 +955,66 @@ export async function startDashboard(
       res.status(400).type("html").send(callbackPage(msg, false, brand));
     }
   });
+
+  // ====================================================================
+  // Connectors admin: providers (curated and seeded), connect, accounts, toolkit on/off, coverage. Registered
+  // after the owner gate like every /api route, so each needs the owner session and each mutation the CSRF
+  // header. The answers are metadata: no credential is ever returned (connectors/admin.ts).
+  // ====================================================================
+  const admin = new ConnectorAdmin(gateway.oauth.connectors, {
+    config: () => cfg,
+    configPath: () => configPath,
+    mount: (s) => gateway.registry.mount(s),
+    unmount: (id) => gateway.registry.unmount(id),
+    redirectUri: () => redirectUri,
+  });
+  const adminRoute =
+    (fn: (req: Request) => unknown | Promise<unknown>) =>
+    async (req: Request, res: Response): Promise<void> => {
+      try {
+        res.json(await fn(req));
+      } catch (err) {
+        if (err instanceof AdminError) res.status(err.status).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
+        else if (isConnectorError(err)) res.status(400).json({ error: err.message, code: err.code });
+        else {
+          log.error(`connectors admin: ${err instanceof Error ? err.message : String(err)}`);
+          res.status(500).json({ error: "internal error", code: "SB_INTERNAL" });
+        }
+      }
+    };
+  const qstr = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
+  const qnum = (v: unknown): number | undefined => (typeof v === "string" && /^\d{1,6}$/.test(v) ? Number(v) : undefined);
+
+  app.get(
+    "/api/connectors/providers",
+    adminRoute((req) =>
+      admin.listProviders({
+        ...(qstr(req.query.q) !== undefined ? { q: qstr(req.query.q)! } : {}),
+        ...(qstr(req.query.auth) ? { auth: qstr(req.query.auth)! } : {}),
+        ...(qstr(req.query.source) ? { source: qstr(req.query.source)! } : {}),
+        ...(qstr(req.query.connectable) === "1" || qstr(req.query.connectable) === "true" ? { connectable: true } : {}),
+        ...(qnum(req.query.offset) !== undefined ? { offset: qnum(req.query.offset)! } : {}),
+        ...(qnum(req.query.limit) !== undefined ? { limit: qnum(req.query.limit)! } : {}),
+      }),
+    ),
+  );
+  app.get("/api/connectors/providers/:slug", adminRoute((req) => admin.providerDetail(String(req.params.slug))));
+  app.post(
+    "/api/connectors/providers/:slug/connect",
+    adminRoute((req) => admin.connect(String(req.params.slug), (typeof req.body === "object" && req.body !== null && !Array.isArray(req.body) ? req.body : {}) as ConnectBody)),
+  );
+  app.get("/api/connectors/accounts", adminRoute((req) => ({ accounts: admin.accounts(qstr(req.query.provider) ? { provider: qstr(req.query.provider)! } : {}) })));
+  app.post("/api/connectors/accounts/:id/probe", adminRoute((req) => admin.probe(String(req.params.id))));
+  app.get("/api/connectors/toolkits", adminRoute(() => ({ toolkits: admin.toolkits() })));
+  app.post(
+    "/api/connectors/toolkits/:slug/enable",
+    adminRoute((req) => {
+      const account = typeof req.body === "object" && req.body !== null ? (req.body as { account?: unknown }).account : undefined;
+      return admin.enableToolkit(String(req.params.slug), typeof account === "string" ? { account } : {});
+    }),
+  );
+  app.post("/api/connectors/toolkits/:slug/disable", adminRoute((req) => admin.disableToolkit(String(req.params.slug))));
+  app.get("/api/connectors/coverage", adminRoute(() => admin.coverage()));
 
   app.post("/api/servers/:id/toggle", async (req: Request, res: Response) => {
     const id = req.params.id;

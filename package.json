@@ -49,7 +49,8 @@
     "server.json",
     "switchboard.config.example.yaml",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "NOTICE"
   ],
   "engines": {
     "node": ">=18.18.0"
@@ -98,7 +99,9 @@
     "verify:oscrypt": "node scripts/verify-oscrypt.mjs",
     "verify:connectors-core": "node scripts/verify-connectors-core.mjs",
     "verify:connectors-exec": "node scripts/verify-connectors-exec.mjs",
-    "verify": "npm run build && npm run security:audit && npm run verify:oauth && npm run verify:webhook && npm run verify:triggers && npm run verify:modifiers && npm run verify:httptool && npm run verify:auth && npm run verify:council && npm run verify:catalog && npm run verify:registry && npm run verify:search && npm run verify:install && npm run verify:local-llm && npm run verify:dashboard && npm run verify:profiles && npm run verify:limits && npm run verify:breaker && npm run verify:config && npm run verify:audit && npm run verify:resources-prompts && npm run verify:health && npm run verify:retry && npm run verify:doctor && npm run verify:vault && npm run verify:router && npm run verify:openapi && npm run verify:expose && npm run verify:http-security && npm run verify:policy-hardening && npm run verify:storage && npm run verify:audit-chain && npm run verify:netguard && npm run verify:dos-hardening && npm run verify:approval-gate && npm run verify:bridge && npm run verify:oscrypt && npm run verify:connectors-core && npm run verify:connectors-exec",
+    "verify:connectors-seed": "node scripts/verify-connectors-seed.mjs",
+    "seed:activepieces": "node scripts/extract-activepieces-auth.mjs --out src/connectors/providers/seed --checkout",
+    "verify": "npm run build && npm run security:audit && npm run verify:oauth && npm run verify:webhook && npm run verify:triggers && npm run verify:modifiers && npm run verify:httptool && npm run verify:auth && npm run verify:council && npm run verify:catalog && npm run verify:registry && npm run verify:search && npm run verify:install && npm run verify:local-llm && npm run verify:dashboard && npm run verify:profiles && npm run verify:limits && npm run verify:breaker && npm run verify:config && npm run verify:audit && npm run verify:resources-prompts && npm run verify:health && npm run verify:retry && npm run verify:doctor && npm run verify:vault && npm run verify:router && npm run verify:openapi && npm run verify:expose && npm run verify:http-security && npm run verify:policy-hardening && npm run verify:storage && npm run verify:audit-chain && npm run verify:netguard && npm run verify:dos-hardening && npm run verify:approval-gate && npm run verify:bridge && npm run verify:oscrypt && npm run verify:connectors-core && npm run verify:connectors-exec && npm run verify:connectors-seed",
     "prepublishOnly": "npm run verify"
   },
   "dependencies": {

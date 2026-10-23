@@ -1,9 +1,11 @@
-# Connectors: provider auth, accounts, toolkits, execution (phases P1 and P2)
+# Connectors: provider auth, accounts, toolkits, execution, seeds, dashboard (phases P1, P2, P3-seed)
 
 Status: implemented on `vnext/connectors`. Architecture and phases: the local-Composio ADR (sections 6 to 9).
-This page records what P1 (auth, accounts, connect flows) and P2 (execution, importers, exposure, files) built
-and where it lives. Principals, approvals and risk tiers (the parallel wave), dashboard pages and the daily
-canary are not built here.
+This page records what P1 (auth, accounts, connect flows), P2 (execution, importers, exposure, files) and the
+seed and dashboard step (seeded provider breadth, the Connectors page and its admin API) built and where it lives.
+Principals, approvals and risk tiers (the parallel wave) and the daily canary are not built here. The architecture
+in one page, for readers outside the project: [LOCAL_TOOLKITS.md](LOCAL_TOOLKITS.md); per-platform setup:
+[../connectors/OWNER_SETUP.md](../connectors/OWNER_SETUP.md).
 
 ## What exists, P1
 
@@ -37,6 +39,17 @@ canary are not built here.
 | Coverage | `src/connectors/coverage.ts` | Reads the R1 checklists (12 CSVs, 1,740 rows, 31 named deprecated). `mapped` means a reviewed endpoint mapping; only an account-stamped `live_verified` line in `connectors/verification.ndjson` makes a row `working`. |
 | CLI | `src/connectors/cli-kit.ts` | `toolkits list\|show\|enable\|disable\|sync <target>`, `link`, `unlink`, `links`, `coverage [toolkit] [--import dir] [--mark id --state s --account a] [--json]`. `toolkits sync` with no argument is the older browse catalog sync and is unchanged. |
 
+## What exists, seeds and the Connectors page
+
+| Piece | File | Notes |
+|---|---|---|
+| Seed definitions | `src/connectors/providers/seed/*.json`, `_manifest.json` | 594 candidate ProviderDefs derived from the MIT-licensed Activepieces community pieces (commit `6f4be340d7c4`). Auth definitions by mode: api_key 379, basic 12, custom 144, oauth2 90, oauth2_cc 3 (computed by the extractor into `_manifest.json`). Each is a ProviderDef plus `source: { activepieces_commit, piece }` and `verification: "unverified_seed"`. Licence and copyright: `NOTICE`. |
+| Extractor | `scripts/extract-activepieces-auth.mjs` | Parses the pieces' TypeScript with the compiler API (no program, no type checker, no module loading), so no piece code runs; never follows an import out of a piece's own `src`; copies URLs, scope names, field names and a product name only; anything it cannot resolve statically is left out and counted in the manifest. Deterministic. Regenerate: `npm run seed:activepieces -- <sparse checkout dir>`. |
+| Registry rules | `src/connectors/providers.ts` | `get` and `has` resolve curated first, then a seed; `list()` stays curated-only so nothing that enumerates providers changed; `listAll()`, `listSeeds()`, `isSeed()` and `shadowedSeeds()` serve the dashboard and `providers list --seeds`. Seeds are read lazily, one file per `get`. A seed whose slug is a curated slug or toolkit is shadowed (curated wins); an owner's `providers/<slug>.json` replaces a seed. A seed with a probe, toolkits, a broad wildcard host or no `unverified_seed` mark is refused. A curated file may not declare `source` or `verification`. |
+| Never working | `accounts.ts`, `coverage.ts`, `admin.ts` | An account connected through a seed carries `provider_verification: "unverified_seed"`. `coverage --mark live_verified` refuses an account of a seeded provider and a ledger line stamped with one is ignored when counting. The dashboard reports a seed as `unverified_seed` whatever a ledger says. |
+| Admin API | `src/connectors/admin.ts`, routes in `src/dashboard.ts` | Behind the owner session and CSRF like every `/api` route: `GET /api/connectors/providers` (search `q`, filters `auth`, `source`, `connectable`, paging `offset` and `limit`, facet counts), `GET /api/connectors/providers/:slug`, `POST /api/connectors/providers/:slug/connect` (answers `redirect`, `connected`, `needs_setup` with the owner steps, or `needs_input` with the fields), `GET /api/connectors/accounts`, `POST /api/connectors/accounts/:id/probe`, `GET /api/connectors/toolkits`, `POST /api/connectors/toolkits/:slug/enable|disable` (live mount and unmount), `GET /api/connectors/coverage`. Metadata only: no response carries a credential. |
+| Connectors page | `public/app.js`, `public/app.css` | `#/connectors`: search, curated or seed, authentication mode, toolkits available, Connect (consent URL, owner steps when no app is registered, a pasted key), connected accounts with status and last probe, Enable and Disable per toolkit, coverage state. Dependency free. |
+
 ## Behaviour worth knowing
 
 - Refresh is single flight per account, proactive (a margin before expiry, never more than half the token's
@@ -69,7 +82,8 @@ node dist/cli.js toolkits sync google            # fetch the YouTube, Gmail and 
 node dist/cli.js toolkits sync all --check       # exit 1 when a vendor spec drifted since the last sync
 node dist/cli.js toolkits enable gmail           # adds a `source: connector` server to the config
 node dist/cli.js link claude-code gmail --max-scope write --account google/me
-node dist/cli.js coverage --import D:/agents/wiki/reference/mcp-switchboard-rea/checklists
+node dist/cli.js coverage --import <directory of checklist CSVs>
+node dist/cli.js providers list --seeds        # curated and seeded providers; a seed is an unverified candidate
 ```
 
 `settings.connectors` (all optional): `upload_allowlist`, `upload_deny_segments`, `max_upload_bytes`,
@@ -78,10 +92,11 @@ node dist/cli.js coverage --import D:/agents/wiki/reference/mcp-switchboard-rea/
 
 ## Not here
 
-Dashboard pages for accounts, toolkits and links; the principals, approval tiers and per-client risk ceilings of
-the parallel wave; daily canary probes and the `live_verified` ledger writes they would make; the S3 media
+A dashboard page for client links (accounts, toolkit on/off and coverage have one: the Connectors page); the
+principals, approval tiers and per-client risk ceilings of the parallel wave; daily canary probes and the `live_verified` ledger writes they would make; the S3 media
 backend; OAuth 1.0a and `custom` auth modes (the schema names them; the engine refuses them); provider breadth
-beyond these 13 and toolkit breadth beyond the six overlays.
+beyond the 13 curated definitions and the seeds (a seed is not a working provider) and toolkit breadth beyond the
+six overlays.
 
 Oracles: `npm run verify:connectors-core` (P1) and `npm run verify:connectors-exec` (P2, offline, fixture specs
 and a loopback mock provider). `node scripts/live-sync-check.mjs` measures the importers against the real public

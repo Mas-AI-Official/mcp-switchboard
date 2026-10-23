@@ -149,6 +149,18 @@ export interface Provenance {
   attribution?: string;
 }
 
+/** Where a seed's facts came from: an Activepieces community piece at a pinned commit (MIT; see NOTICE). */
+export interface SeedSource {
+  activepieces_commit: string;
+  piece: string;
+}
+
+/**
+ * A seed is a candidate definition derived from another project's published auth settings. It enables Connect and
+ * never counts as working: it is not probed, not verified and carries no toolkits.
+ */
+export type ProviderVerification = "unverified_seed";
+
 export interface ProviderDef {
   slug: string;
   name: string;
@@ -165,6 +177,10 @@ export interface ProviderDef {
   identity_probe?: IdentityProbeDef;
   auth: AuthDef[];
   provenance?: Provenance;
+  /** Seeds only (src/connectors/providers/seed/). */
+  source?: SeedSource;
+  /** Seeds only. */
+  verification?: ProviderVerification;
 }
 
 // ── owner records ─────────────────────────────────────────────────────────────────────────────────
@@ -235,6 +251,8 @@ export interface ConnectedAccount {
   token?: SealedSecret;
   /** How the account came to exist. */
   source: "connect" | "import" | "legacy";
+  /** Set when the account belongs to a seeded provider: it is never counted as working. */
+  provider_verification?: ProviderVerification;
 }
 
 /** A connected account without its sealed token: the only form that leaves the store. */

@@ -15,7 +15,9 @@
  * Only `live_verified` ever prints as "working". The state of a row is its base state from the import,
  * overridden by the newest line for it in the append-only `connectors/verification.ndjson`. A
  * `live_verified` line that has no account id or no date is ignored when counting, so a hand edit cannot
- * inflate the number, and a deprecated row cannot be promoted.
+ * inflate the number, and a deprecated row cannot be promoted. A line stamped with an account of a SEEDED
+ * provider (an unverified, machine-derived definition) is refused on write and ignored when counting: a seed
+ * enables Connect and can never be working.
  *
  * The rows themselves are a local snapshot (`connectors/coverage-rows.json`) read from the checklist CSVs,
  * which carry identifiers only; they are not committed.
@@ -134,6 +136,8 @@ export class Coverage {
   constructor(
     private readonly home: string,
     private readonly now: () => number = Date.now,
+    /** True for an account that belongs to a seeded provider. Its `live_verified` lines never count. */
+    private readonly isSeedAccount: (accountId: string) => boolean = () => false,
   ) {
     this.rowsFile = join(home, "connectors", "coverage-rows.json");
     this.ledgerFile = join(home, "connectors", "verification.ndjson");
@@ -216,6 +220,7 @@ export class Coverage {
     const row = this.rows().find((r) => r.slug.toLowerCase() === id.toLowerCase());
     if (!row) throw new Error(`no checklist row '${id}': run \`switchboard coverage import\` first, or check the name`);
     if (state === "live_verified" && !/^ca_[A-Za-z0-9]+$/.test(opts.account ?? "")) throw new Error("live_verified needs --account <ca_...>: a row counts as working only with the account that proved it");
+    if (state === "live_verified" && this.isSeedAccount(opts.account!)) throw new Error(`account ${opts.account} belongs to a seeded provider: a seed is an unverified definition and can never prove a row live. Curate the provider first (write its own definition), then reconnect and probe.`);
     if (row.deprecated && state !== "deprecated") throw new Error(`'${row.slug}' is deprecated and cannot be marked ${state}`);
     const line: LedgerLine = { ts: new Date(this.now()).toISOString(), id: row.slug, toolkit: row.toolkit, state, ...(opts.account ? { account: opts.account } : {}), ...(opts.note ? { note: opts.note.slice(0, 200) } : {}) };
     mkdirSync(join(this.home, "connectors"), { recursive: true });
@@ -230,7 +235,7 @@ export class Coverage {
     for (const l of this.ledger()) {
       const key = String(l.id).toLowerCase();
       if (!(VERIFICATION_STATES as readonly string[]).includes(l.state)) continue;
-      if (l.state === "live_verified" && (!l.account || !l.ts || Number.isNaN(Date.parse(l.ts)))) {
+      if (l.state === "live_verified" && (!l.account || !l.ts || Number.isNaN(Date.parse(l.ts)) || this.isSeedAccount(l.account))) {
         ignored.push(l.id);
         continue;
       }
@@ -305,6 +310,6 @@ export function formatReport(r: CoverageReport): string {
     `working = rows proven live by an owner-run probe (live_verified): ${r.total.working} of ${r.total.addressable} addressable rows.`,
     "Registered or mapped rows are not working rows. mock_tested means a mock passed, not the real provider.",
   ];
-  if (r.ignored_lines.length) tail.push(`ignored ${r.ignored_lines.length} live_verified line(s) with no account or no date: ${r.ignored_lines.slice(0, 5).join(", ")}`);
+  if (r.ignored_lines.length) tail.push(`ignored ${r.ignored_lines.length} live_verified line(s) with no account, no date, or an account of a seeded provider: ${r.ignored_lines.slice(0, 5).join(", ")}`);
   return [...lines, ...tail].join("\n");
 }

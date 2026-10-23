@@ -765,6 +765,8 @@ export class AccountStore {
         ...(args.probed ? { last_probe_at: iso(now) } : {}),
         token: this.sealPayload(args.payload),
         source: args.source,
+        // An account of a seeded provider is never counted as working, however it was connected.
+        ...(this.ctx.providers.isSeed(args.provider) ? { provider_verification: "unverified_seed" as const } : {}),
       };
       result = rec;
       const defaults = { ...cur.defaults };

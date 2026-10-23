@@ -1,12 +1,18 @@
 /**
  * ProviderDef registry (ADR local-composio, section 6.1): provider auth definitions as validated data.
  *
- * Two sources, in this order:
+ * Three sources, in this order:
  *   1. the bundled definitions, `src/connectors/providers/*.json` (copied to `dist/connectors/providers/`
  *      by the build). They cannot be overridden: a definition decides which host receives a client
  *      secret, so the files that ship with the package are the only ones allowed to claim a shipped slug.
  *   2. the owner's own definitions in `<SWITCHBOARD_HOME>/providers/*.json`, for a provider the package does
  *      not know. A slug that collides with a bundled one is refused and reported.
+ *   3. the SEEDS, `providers/seed/*.json`: candidate definitions derived from another project's published
+ *      auth settings (scripts/extract-activepieces-auth.mjs). A seed enables Connect and nothing more: it is
+ *      never probed, never verified, never counted as working. Curated wins: a seed whose slug is a curated
+ *      slug or toolkit is shadowed and never returned. Seeds are read lazily (one file per `get`), and
+ *      `list()` stays curated-only, so everything that enumerates providers is unchanged; the dashboard
+ *      asks for `listAll()`.
  *
  * Every file is checked against `schemas/provider.schema.json` (Ajv) and then against the rules a JSON
  * Schema cannot express (https URLs, host locks, template placeholders). A file that fails is left out
@@ -34,6 +40,13 @@ function bundledCandidates(sub: string): string[] {
 export function bundledProviderDir(): string {
   return bundledCandidates("providers").find((d) => existsSync(d)) ?? bundledCandidates("providers")[0]!;
 }
+
+/** The bundled seed directory: `providers/seed/` beside the curated definitions. */
+export function bundledSeedDir(): string {
+  return join(bundledProviderDir(), "seed");
+}
+
+const SLUG_RE = /^[a-z][a-z0-9-]{0,31}$/;
 
 function schemaPath(): string {
   const found = bundledCandidates("schemas").map((d) => join(d, "provider.schema.json")).find((f) => existsSync(f));
@@ -145,6 +158,23 @@ export function validateProviderDef(raw: unknown): string[] {
   return semanticProblems(raw as ProviderDef);
 }
 
+/**
+ * Rules a seed must meet beyond the schema. A seed is shipped data derived from another project's code, so it
+ * is held to less trust: no probe (only a curated definition can prove an account real), no toolkits (curated
+ * definitions own the toolkit names), and no wildcard host broader than a registrable-looking domain.
+ */
+export function seedProblems(def: ProviderDef): string[] {
+  const problems: string[] = [];
+  if (def.verification !== "unverified_seed") problems.push("a seed must declare verification: unverified_seed");
+  if (!def.source) problems.push("a seed must declare its source (activepieces_commit and piece)");
+  if (def.toolkits) problems.push("a seed must not declare toolkits: only curated definitions own toolkit names");
+  if (def.identity_probe) problems.push("a seed must not declare an identity probe: only a curated definition can prove an account is real");
+  for (const host of def.api_hosts) {
+    if (host.startsWith("*.") && host.slice(2).split(".").length < 2) problems.push(`api_hosts entry '${host}' is too broad: a wildcard needs at least two labels after *.`);
+  }
+  return problems;
+}
+
 export interface ProviderIssue {
   file: string;
   problems: string[];
@@ -155,17 +185,27 @@ export interface ProviderLoadOptions {
   home: string;
   /** Replace the bundled directory (tests only). */
   bundledDir?: string;
+  /** Replace the seed directory (tests only); `false` turns seeds off. Default: `seed/` beside the bundled directory. */
+  seedDir?: string | false;
 }
 
 export class ProviderRegistry {
   private readonly byslug = new Map<string, ProviderDef>();
   private readonly bundledSlugs = new Set<string>();
+  private readonly seedCache = new Map<string, ProviderDef | null>();
+  private readonly shadowedBy = new Map<string, string>();
+  private seedDir: string | undefined;
+  private seedNameCache: string[] | undefined;
   readonly issues: ProviderIssue[] = [];
+  /** Problems found in seed files when they were first read (a bad seed is left out, never fatal). */
+  readonly seedIssues: ProviderIssue[] = [];
 
   static load(opts: ProviderLoadOptions): ProviderRegistry {
     const reg = new ProviderRegistry();
-    reg.readDir(opts.bundledDir ?? bundledProviderDir(), true);
+    const bundled = opts.bundledDir ?? bundledProviderDir();
+    reg.readDir(bundled, true);
     reg.readDir(join(opts.home, "providers"), false);
+    reg.seedDir = opts.seedDir === false ? undefined : (opts.seedDir ?? join(bundled, "seed"));
     return reg;
   }
 
@@ -187,6 +227,10 @@ export class ProviderRegistry {
         continue;
       }
       const def = raw as ProviderDef;
+      if (def.source !== undefined || def.verification !== undefined) {
+        this.issues.push({ file, problems: ["only a seed (providers/seed/) may declare 'source' or 'verification'"] });
+        continue;
+      }
       if (name !== `${def.slug}.json`) {
         this.issues.push({ file, problems: [`file name must be ${def.slug}.json to match its slug`] });
         continue;
@@ -203,21 +247,108 @@ export class ProviderRegistry {
     }
   }
 
+  /** A curated definition, else the seed with that slug (a seed a curated slug or toolkit shadows is never returned). */
   get(slug: string): ProviderDef | undefined {
-    return this.byslug.get(slug);
+    return this.byslug.get(slug) ?? this.seed(slug);
   }
 
   has(slug: string): boolean {
-    return this.byslug.has(slug);
+    return this.get(slug) !== undefined;
   }
 
-  /** Slugs in load order (bundled sorted by file name, then the owner's). */
+  /** Curated slugs in load order (bundled sorted by file name, then the owner's). Seeds are not listed here. */
   slugs(): string[] {
     return [...this.byslug.keys()];
   }
 
+  /** The curated definitions. Seeds are NOT included: use `listAll()` or `listSeeds()`. */
   list(): ProviderDef[] {
     return [...this.byslug.values()];
+  }
+
+  // ── seeds ──────────────────────────────────────────────────────────────────────────────────────
+
+  /** The curated provider that claims `slug` as its own slug or as one of its toolkits, if any. */
+  private claimedBy(slug: string): string | undefined {
+    if (this.byslug.has(slug)) return slug;
+    for (const p of this.byslug.values()) if ((p.toolkits ?? [p.slug]).includes(slug)) return p.slug;
+    return undefined;
+  }
+
+  private seed(slug: string): ProviderDef | undefined {
+    if (!this.seedDir || !SLUG_RE.test(slug)) return undefined;
+    const cached = this.seedCache.get(slug);
+    if (cached !== undefined) return cached ?? undefined;
+    const file = join(this.seedDir, `${slug}.json`);
+    let result: ProviderDef | null = null;
+    if (existsSync(file)) {
+      let raw: unknown;
+      try {
+        raw = JSON.parse(readFileSync(file, "utf8"));
+      } catch (err) {
+        this.seedIssues.push({ file, problems: [`not valid JSON: ${err instanceof Error ? err.message : String(err)}`] });
+        raw = undefined;
+      }
+      if (raw !== undefined) {
+        const problems = validateProviderDef(raw);
+        if (!problems.length) problems.push(...seedProblems(raw as ProviderDef));
+        if (!problems.length && (raw as ProviderDef).slug !== slug) problems.push(`file name must be ${(raw as ProviderDef).slug}.json to match its slug`);
+        if (problems.length) this.seedIssues.push({ file, problems });
+        else {
+          const by = this.claimedBy(slug);
+          if (by) this.shadowedBy.set(slug, by);
+          else result = raw as ProviderDef;
+        }
+      }
+    }
+    this.seedCache.set(slug, result);
+    return result ?? undefined;
+  }
+
+  /** Slugs of the seed files on disk (the `_manifest.json` and any non-slug name are not seeds). */
+  seedSlugs(): string[] {
+    if (!this.seedNameCache) {
+      this.seedNameCache = [];
+      if (this.seedDir && existsSync(this.seedDir)) {
+        for (const n of readdirSync(this.seedDir).sort()) {
+          if (!n.endsWith(".json") || n.startsWith("_")) continue;
+          const slug = n.slice(0, -5);
+          if (SLUG_RE.test(slug)) this.seedNameCache.push(slug);
+          else this.seedIssues.push({ file: join(this.seedDir, n), problems: ["file name is not a valid provider slug"] });
+        }
+      }
+    }
+    return this.seedNameCache;
+  }
+
+  /** Every usable seed (reads them all: the dashboard and `providers list --seeds`, not the hot path). */
+  listSeeds(): ProviderDef[] {
+    return this.seedSlugs().map((s) => this.seed(s)).filter((d): d is ProviderDef => d !== undefined);
+  }
+
+  /** Seeds a curated definition shadows (same slug, or a slug that is a curated toolkit), with the curated slug that wins. */
+  shadowedSeeds(): Array<{ slug: string; by: string }> {
+    this.listSeeds();
+    return [...this.shadowedBy.entries()].map(([slug, by]) => ({ slug, by }));
+  }
+
+  /** Replace the seed directory and forget what was read from the old one. Tests and embedding only: the gateway never calls it. */
+  useSeedDir(dir: string | false): void {
+    this.seedDir = dir === false ? undefined : dir;
+    this.seedCache.clear();
+    this.shadowedBy.clear();
+    this.seedNameCache = undefined;
+    this.seedIssues.length = 0;
+  }
+
+  /** Curated definitions first, then the seeds. */
+  listAll(): ProviderDef[] {
+    return [...this.list(), ...this.listSeeds()];
+  }
+
+  /** True for a provider that exists only as a seed (curated definitions are never seeds). */
+  isSeed(slug: string): boolean {
+    return !this.byslug.has(slug) && this.seed(slug) !== undefined;
   }
 
   isBundled(slug: string): boolean {

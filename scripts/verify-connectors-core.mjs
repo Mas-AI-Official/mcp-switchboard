@@ -1377,8 +1377,8 @@ try {
     const ignored = probes.map((p) => spawnSync("git", ["check-ignore", "-q", p], { cwd: ROOT }).status === 0);
     assert("git: generated-looking paths are ignored (git check-ignore)", ignored.slice(0, 3).every(Boolean), ignored.join(","));
     const tracked = spawnSync("git", ["ls-files"], { cwd: ROOT, encoding: "utf8" }).stdout.split("\n").filter(Boolean);
-    const bad = tracked.filter((f) => /(^|\/)toolkits\/generated\//.test(f) || /\.generated\.json$/.test(f) || (/^src\/connectors\/.*\.json$/.test(f) && !/^src\/connectors\/(providers|schemas)\/[^/]+\.json$/.test(f)));
-    assert("git: no generated spec output and no stray JSON is tracked under src/connectors (only provider definitions and the schema)", bad.length === 0, bad.join(","));
+    const bad = tracked.filter((f) => /(^|\/)toolkits\/generated\//.test(f) || /\.generated\.json$/.test(f) || (/^src\/connectors\/.*\.json$/.test(f) && !/^src\/connectors\/(providers|schemas|providers\/seed)\/[^/]+\.json$/.test(f) && !/^src\/connectors\/toolkits\/[a-z][a-z0-9-]*\/(overlay\.json|recipes\/[A-Za-z0-9_.-]+\.json)$/.test(f)));
+    assert("git: no generated spec output and no stray JSON is tracked under src/connectors (only provider definitions, seeds, the schema, overlays and recipes)", bad.length === 0, bad.join(","));
   } else {
     console.log("SKIP  git: not inside a work tree, so the tracked-file checks did not run (the .gitignore text check above did)");
   }

@@ -63,7 +63,10 @@ export class ConnectorKit {
     this.links = new LinkStore(home);
     this.files = new FileService({ home, settings, ...(ctx.network ? { network: ctx.network } : {}), now: ctx.now });
     this.media = new MediaStage({ home, settings, now: ctx.now });
-    this.coverage = new Coverage(home, ctx.now);
+    this.coverage = new Coverage(home, ctx.now, (id) => {
+      const a = connectors.accounts.find(id);
+      return Boolean(a && (a.provider_verification === "unverified_seed" || ctx.providers.isSeed(a.provider)));
+    });
     this.deps = {
       accounts: connectors.accounts,
       providers: connectors.providers,

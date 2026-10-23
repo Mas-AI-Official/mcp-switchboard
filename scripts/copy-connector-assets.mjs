@@ -24,6 +24,18 @@ for (const sub of ["providers", "schemas"]) {
     copied++;
   }
 }
+// Seed provider definitions (src/connectors/providers/seed/*.json, derived from another project's published auth
+// settings and never counted as working) ship beside the curated ones, in their own folder.
+const seedSrc = join(root, "src", "connectors", "providers", "seed");
+if (existsSync(seedSrc)) {
+  const seedDst = join(root, "dist", "connectors", "providers", "seed");
+  mkdirSync(seedDst, { recursive: true });
+  for (const name of readdirSync(seedSrc)) {
+    if (!name.endsWith(".json")) continue;
+    cpSync(join(seedSrc, name), join(seedDst, name));
+    copied++;
+  }
+}
 // Bundled toolkit overlays and recipes: src/connectors/toolkits/<slug>/{overlay.json,recipes/*.json}. Vendor
 // specs are never here: `toolkits sync` writes them to SWITCHBOARD_HOME on the operator's machine.
 const toolkitsSrc = join(root, "src", "connectors", "toolkits");

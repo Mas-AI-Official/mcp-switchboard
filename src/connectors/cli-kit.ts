@@ -25,6 +25,7 @@ import { DEFAULT_CHECKLIST_DIR, formatReport } from "./coverage.js";
 import { RISK_RANK, SCOPE_RANK, VERIFICATION_STATES, type Risk, type VerificationState } from "./toolkits.js";
 import type { Scope } from "../types.js";
 import { syncToolkits, type SyncOutcome } from "./sync.js";
+import { toolkitEnableProblem } from "./admin.js";
 
 export interface KitCliHelpers {
   vaultBackend(): "encrypted-file" | "env";
@@ -138,12 +139,11 @@ export function registerKitCommands(program: Command, toolkitsCmd: Command, h: K
     .action((slug: string, opts: { account?: string; id?: string }) => {
       try {
         const kit = build(h).kit;
-        const tk = kit.toolkits.load(slug);
-        if (!tk) throw new Error(`toolkit '${slug}' is not defined here (run: switchboard toolkits sync ${slug})`);
-        const provider = kit.connectors.providers.providerForToolkit(slug) ?? kit.connectors.providers.get(tk.provider);
-        if (!provider) throw new Error(`no provider definition backs toolkit '${slug}'`);
-        const ok = kit.connectors.accounts.list({ provider: provider.slug }).some((a) => a.status === "ACTIVE" && (provider.identity_probe ? Boolean(a.last_probe_at) && !a.last_error : true));
-        if (!ok) throw new Error(`${provider.name} has no ACTIVE account that passed its identity probe, so '${slug}' cannot be enabled. Connect one: switchboard connect ${provider.slug}`);
+        // The same check the dashboard makes (admin.ts), so the two cannot disagree.
+        const problem = toolkitEnableProblem(kit.connectors, slug);
+        if (problem) throw new Error(problem);
+        const tk = kit.toolkits.load(slug)!;
+        const provider = kit.connectors.providers.providerForToolkit(slug) ?? kit.connectors.providers.get(tk.provider)!;
         if (opts.account) kit.connectors.accounts.require(opts.account.includes("/") || opts.account.startsWith("ca_") ? opts.account : `${provider.slug}/${opts.account}`);
         const path = h.configPath();
         if (!existsSync(path)) throw new Error(`no config at ${path}: run \`switchboard init\` first`);

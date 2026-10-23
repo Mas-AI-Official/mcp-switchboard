@@ -28,6 +28,8 @@ export interface ConnectorsOptions {
   skewMs?: number;
   /** Replace the bundled provider directory (tests only). */
   bundledProviderDir?: string;
+  /** Replace the seed directory (tests only); `false` turns seeds off. Default: `seed/` beside the bundled directory. */
+  seedProviderDir?: string | false;
   /** Initial settings for the connector kit (live settings, kill switch, approvals, bundled toolkit directory). */
   kit?: KitConfig;
 }
@@ -50,7 +52,11 @@ export class Connectors {
     const home = opts.home ?? HOME_DIR;
     this.kitConfig = opts.kit;
     const now = opts.clock ?? Date.now;
-    const providers = ProviderRegistry.load({ home, ...(opts.bundledProviderDir ? { bundledDir: opts.bundledProviderDir } : {}) });
+    const providers = ProviderRegistry.load({
+      home,
+      ...(opts.bundledProviderDir ? { bundledDir: opts.bundledProviderDir } : {}),
+      ...(opts.seedProviderDir !== undefined ? { seedDir: opts.seedProviderDir } : {}),
+    });
     const authConfigs = new AuthConfigStore(home, providers, opts.vault, now);
     const log = new AuditLog(home);
     this.ctx = {
@@ -75,7 +81,7 @@ export { AccountStore, summarize } from "./accounts.js";
 export type { BindingResolver, ConnectorContext, Credential, RevokeResult } from "./accounts.js";
 export { AuthConfigStore } from "./authconfigs.js";
 export { ConnectFlows, PENDING_TTL_MS } from "./oauthflow.js";
-export { ProviderRegistry, validateProviderDef } from "./providers.js";
+export { ProviderRegistry, validateProviderDef, seedProblems, bundledSeedDir } from "./providers.js";
 export { CONNECTOR_ERR, ConnectorError, isConnectorError } from "./errors.js";
 export { ConnectorKit } from "./kit.js";
 export type { KitConfig } from "./kit.js";

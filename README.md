@@ -748,6 +748,45 @@ the server **forces `/mcp` authentication on** (fail-closed — a public issuer 
 exposed). The full chain (metadata → DCR → PKCE → consent → token → authed `/mcp` → refresh → revoke)
 is verified end-to-end by a deterministic oracle: `npm run verify:oauth` (20/20).
 
+## Local connectors (no subscription)
+
+A hosted tool router signs you in to Gmail, YouTube, Slack and the rest once, keeps the tokens in its cloud and
+charges a subscription. Switchboard does the same job locally: you connect each provider **once** with an OAuth app
+or key that you own, the tokens are sealed in your local vault, and every agent you link reaches them through the one
+governed endpoint. No subscription, no third party in the path, and nothing leaves your machine except the calls to
+the provider itself.
+
+1. **Register your app** at the provider (a shared app is impossible for an open-source program):
+   [docs/connectors/OWNER_SETUP.md](docs/connectors/OWNER_SETUP.md) has the steps and the limits, per platform.
+2. **Connect**: `switchboard connect <provider>`, or press **Connect** on the dashboard's **Connectors** page. An
+   account is stored only after the provider's identity probe passes.
+3. **Toolkits**: `switchboard toolkits sync <provider>` then `switchboard toolkits enable <toolkit>` (or the toggle on
+   the Connectors page) mounts the provider's API as agent tools. Generated definitions live on your machine and are
+   never committed.
+4. **Link clients**: `switchboard link <client> <toolkit> --max-scope write` decides which agent may use what, and as
+   which account.
+
+**Curated and seeded providers.** The 13 curated definitions (Google, Meta, LinkedIn, TikTok, X, Slack, Notion, GitHub,
+ElevenLabs, Linear, Higgsfield, Buffer) are written and checked by hand. Beside them ship 594 **seeds**: candidate
+definitions of long-tail providers, derived from the authentication settings of the MIT-licensed
+[Activepieces](https://github.com/activepieces/activepieces) community pieces (facts only, never piece code; see
+`NOTICE`). A seed enables Connect and nothing more: it is marked `unverified_seed`, has no toolkits and no identity
+probe, and it is **never counted as working**. A curated definition always wins over a seed of the same name, and
+writing your own `<SWITCHBOARD_HOME>/providers/<slug>.json` replaces one.
+
+**Honest counts.** Only a row proven live by an owner-run probe is called working (`switchboard coverage`). A registered
+provider, a mapped action or a seed is not a working one.
+
+```bash
+switchboard providers list --seeds        # curated and seeded providers, with their authentication modes
+switchboard providers show <provider>     # what to create at the provider, redirect URIs, assumptions for a seed
+switchboard dashboard login               # then open #/connectors: search, filter, Connect, accounts, toolkit on/off
+node scripts/verify-connectors-seed.mjs   # the oracle: seeds validate, curated wins, a seed never reports working
+```
+
+Architecture and security rules: [docs/architecture/LOCAL_TOOLKITS.md](docs/architecture/LOCAL_TOOLKITS.md).
+File-by-file notes: [docs/architecture/CONNECTORS.md](docs/architecture/CONNECTORS.md).
+
 ## CLI
 
 | Command | What it does |
@@ -914,6 +953,7 @@ npm run verify     # build + npm audit + 26 oracles = 1171 checks, all green
 - [Vision & positioning](docs/VISION.md)
 - [Architecture overview](docs/ARCHITECTURE.md)
 - [Roadmap](docs/ROADMAP.md)
+- [Local toolkits (architecture)](docs/architecture/LOCAL_TOOLKITS.md) · [Owner setup per platform](docs/connectors/OWNER_SETUP.md)
 - [Competitive landscape](docs/COMPETITIVE.md) · [Composio parity, feature by feature](docs/COMPOSIO-PARITY.md)
 - [Example config](switchboard.config.example.yaml) · [search-mode example](examples/switchboard.config.yaml)
 

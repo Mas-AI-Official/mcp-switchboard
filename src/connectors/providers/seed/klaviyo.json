@@ -1,0 +1,122 @@
+{
+  "$schema": "../../schemas/provider.schema.json",
+  "slug": "klaviyo",
+  "name": "Klaviyo",
+  "categories": [
+    "marketing"
+  ],
+  "api_hosts": [
+    "a.klaviyo.com"
+  ],
+  "docs_url": "https://github.com/activepieces/activepieces/tree/6f4be340d7c4bef9fb6ff874ca72224e4933d3d2/packages/pieces/community/klaviyo/src",
+  "owner_setup": {
+    "console_url": "https://www.klaviyo.com/",
+    "steps": [
+      "Unverified seed: this definition was derived from another project's published auth settings and has not been tested against the provider. Read the provider's own developer documentation first.",
+      "Create an OAuth app in the provider's developer console and register the redirect URI below (client credentials flows need no redirect).",
+      "Store the client id and secret: switchboard vault set klaviyo_client_id and switchboard vault set klaviyo_client_secret",
+      "Register them: switchboard authconfig add klaviyo --client-id-ref klaviyo_client_id --client-secret-ref klaviyo_client_secret",
+      "Connect: switchboard connect klaviyo --account <label>",
+      "Create an API key or token in the provider's account settings.",
+      "Connect: switchboard connect klaviyo --auth api_key --token-stdin"
+    ],
+    "redirect_uris": [
+      "{loopback_redirect}"
+    ],
+    "notes": [
+      "SEED, unverified. Facts (URLs, scope names, field names, a product name) were read from the Activepieces community piece 'klaviyo' at commit 6f4be340d7c4 (MIT; see NOTICE). Nothing here was tested against the provider and it never counts as working.",
+      "ASSUMED, not stated by the source: the credential sent as Authorization: Bearer; a space between scopes; an http loopback redirect is accepted; refresh tokens that do not rotate. UNVERIFIED.",
+      "api_hosts are candidates harvested from request URL settings in the piece source. Review them before relying on them: they decide where a credential may be sent."
+    ]
+  },
+  "auth": [
+    {
+      "id": "api_key",
+      "mode": "api_key",
+      "label": "API key",
+      "default": true,
+      "inject": {
+        "in": "header",
+        "name": "Authorization",
+        "template": "Bearer {token}"
+      },
+      "fields": {
+        "auth_config_creation": [],
+        "connected_account_initiation": [
+          {
+            "name": "api_key",
+            "required": true,
+            "secret": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "oauth2",
+      "mode": "oauth2",
+      "label": "OAuth 2.0",
+      "oauth2": {
+        "authorize_url": "https://www.klaviyo.com/oauth/authorize",
+        "token_url": "https://a.klaviyo.com/oauth/token",
+        "pkce": "required",
+        "client_auth": "basic",
+        "client_secret_at_exchange": "always",
+        "scope_separator": " ",
+        "default_scopes": [
+          "profiles:read",
+          "profiles:write",
+          "lists:read",
+          "lists:write",
+          "tags:read",
+          "segments:read",
+          "events:read",
+          "events:write",
+          "subscriptions:read",
+          "subscriptions:write",
+          "accounts:read"
+        ],
+        "scope_catalog": [],
+        "redirect": "loopback",
+        "accept_json": true,
+        "refresh": {
+          "kind": "refresh_token",
+          "rotates": false
+        }
+      },
+      "inject": {
+        "in": "header",
+        "name": "Authorization",
+        "template": "Bearer {token}"
+      },
+      "fields": {
+        "auth_config_creation": [
+          {
+            "name": "client_id",
+            "label": "OAuth client ID",
+            "required": true,
+            "secret": false
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth client secret",
+            "required": true,
+            "secret": true
+          }
+        ],
+        "connected_account_initiation": []
+      }
+    }
+  ],
+  "provenance": {
+    "derived_from": [
+      "activepieces/activepieces@6f4be340d7c4bef9fb6ff874ca72224e4933d3d2 packages/pieces/community/klaviyo/src"
+    ],
+    "license": "MIT",
+    "attribution": "Copyright (c) 2020-2024 Activepieces Inc. (MIT Expat). Facts only: URLs, scope names, field names. See NOTICE."
+  },
+  "source": {
+    "activepieces_commit": "6f4be340d7c4bef9fb6ff874ca72224e4933d3d2",
+    "piece": "klaviyo"
+  },
+  "verification": "unverified_seed"
+}

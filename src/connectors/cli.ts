@@ -348,19 +348,26 @@ export function registerConnectorCommands(program: Command, h: ConnectorCliHelpe
     .command("list")
     .description("list known providers and their authentications")
     .option("--json", "machine readable")
-    .action((opts: { json?: boolean }) => {
+    .option("--seeds", "also list the seeded providers: unverified candidates that only enable Connect")
+    .action((opts: { json?: boolean; seeds?: boolean }) => {
       try {
         const rt = build(h);
-        const list = rt.providers.list();
+        const list = opts.seeds ? rt.providers.listAll() : rt.providers.list();
+        const sourceOf = (slug: string): string => (rt.providers.isSeed(slug) ? "seed (unverified)" : rt.providers.isBundled(slug) ? "bundled" : "yours");
         if (opts.json) {
-          out(JSON.stringify(list.map((p) => ({ slug: p.slug, name: p.name, toolkits: p.toolkits ?? [p.slug], auth: p.auth.map((a) => ({ id: a.id, mode: a.mode })), bundled: rt.providers.isBundled(p.slug), docs_url: p.docs_url })), null, 2));
+          out(JSON.stringify(list.map((p) => ({ slug: p.slug, name: p.name, toolkits: p.toolkits ?? [p.slug], auth: p.auth.map((a) => ({ id: a.id, mode: a.mode })), bundled: rt.providers.isBundled(p.slug), ...(rt.providers.isSeed(p.slug) ? { seed: true, verification: "unverified_seed" } : {}), docs_url: p.docs_url })), null, 2));
         } else {
-          out(table([["PROVIDER", "TOOLKITS", "AUTHENTICATIONS", "SOURCE"], ...list.map((p) => [p.slug, (p.toolkits ?? [p.slug]).join(","), p.auth.map((a) => `${a.id}(${a.mode})${a.default ? "*" : ""}`).join(" "), rt.providers.isBundled(p.slug) ? "bundled" : "yours"])]));
+          out(table([["PROVIDER", "TOOLKITS", "AUTHENTICATIONS", "SOURCE"], ...list.map((p) => [p.slug, (p.toolkits ?? [p.slug]).join(","), p.auth.map((a) => `${a.id}(${a.mode})${a.default ? "*" : ""}`).join(" "), sourceOf(p.slug)])]));
           out("\n* = what `switchboard connect` uses when you do not say otherwise");
+          if (!opts.seeds) {
+            const n = rt.providers.listSeeds().length;
+            if (n) out(`${n} seeded providers (unverified candidates that only enable Connect, never counted as working) are not listed: add --seeds`);
+          }
         }
         for (const issue of rt.providers.issues) {
           log.warn(`provider file ${issue.file} was ignored: ${issue.problems.join("; ")}`);
         }
+        if (opts.seeds) for (const issue of rt.providers.seedIssues) log.warn(`seed file ${issue.file} was ignored: ${issue.problems.join("; ")}`);
       } catch (err) {
         fail(err);
       }
