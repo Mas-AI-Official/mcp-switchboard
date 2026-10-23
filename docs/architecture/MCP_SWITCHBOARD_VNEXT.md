@@ -97,7 +97,7 @@ code makes a choice the text above leaves open, it is recorded here:
 
 - `servers` omitted or empty means no server (a client sees only what it is given). `client add <id>` with no flags creates
   `servers: ["*"]`, `max_scope: read`, `max_risk: low`; on an existing client it changes only the flags given and keeps a
-  working key. `max_risk` is stored and shown now; it is enforced when risk (3.4) lands.
+  working key. `max_risk` is stored, shown and, since step 3, enforced on every call (3.4): a call above it is refused with `SB_POLICY_DENY` before any approval exists.
 - `max_scope` joins the server and the active profile: the tightest wins and the denial names which one binds. `limits` is
   a fourth governor level, read live, so a reload changes it. `tools` and `exclude_tools` are exposed-name globs (`*`, `?`)
   and apply to tools; resources and prompts follow the client's `servers`.
@@ -165,11 +165,9 @@ share it). Record:
   refuse. `--presence none` only with `SWITCHBOARD_INSECURE_APPROVAL=1` (test harnesses).
 - CLI: `switchboard approvals list|show <id>|approve <id>|deny <id>`. Deny needs no presence check.
 - Dashboard: an Approvals page lists pending records with the argument preview and a live countdown.
-- Until this store lands, the interactive TTY gate (`approval.ts`) is the only human channel and is serialised:
-  every pending call waits in one queue behind one readline interface, only the head prompt is shown, and it
-  is approved only by typing that prompt's own random 4 character code. A bare `y`, a wrong code, type-ahead
-  and EOF deny, so one typed line can resolve at most one call (0.1.0: one `y` approved a whole `batch_call`).
-  At most 16 calls may wait; the rest are refused at once. Superseded by the out-of-band flow above.
+- Before this store the interactive TTY gate (`approval.ts`) was the only human channel; it was serialised (one
+  prompt at a time, approved only by typing that prompt's own random 4 character code, at most 16 waiting). It is
+  superseded by the out-of-band flow above and, since step 3, is no longer on the call path.
 - `SWITCHBOARD_AUTO_APPROVE=1` stays for test harnesses and is recorded as `decided_via: "env-auto"` in the
   audit row, with a startup warning.
 - Every create and decision writes an audit row (`approval_required`, `approved`, `denied`, `expired`).
@@ -179,6 +177,64 @@ share it). Record:
 `risk` per tool override; `risk_defaults` per server (`{read, write, full}`); `outward: true` per server
 raises write and full to high. Gateway default approval: `gateway.approval: { require_for_risk: [high] }`.
 Server `approval.require_for` (scopes) keeps working; the two are OR-ed.
+
+Implementation notes (step 3, `src/approvals.ts`, `controlkey.ts`; oracle `verify:approvals`). Where the code makes a choice
+the text above leaves open, or differs from it, it is recorded here:
+
+- Store and trust. `approvals.json` is a `WatchedJsonFile` (atomic writes, locked read-modify-write, `.bak`). Only the
+  gateway writes decisions: the CLI never edits the file, it asks the running gateway over the control API. Every record the
+  gateway writes carries `mac`, an HMAC-SHA256 over the whole record without `mac`. That is a superset of the fields the text
+  above names (id, principal, server, tool, args_sha256, expires, status): it also covers client, args_preview, scope, risk, the
+  timestamps, decided_via and the run `instance`, so the preview the owner is shown cannot be edited either. Pending, approved,
+  denied, consumed and expired records are all signed. A record that does not verify is ignored for matching and listing,
+  logged on stderr and as an `approval.ignored` audit row, and dropped at the next write; a record left by an earlier run (its key
+  is gone) is the same case, logged once as a count.
+- Single use survives a file rollback: consuming is a locked read-modify-write, and the consumed ids are also kept in memory for
+  the life of the process, so restoring an older copy of the file cannot approve a used call a second time.
+- A damaged `approvals.json` fails closed: the gated call is refused with `SB_APPROVAL_DENIED` (the approval store cannot be
+  used), the file is not replaced, and the gateway keeps running. `switchboard approvals list` with no gateway running reads the
+  raw file and labels it unverified.
+- The match is (principal label `<via>:<id>`, or `internal` for a call with no principal such as the playground or a trigger
+  poll; server; tool; args hash). The client label is not part of it. Rotating a client key changes the key id and so the
+  principal: an approval does not carry over to the new key.
+- The hash is the SHA-256 of the canonical JSON (sorted keys at every depth, no whitespace: the `canonicalJson` of the audit
+  chain) of the arguments as the client sent them. `forward()` has no separate validation step; the hash is taken where the call
+  arrives, which is also where `call_tool` and every `batch_call` entry land, so the same call through any door matches, and
+  before `inject_args` and the rename reversal run. For `resources/read` the bound value is the URI, for `prompts/get` the name
+  and arguments.
+- TTL (60 to 86400, default 900) is clamped in code as well as bounded by the schema. `gateway.approval.wait_seconds` (0 to 50,
+  default 0) polls the store every 100 ms, looks at the kill switch again after any wait (the approval is left unused if it is
+  on), and turns a denial or an expiry during the wait into `SB_APPROVAL_DENIED`. The text above says `approval.wait_seconds`;
+  the key is `gateway.approval.wait_seconds`.
+- Caps: 16 undecided requests per principal and 64 in all; the next distinct request is refused with `SB_RATE_LIMITED` instead of
+  queued. The same call repeating reuses its pending record (same id), and the approval_required audit row and the webhook
+  notification are written once, when the record is created.
+- Presence: `approve` asks `verifyOwnerPresence` with `Approve <tool> on <server> for <client>: <summary>` (the summary is at
+  most 120 characters, shortened further so the message fits the 200 characters the prompt keeps), one prompt at a time, and signs
+  only after it succeeded and the record was re-checked. While stdio carries the protocol only Windows Hello is accepted (no
+  terminal challenge). Presence `none` is selected only when `SWITCHBOARD_INSECURE_APPROVAL=1`, and `SWITCHBOARD_AUTO_APPROVE=1`
+  (recorded as `decided_via: env-auto`) stays for harnesses; both print a startup warning. `deny` and withdrawing need no presence.
+- Control API: `GET /api/control/approvals`, `GET .../:id`, `POST .../:id/approve|deny`, on the dashboard's listener, outside the
+  owner-session gate, behind `Authorization: Bearer <control token>`. The token is minted at every listener start and stored
+  DPAPI-wrapped in `SWITCHBOARD_HOME/control.key`. It is a convenience, not a boundary: anything running as the same OS user can
+  read it. The boundary is the presence prompt inside the gateway. An owner session does not open the control API and the control
+  token does not open the owner routes. Two gateways sharing one SWITCHBOARD_HOME overwrite each other's control key and are not
+  supported. A gateway with no HTTP listener (stdio only) cannot have its approvals decided; `serve` says so at start.
+- Audit: `server: switchboard`, `tool: approval.<event>` for approval_required, approved, denied, expired and consumed (plus
+  `approval.ignored` and `approval.presence_failed`), each with `approval_id` and `risk`. The executed call's own row carries
+  `approval_id` and `risk` too, as does every other row of a call whose risk is known. The principal of an approved or denied row
+  is the owner channel (`owner:dashboard`, `owner:cli`, `owner:env-auto`).
+- Risk (3.4): a tool's `risk` beats the server's `risk_defaults[scope]`, which beats the built-in default (read low, write medium,
+  full high); `outward: true` then raises write and full to high and never lowers anything. `gateway.approval.require_for_risk`
+  (default `[high]`) is OR-ed with `approval.require_for`. Consequence: with the defaults every full-scope call needs an approval,
+  also on a server that had no `approval` block before. `max_risk` is checked after the scope ceiling and before any approval is
+  created, so a client cannot put a call it may not make in front of the owner. Resources and prompts use the same gate at scope
+  read, so they are gated only when the operator sets `risk` on `resources/read` / `prompts/get` or `risk_defaults.read`.
+- Dashboard: an Approvals page (pending with a live countdown, approved but unused, the last 50 decisions), a Clients page (the
+  3.1 routes; `DELETE /api/clients/:id?purge=0` revokes keys and keeps the entry), a kill-switch banner and toggle
+  (`GET|POST /api/kill`; turning it off goes through gateway presence), and Sign out.
+- `approval.ts` (the TTY gate) is off the call path and no longer used by the Router. It stays exported, with its own oracle
+  sections, until the owner decides to delete it.
 
 ### 3.5 Classifier
 

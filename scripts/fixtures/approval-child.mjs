@@ -4,7 +4,8 @@
 //
 // Usage: node approval-child.mjs <mode> [n]
 //   direct <n>        <n> concurrent approve() calls (what a batch or parallel requests produce)
-//   router-batch      the real Router: one batch_call carrying 3 gated calls (write, write, destructive)
+//   router-batch      the real Router: one batch_call carrying 3 gated calls (write, write, destructive). Since
+//                     design 3.3 it prints no prompt; RESULT carries `executed` and the count of `pending` answers
 //   spoof             one approve() whose tool name tries to forge a second prompt and clear the screen
 // Prompts go to stdout (as for a human); machine lines go to stderr:
 //   EARLY <json>      how many calls had already been refused before any input arrived
@@ -68,13 +69,16 @@ if (mode === "direct" || mode === "spoof") {
     ],
   });
   let denied = 0;
+  let pending = 0;
   try {
     const body = JSON.parse(res.content[0].text);
-    denied = (body.results ?? body.result ?? []).filter((r) => r?.isError || /APPROVAL_DENIED/.test(JSON.stringify(r))).length;
+    const results = body.results ?? body.result ?? [];
+    denied = results.filter((r) => r?.isError || /APPROVAL_DENIED/.test(JSON.stringify(r))).length;
+    pending = results.filter((r) => /SB_APPROVAL_PENDING/.test(JSON.stringify(r))).length;
   } catch {
     /* the executed list is the evidence, not the envelope */
   }
-  finish({ executed, denied });
+  finish({ executed, denied, pending });
 } else {
   console.error(`unknown mode ${mode}`);
   process.exit(2);

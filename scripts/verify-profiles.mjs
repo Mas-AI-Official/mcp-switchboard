@@ -189,7 +189,10 @@ try {
   {
     // server allows `full`; a `read` profile must force read-only and attribute the cap to the profile.
     const server = { id: "git", source: "npx", policy: "full" };
-    const cfg = { gateway: { default_policy: "full" }, vault: {}, servers: [server] };
+    // Adapted for design 3.4 (risk): a full-scope call is high risk and needs an approval by default, which is not
+    // what this block measures. The config says no risk needs one, so "allow" below still means "the server let it
+    // through and only the profile can have capped it"; the default is checked on the next line.
+    const cfg = { gateway: { default_policy: "full", approval: { require_for_risk: [] } }, vault: {}, servers: [server] };
     const allowed = evaluate(server, "get_status", cfg, undefined, "read");
     assert("policy: read tool under read ceiling ⇒ allow", allowed.decision === "allow" && allowed.scope === "read");
     const denied = evaluate(server, "delete_branch", cfg, undefined, "read");
@@ -198,6 +201,8 @@ try {
     // without the profile ceiling the SAME call is allowed by the full server — proves the profile is what capped it
     const noProfile = evaluate(server, "delete_branch", cfg, undefined, undefined);
     assert("policy: same call allowed without the profile ceiling", noProfile.decision === "allow");
+    const byDefault = evaluate(server, "delete_branch", { ...cfg, gateway: { default_policy: "full" } }, undefined, undefined);
+    assert("policy: with the default approval rule the same full call needs approval (high risk), it is not denied", byDefault.decision === "approval_required" && byDefault.risk === "high");
     // a profile can only LOWER: a `full` profile over a `read` server stays capped at the server's read
     const readServer = { id: "ro", source: "npx", policy: "read" };
     const cfg2 = { gateway: { default_policy: "read" }, vault: {}, servers: [readServer] };

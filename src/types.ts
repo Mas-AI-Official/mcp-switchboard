@@ -18,6 +18,11 @@ export interface ToolOverride {
   enabled?: boolean;
   /** Pin the scope for this tool instead of inferring it from the name. */
   policy?: Scope;
+  /**
+   * Pin the risk of this tool (design 3.4) instead of deriving it from its scope and the server's
+   * `risk_defaults` / `outward`. The operator's explicit word wins in both directions.
+   */
+  risk?: Risk;
   /** Replace the description agents see for this tool (the upstream call is unaffected). */
   description_override?: string;
   /** Parameters dropped from the exposed input schema; also filtered out of `required`. */
@@ -237,6 +242,16 @@ export interface ServerConfig {
   tools?: Record<string, ToolOverride>;
   /** Approval gates for this server. */
   approval?: ApprovalConfig;
+  /**
+   * Risk of a call by its scope (design 3.4). Defaults: read is `low`, write is `medium`, full is `high`.
+   * A per-tool `risk` overrides this; `outward: true` can only raise it.
+   */
+  risk_defaults?: { read?: Risk; write?: Risk; full?: Risk };
+  /**
+   * The server acts on the outside world (posts, sends, spends, publishes). Its write and full calls are
+   * at least `high` risk, and so need an out-of-band approval under the default `gateway.approval`.
+   */
+  outward?: boolean;
   /** Server-wide rate limits + spend budgets. Stacks under `settings.limits` and over each tool's
    *  `limits` — a call must pass the tool, server, and global ceilings it touches. */
   limits?: LimitSpec;
@@ -270,6 +285,26 @@ export interface GatewayConfig {
    * call (the YAML itself is read at startup, so editing the file needs a restart).
    */
   kill_switch?: boolean;
+  /** Out-of-band approvals (design 3.3, 3.4). Optional: every field has a default. */
+  approval?: GatewayApprovalConfig;
+}
+
+/**
+ * `gateway.approval`: which calls need a human decision, and how long a decision request lives.
+ */
+export interface GatewayApprovalConfig {
+  /**
+   * Calls whose risk is listed here need an approval, OR-ed with each server's `approval.require_for`
+   * scopes. Default `[high]`. An empty list turns the risk rule off (the server scopes still apply).
+   */
+  require_for_risk?: Risk[];
+  /** How long a pending or approved record stays valid, seconds. 60 to 86400, default 900. */
+  ttl_seconds?: number;
+  /**
+   * How long a gated call waits for the owner before it returns `SB_APPROVAL_PENDING`, seconds. 0 to 50,
+   * default 0 (return at once and let the client call again after approval).
+   */
+  wait_seconds?: number;
 }
 
 export interface VaultConfig {
@@ -437,7 +472,10 @@ export interface ClientConfig {
   exclude_tools?: string[];
   /** Scope ceiling for this client; can only lower the server and profile ceilings. Omitted = no extra cap. */
   max_scope?: Scope;
-  /** Highest risk this client may request (design 3.4). Stored now; enforced when risk lands. Omitted = high. */
+  /**
+   * Highest risk this client may request (design 3.4). A call above it is refused with `SB_POLICY_DENY`
+   * (before any approval is created); `high` still needs an approval. Omitted = high.
+   */
   max_risk?: Risk;
   /** Rate limits and spend budgets for this client, same shape as a server's. A call must also pass every other level. */
   limits?: LimitSpec;

@@ -17,6 +17,7 @@ import { parseAllowEntry } from "./netguard.js";
 import { BAD_CLIENT_ID, MAX_GLOB_PATTERNS, MAX_GLOB_LENGTH, isValidClientId, isValidGlob } from "./principal.js";
 
 const scope = z.enum(["read", "write", "full"]);
+const risk = z.enum(["low", "medium", "high"]);
 
 // Schema-shaping rules applied to a tool's exposed input schema before agents see it.
 const schemaModifier = z
@@ -112,6 +113,7 @@ const toolOverride = z
   .object({
     enabled: z.boolean().optional(),
     policy: scope.optional(),
+    risk: risk.optional(),
     description_override: z.string().optional(),
     drop_params: z.array(z.string()).optional(),
     schema_modifiers: schemaModifier.optional(),
@@ -127,6 +129,26 @@ const toolOverride = z
 const approval = z
   .object({
     require_for: z.array(scope).optional(),
+  })
+  .strict();
+
+// Risk of a call by scope (design 3.4); a field left out keeps its default (read low, write medium, full high).
+const riskDefaults = z
+  .object({
+    read: risk.optional(),
+    write: risk.optional(),
+    full: risk.optional(),
+  })
+  .strict();
+
+// gateway.approval (design 3.3, 3.4). Bounds are part of the contract: a TTL under a minute cannot be acted on,
+// over a day would let an unattended approval outlive the decision; a call may wait 50 s at most so it stays
+// inside the usual 60 s client timeout.
+const gatewayApproval = z
+  .object({
+    require_for_risk: z.array(risk).optional(),
+    ttl_seconds: z.number().int().min(60).max(86400).optional(),
+    wait_seconds: z.number().int().min(0).max(50).optional(),
   })
   .strict();
 
@@ -158,6 +180,8 @@ const serverConfig = z
     env_passthrough_secrets: z.array(envName).optional(),
     tools: z.record(z.string(), toolOverride).optional(),
     approval: approval.optional(),
+    risk_defaults: riskDefaults.optional(),
+    outward: z.boolean().optional(),
     limits: limitSpec.optional(),
     resilience: resilience.optional(),
   })
@@ -186,6 +210,8 @@ const gateway = z
     // Kill switch: refuse every tool call, resource read and prompt get. Optional so an untouched
     // config does not grow a `kill_switch: false` line when the dashboard writes it back.
     kill_switch: z.boolean().optional(),
+    // Out-of-band approvals: which risks need one, how long a request lives, how long a call may wait.
+    approval: gatewayApproval.optional(),
   })
   .strict()
   .default({

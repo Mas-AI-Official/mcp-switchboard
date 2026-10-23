@@ -62,7 +62,7 @@ Every file under `src/` and what it owns. Sixteen modules, no dead code.
 | `registry.ts` | Mounts upstream MCP servers (one `Client` each), holds the live connections, mounts/unmounts on demand. | `Registry`, `MountedServer` |
 | `openapi.ts` | app2mcp: OpenAPI 3.x / Swagger 2.0 spec → an in-process MCP `Server`, verb→scope per operation, auth from the vault at call time. | `buildOpenApiServer`, `OpenApiServer` |
 | `policy.ts` | Scope inference from tool names + the read/write/full governance decision. | `evaluate`, `inferScope`, `PolicyDecision` |
-| `approval.ts` | The fail-closed human approval gate for scope-gated calls. | `approve`, `setStdioActive` |
+| `approvals.ts` | Out-of-band, argument-bound, single-use approvals with gateway-side owner presence (replaces the TTY gate `approval.ts`, now off the call path). | `Approvals`, `argsSha256`, `presenceMessage` |
 | `audit.ts` | Append-only JSON-lines audit log of every governance verdict. | `audit`, `recentAudit`, `AuditEntry` |
 | `router.ts` | The single governed tool surface. Exposure modes + the governed `forward()` path + search meta-tools. | `Router` |
 | `gateway.ts` | Wires the MCP `Server` to the router; serves stdio + builds per-request servers for HTTP. | `Gateway`, `createGateway` |
@@ -187,18 +187,23 @@ starter sets to `read`), so an unconfigured server can only read.
 
 ---
 
-## 7. The approval gate (`approval.ts`)
+## 7. Approvals (`approvals.ts`)
 
-When `evaluate()` returns `approval_required`, the call is held at `approve()`. It is **fail-closed**:
+When `evaluate()` returns `approval_required` (the server's `approval.require_for` scopes, OR the call's risk being in
+`gateway.approval.require_for_risk`, default `high`), nothing waits at a prompt. The Router asks `Approvals.request()`:
 
-- `SWITCHBOARD_AUTO_APPROVE=1` → allow, and the auto-approval is logged (for non-interactive/CI runs
-  the operator has explicitly opted into).
-- The stdio MCP channel is active **or** there's no TTY → **deny** (you can't safely prompt a human
-  on the same pipe the protocol is using).
-- Otherwise → an interactive `y/N` prompt on the terminal, defaulting to **no**.
+- an approved record for exactly (principal, server, tool, SHA-256 of the canonical arguments), unexpired and unused, is
+  **consumed** (once) and the call runs;
+- otherwise a **pending** record is created (or the same call's existing one reused) and the call returns `SB_APPROVAL_PENDING`
+  with the approval id, its expiry and the owner instruction. With `gateway.approval.wait_seconds` it first waits that long.
 
-`setStdioActive()` is called by the gateway when it binds the stdio transport, so the gate knows it
-must not try to read from that pipe.
+The owner approves in the dashboard (Approvals) or with `switchboard approvals approve <id>`. Both end in the gateway, which asks
+for owner presence (Windows Hello, or a challenge at its own terminal) with the exact action and only then signs the record with an
+in-memory HMAC key, so a record written into `approvals.json` by anything else is ignored. The client then repeats the identical call.
+
+Fail-closed everywhere: an unusable store refuses the call, an expired or forged record counts for nothing, and
+`SWITCHBOARD_AUTO_APPROVE=1` (harnesses only, recorded as `decided_via env-auto`) is the one switch that skips the human.
+`approval.ts` (the old TTY prompt) is no longer on the call path. See design vNext 3.3 for the full contract.
 
 ---
 

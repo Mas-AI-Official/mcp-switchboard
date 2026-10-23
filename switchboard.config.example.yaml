@@ -29,6 +29,11 @@ gateway:
   default_policy: read     # read | write | full  (least privilege by default)
   # kill_switch: true      # refuse every tool call, resource read and prompt get (SB_KILL_SWITCH).
   #                        # `switchboard kill on|off` does the same with no restart ($SWITCHBOARD_HOME/KILL).
+  # approval:              # out-of-band approvals (design 3.3, 3.4). Every field is optional.
+  #   require_for_risk: [high]   # calls of these risks need the owner's approval (OR-ed with each server's approval.require_for)
+  #   ttl_seconds: 900           # how long a request, then an approval, lives: 60 to 86400
+  #   wait_seconds: 0            # how long a gated call waits for the owner before returning SB_APPROVAL_PENDING: 0 to 50
+  #                              # Decide with the dashboard's Approvals page or `switchboard approvals approve <id>`.
 
 vault:
   # encrypted-file -> AES-256-GCM blob in ~/.switchboard (portable, zero native deps)
@@ -315,7 +320,7 @@ servers:
 #     tools: []                      # optional allowlist of exposed tool names (globs); empty = all on those servers
 #     exclude_tools: ["*__delete_*"]
 #     max_scope: write               # ceiling, can only lower the server and profile ceilings
-#     max_risk: high                 # stored now, enforced when risk lands
+#     max_risk: high                 # highest risk this client may request; a call above it is refused (high still needs approval)
 #     limits: { per_minute: 60 }     # optional, same shape as server limits
 #   local-model:
 #     servers: [voice, youtube]

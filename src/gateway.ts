@@ -31,6 +31,7 @@ import { Registry } from "./registry.js";
 import { Router } from "./router.js";
 import { TriggerManager } from "./triggers.js";
 import { setStdioActive } from "./approval.js";
+import { Approvals } from "./approvals.js";
 import { buildCouncilServer, COUNCIL_SERVER_ID } from "./council.js";
 import { retryDelay, resolveMountRetry } from "./retry.js";
 import type { Principal } from "./principal.js";
@@ -46,20 +47,35 @@ export class Gateway {
   readonly registry: Registry;
   readonly router: Router;
   readonly triggers: TriggerManager;
+  /** Out-of-band approvals (design 3.3): the router asks them, the dashboard and the control API decide on them. */
+  readonly approvals: Approvals;
 
   /** Pending background remount timers, tracked so `shutdown()` can cancel every one — a
    *  scheduled retry must never resurrect a server after the gateway has been torn down. */
   private readonly pendingRetries = new Set<NodeJS.Timeout>();
   private shuttingDown = false;
+  private readonly sweepTimer: NodeJS.Timeout;
 
-  constructor(private readonly cfg: SwitchboardConfig) {
+  /** `opts.approvals` replaces the approvals manager (tests inject their own presence provider; production passes none). */
+  constructor(private readonly cfg: SwitchboardConfig, opts: { approvals?: Approvals } = {}) {
     this.vault = new Vault(cfg.vault.backend);
     // The network guard reads the live config object, so a settings change is picked up without a restart.
     this.oauth = new OAuthStore(this.vault, () => cfg.settings?.network);
     this.registry = new Registry(this.vault, this.oauth, () => cfg.settings?.network);
-    this.router = new Router(this.registry, cfg, (ref) => this.vault.resolve(ref));
+    this.approvals = opts.approvals ?? new Approvals();
+    this.router = new Router(this.registry, cfg, (ref) => this.vault.resolve(ref), this.approvals);
     // Polls run through this.router, so every trigger poll is governed + audited like any call.
     this.triggers = new TriggerManager(this.router, cfg, (ref) => this.vault.resolve(ref));
+    // Undecided requests and unused approvals expire on their own clock; sweeping writes the `expired` audit row
+    // even when nobody is calling. unref'd, so it never keeps the process alive.
+    this.sweepTimer = setInterval(() => {
+      try {
+        this.approvals.sweep();
+      } catch (err) {
+        log.warn(`approval sweep failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }, 30_000);
+    this.sweepTimer.unref();
   }
 
   /** Mount every enabled server. Failures are isolated so one bad server can't sink the rest. */
@@ -200,7 +216,9 @@ export class Gateway {
   /** Serve the stdio transport. Blocks for the life of the process. `principal` comes from `serve --client <id>`
    *  (via "stdio": an assertion by the launching process, not an authentication). */
   async serveStdio(principal?: Principal): Promise<void> {
+    // stdin and stdout now carry JSON-RPC: no terminal prompt may use them, for the legacy gate or for a presence challenge.
     setStdioActive(true);
+    this.approvals.setStdioActive(true);
     const server = this.buildServer(principal);
     await server.connect(new StdioServerTransport());
     log.ok(`stdio transport ready: ${this.router.listTools(principal).length} tools exposed${principal?.client ? ` to client '${principal.client}'` : ""}`);
@@ -208,6 +226,7 @@ export class Gateway {
 
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
+    clearInterval(this.sweepTimer);
     // Cancel every pending background remount so a dead server can't resurrect after shutdown.
     for (const timer of this.pendingRetries) clearTimeout(timer);
     this.pendingRetries.clear();

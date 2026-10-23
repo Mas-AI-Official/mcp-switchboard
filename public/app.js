@@ -1770,12 +1770,542 @@ function openTriggerModal(existing, toolNames, onSaved, templates = []) {
 }
 
 // ============================================================================
+// Shared bits for the owner-decision pages
+// ============================================================================
+function riskBadge(risk) {
+  const cls = risk === "high" ? "badge-danger" : risk === "medium" ? "badge-warn" : "badge-off";
+  return `<span class="badge ${cls}">${esc(risk)}</span>`;
+}
+
+function statusBadge(status) {
+  const cls =
+    { pending: "badge-warn", approved: "badge-ok", consumed: "badge-ok", denied: "badge-danger", expired: "badge-off" }[status] ||
+    "badge-off";
+  return `<span class="badge ${cls}">${esc(status)}</span>`;
+}
+
+function csvList(text) {
+  return String(text || "")
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
+
+// ============================================================================
+// VIEW: Approvals (design 3.3) - the calls that wait for the owner
+//
+// Approving here does not just record a click. The gateway asks for owner presence (Windows Hello, or a
+// challenge at its own terminal) with the exact action, and signs the decision only if that succeeds, so a
+// script that steals the session cookie still cannot approve anything.
+// ============================================================================
+const approvalsUi = { poll: null, tick: null, busy: false, offsetMs: 0 };
+
+function stopApprovalsTimers() {
+  clearInterval(approvalsUi.poll);
+  clearInterval(approvalsUi.tick);
+  approvalsUi.poll = null;
+  approvalsUi.tick = null;
+}
+
+function clock(iso) {
+  const left = Date.parse(iso) - (Date.now() + approvalsUi.offsetMs);
+  if (!Number.isFinite(left)) return "?";
+  if (left <= 0) return "expired";
+  const s = Math.floor(left / 1000);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const ss = String(s % 60).padStart(2, "0");
+  return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${ss}` : `${m}:${ss}`;
+}
+
+function argsCell(a) {
+  let text;
+  try { text = JSON.stringify(a.args_preview ?? {}); } catch { text = "(arguments cannot be shown)"; }
+  const short = text.length > 140 ? text.slice(0, 137) + "..." : text;
+  const pretty = (() => { try { return JSON.stringify(a.args_preview ?? {}, null, 2); } catch { return text; } })();
+  return `<code class="args-preview">${esc(short)}</code>` +
+    (text.length > 140 ? `<details class="args-full"><summary>full</summary><pre>${esc(pretty)}</pre></details>` : "");
+}
+
+function pendingRow(a, withActions) {
+  return `
+    <tr data-id="${attr(a.id)}">
+      <td><strong>${esc(a.client || a.principal)}</strong>${a.client ? `<div class="dim small" title="${attr(a.principal)}">${esc(a.principal)}</div>` : ""}</td>
+      <td><code>${esc(a.server)}</code></td>
+      <td><code>${esc(a.tool)}</code></td>
+      <td>${riskBadge(a.risk)} ${scopeBadge(a.scope)}</td>
+      <td>${argsCell(a)}</td>
+      <td class="nowrap"><span class="countdown" data-expires="${attr(a.expires)}">${esc(clock(a.expires))}</span></td>
+      <td class="table-actions nowrap">${withActions}</td>
+    </tr>`;
+}
+
+function approvalsHtml(data) {
+  const warn = [];
+  if (data.auto_approve) warn.push("<code>SWITCHBOARD_AUTO_APPROVE=1</code> is set on the gateway: every gated call is approved with no human decision. That is for test harnesses only.");
+  if (data.insecure_presence) warn.push("<code>SWITCHBOARD_INSECURE_APPROVAL=1</code> is set on the gateway: owner presence checks are switched off, so approving needs no Windows Hello. That is for test harnesses only.");
+  const warnHtml = warn.map((w) => `<div class="error-banner">${w}</div>`).join("");
+
+  const pending = data.pending || [];
+  const approved = data.approved || [];
+  const history = data.history || [];
+
+  const pendingHtml = pending.length
+    ? `<div class="panel" style="padding:6px 0;overflow-x:auto"><table class="table" id="pending-table">
+        <thead><tr><th>Client</th><th>Server</th><th>Tool</th><th>Risk</th><th>Arguments</th><th>Expires in</th><th></th></tr></thead>
+        <tbody>${pending
+          .map((a) =>
+            pendingRow(
+              a,
+              `<button class="btn btn-sm btn-primary" data-approve="${attr(a.id)}">Approve</button>
+               <button class="btn btn-sm btn-danger" data-deny="${attr(a.id)}">Deny</button>`
+            )
+          )
+          .join("")}</tbody></table></div>`
+    : `<div class="empty"><div class="empty-ico">✓</div><div class="empty-title">Nothing is waiting for you</div>
+        <div>A call that needs approval appears here the moment a client makes it. Approvals expire after ${esc(Math.round(data.ttl_seconds / 60))} minutes.</div></div>`;
+
+  const approvedHtml = approved.length
+    ? `<h3 class="section-title">Approved, not used yet</h3>
+       <div class="panel" style="padding:6px 0;overflow-x:auto"><table class="table">
+        <thead><tr><th>Client</th><th>Server</th><th>Tool</th><th>Risk</th><th>Arguments</th><th>Valid for</th><th></th></tr></thead>
+        <tbody>${approved.map((a) => pendingRow(a, `<button class="btn btn-sm btn-danger" data-deny="${attr(a.id)}">Withdraw</button>`)).join("")}</tbody></table></div>`
+    : "";
+
+  const historyHtml = history.length
+    ? `<h3 class="section-title">History <span class="dim small">(last ${history.length})</span></h3>
+       <div class="panel" style="padding:6px 0;overflow-x:auto"><table class="table">
+        <thead><tr><th>When</th><th>Status</th><th>Client</th><th>Call</th><th>Risk</th><th>Via</th><th>Arguments</th></tr></thead>
+        <tbody>${history
+          .map(
+            (a) => `<tr>
+              <td class="dim nowrap">${esc(relTime(a.decided_at || a.created))}</td>
+              <td>${statusBadge(a.status)}</td>
+              <td>${esc(a.client || a.principal)}</td>
+              <td><code>${esc(a.server)}__${esc(a.tool)}</code></td>
+              <td>${riskBadge(a.risk)}</td>
+              <td class="dim">${esc(a.decided_via || "none")}${a.presence ? ` <span class="small">(${esc(a.presence)})</span>` : ""}</td>
+              <td>${argsCell(a)}</td></tr>`
+          )
+          .join("")}</tbody></table></div>`
+    : "";
+
+  return warnHtml + pendingHtml + approvedHtml + historyHtml;
+}
+
+function tickApprovals() {
+  let anyExpired = false;
+  $$(".countdown").forEach((el) => {
+    const t = clock(el.dataset.expires);
+    if (el.textContent !== t) el.textContent = t;
+    if (t === "expired") anyExpired = true;
+  });
+  return anyExpired;
+}
+
+async function loadApprovals(first) {
+  const data = await api("/api/approvals");
+  approvalsUi.offsetMs = Date.parse(data.now) - Date.now();
+  if (first) {
+    view().innerHTML =
+      pageHead(
+        "Approvals",
+        "Calls that wait for you. Approving asks Windows Hello (or the gateway's own terminal) to confirm you are present. An approval covers exactly these arguments, works once, and expires.",
+        `<button class="btn" id="ap-refresh">Refresh</button>`
+      ) + `<div id="ap-body"></div>`;
+    $("#ap-refresh").addEventListener("click", () => loadApprovals(false).catch((e) => toast(e.message, "error")));
+  }
+  const body = $("#ap-body");
+  if (!body) return;
+  body.innerHTML = approvalsHtml(data);
+  bindApprovalButtons();
+  updateNavCount((data.pending || []).length);
+}
+
+function bindApprovalButtons() {
+  $$("[data-approve]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      if (approvalsUi.busy) return;
+      approvalsUi.busy = true;
+      const id = b.dataset.approve;
+      $$("[data-approve],[data-deny]").forEach((x) => (x.disabled = true));
+      b.innerHTML = `<span class="spinner"></span> Waiting for you`;
+      toast("Confirm on the machine that runs the gateway (Windows Hello or its terminal).", "ok");
+      try {
+        await api(`/api/approvals/${encodeURIComponent(id)}/approve`, { method: "POST", body: "{}" });
+        toast("Approved. The client can now repeat the identical call once.", "ok");
+      } catch (e) {
+        toast(e.message, "error");
+      } finally {
+        approvalsUi.busy = false;
+        loadApprovals(false).catch(() => {});
+      }
+    })
+  );
+  $$("[data-deny]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      if (approvalsUi.busy) return;
+      approvalsUi.busy = true;
+      try {
+        await api(`/api/approvals/${encodeURIComponent(b.dataset.deny)}/deny`, { method: "POST", body: "{}" });
+        toast("Denied.", "ok");
+      } catch (e) {
+        toast(e.message, "error");
+      } finally {
+        approvalsUi.busy = false;
+        loadApprovals(false).catch(() => {});
+      }
+    })
+  );
+}
+
+async function renderApprovals() {
+  loadingView();
+  stopApprovalsTimers();
+  try {
+    await loadApprovals(true);
+  } catch (e) {
+    view().innerHTML = pageHead("Approvals") + errorBanner(e);
+    return;
+  }
+  // The countdown moves every second; the list is re-read every few seconds, and at once when one expires.
+  approvalsUi.tick = setInterval(() => {
+    if (currentPath() !== "/approvals") return stopApprovalsTimers();
+    if (tickApprovals() && !approvalsUi.busy) loadApprovals(false).catch(() => {});
+  }, 1000);
+  approvalsUi.poll = setInterval(() => {
+    if (currentPath() !== "/approvals") return stopApprovalsTimers();
+    if (!approvalsUi.busy && !document.hidden) loadApprovals(false).catch(() => {});
+  }, 3000);
+}
+
+// ============================================================================
+// VIEW: Clients (design 3.1) - who may call /mcp, and how far
+// ============================================================================
+function clientFormHtml(c, isNew) {
+  const sel = (val, opts) =>
+    opts.map(([v, label]) => `<option value="${attr(v)}"${v === (val || "") ? " selected" : ""}>${esc(label)}</option>`).join("");
+  return `
+    ${isNew ? `<div class="field"><label for="c-id">Client id</label>
+      <input id="c-id" class="input" placeholder="e.g. codex" autofocus />
+      <div class="hint">1 to 64 characters from a-z, 0-9, '-' and '_'. This is the name the bridge uses: <code>switchboard bridge --client &lt;id&gt;</code>.</div></div>` : ""}
+    <div class="field"><label for="c-desc">Description</label>
+      <input id="c-desc" class="input" value="${attr(c.description || "")}" placeholder="What this client is" /></div>
+    <div class="field"><label for="c-servers">Servers it may see and call</label>
+      <input id="c-servers" class="input" value="${attr((c.servers || []).join(", "))}" placeholder="* or voice, youtube" />
+      <div class="hint">Comma separated server id globs. <code>*</code> is every server; an empty list is none.</div></div>
+    <div class="field"><label for="c-tools">Tool allowlist (optional)</label>
+      <input id="c-tools" class="input" value="${attr((c.tools || []).join(", "))}" placeholder="voice__text_*" />
+      <div class="hint">Exposed tool name globs. Empty means every tool of the allowed servers.</div></div>
+    <div class="field"><label for="c-excl">Hidden tools (optional)</label>
+      <input id="c-excl" class="input" value="${attr((c.exclude_tools || []).join(", "))}" placeholder="*__delete_*" /></div>
+    <div class="row">
+      <div class="field" style="flex:1;min-width:160px"><label for="c-scope">Scope ceiling</label>
+        <select id="c-scope" class="select">${sel(c.max_scope, [["", "(server ceiling)"], ["read", "read"], ["write", "write"], ["full", "full"]])}</select></div>
+      <div class="field" style="flex:1;min-width:160px"><label for="c-risk">Risk ceiling</label>
+        <select id="c-risk" class="select">${sel(c.max_risk, [["", "(high)"], ["low", "low"], ["medium", "medium"], ["high", "high (still needs approval)"]])}</select></div>
+      <div class="field" style="flex:1;min-width:160px"><label for="c-rate">Calls per minute</label>
+        <input id="c-rate" class="input" type="number" min="1" value="${attr(c.limits && c.limits.per_minute ? c.limits.per_minute : "")}" placeholder="no limit" /></div>
+    </div>`;
+}
+
+function readClientForm(m, existing) {
+  const v = (id) => $(id, m.root).value.trim();
+  const body = {
+    description: v("#c-desc"),
+    servers: csvList(v("#c-servers")),
+  };
+  const tools = csvList(v("#c-tools"));
+  const excl = csvList(v("#c-excl"));
+  const rate = Number.parseInt(v("#c-rate"), 10);
+  if (existing) {
+    // PUT merges; null clears an optional field.
+    body.description = body.description || null;
+    body.tools = tools.length ? tools : null;
+    body.exclude_tools = excl.length ? excl : null;
+    body.max_scope = v("#c-scope") || null;
+    body.max_risk = v("#c-risk") || null;
+    body.limits = Number.isFinite(rate) && rate > 0 ? { per_minute: rate } : null;
+  } else {
+    if (!body.description) delete body.description;
+    if (tools.length) body.tools = tools;
+    if (excl.length) body.exclude_tools = excl;
+    if (v("#c-scope")) body.max_scope = v("#c-scope");
+    if (v("#c-risk")) body.max_risk = v("#c-risk");
+    if (Number.isFinite(rate) && rate > 0) body.limits = { per_minute: rate };
+  }
+  return body;
+}
+
+function confirmModal({ title, body, confirmLabel, danger, onConfirm }) {
+  const m = openModal({
+    title,
+    body: `<p class="dim mt-0">${body}</p>`,
+    footer: `<button class="btn" data-close="1" id="cf-cancel">Cancel</button>
+             <button class="btn ${danger ? "btn-danger" : "btn-primary"}" id="cf-ok">${esc(confirmLabel)}</button>`,
+  });
+  $("#cf-cancel", m.root).addEventListener("click", m.close);
+  $("#cf-ok", m.root).addEventListener("click", async () => {
+    const btn = $("#cf-ok", m.root);
+    btn.disabled = true;
+    btn.innerHTML = `<span class="spinner"></span>`;
+    try {
+      await onConfirm();
+      m.close();
+    } catch (e) {
+      toast(e.message, "error");
+      btn.disabled = false;
+      btn.textContent = confirmLabel;
+    }
+  });
+  return m;
+}
+
+async function renderClients() {
+  loadingView();
+  let data;
+  try { data = await api("/api/clients"); } catch (e) { view().innerHTML = pageHead("Clients") + errorBanner(e); return; }
+  const posture = data.enforced
+    ? `<span class="badge badge-ok"><span class="dot"></span>Enforced</span>`
+    : `<span class="badge badge-off"><span class="dot"></span>Single-user mode</span>`;
+  const rows = data.clients
+    .map(
+      (c) => `
+      <tr data-id="${attr(c.id)}">
+        <td><strong>${esc(c.id)}</strong>${c.description ? `<div class="dim small">${esc(c.description)}</div>` : ""}</td>
+        <td><code>${esc((c.servers || []).join(", ") || "(none)")}</code>${c.tools && c.tools.length ? `<div class="dim small">tools: ${esc(c.tools.join(", "))}</div>` : ""}${c.exclude_tools && c.exclude_tools.length ? `<div class="dim small">hidden: ${esc(c.exclude_tools.join(", "))}</div>` : ""}</td>
+        <td class="nowrap">${scopeBadge(c.max_scope || "server")} ${riskBadge(c.max_risk || "high")}${c.limits && c.limits.per_minute ? `<div class="dim small">${esc(c.limits.per_minute)}/min</div>` : ""}</td>
+        <td class="dim">${c.keys.length} key${c.keys.length === 1 ? "" : "s"}${c.key_file ? "" : ` <span class="small">(no key file)</span>`}${c.keys[0] && c.keys[0].last_used ? `<div class="small">used ${esc(relTime(c.keys[0].last_used))}</div>` : ""}</td>
+        <td class="table-actions nowrap">
+          <button class="btn btn-sm" data-edit="${attr(c.id)}">Edit</button>
+          <button class="btn btn-sm" data-rotate="${attr(c.id)}">Rotate key</button>
+          <button class="btn btn-sm btn-danger" data-revoke="${attr(c.id)}">Revoke keys</button>
+          <button class="btn btn-sm btn-danger" data-remove="${attr(c.id)}">Remove</button>
+        </td>
+      </tr>`
+    )
+    .join("");
+  view().innerHTML =
+    pageHead(
+      "Clients",
+      "The callers that may use /mcp, what each may see, and how far it may go. A client's keys live in a protected key file read by the bridge; a token is never shown here.",
+      `<button class="btn btn-primary" id="cl-new">+ Add client</button>`
+    ) +
+    `<div class="row" style="margin-bottom:14px">Access control: ${posture}
+      <span class="dim">· ${data.clients.length} client${data.clients.length === 1 ? "" : "s"}${data.enforced ? ": /mcp needs a key bound to one of them" : ": add one and /mcp starts requiring a client key"}</span></div>` +
+    (data.orphan_keys && data.orphan_keys.length
+      ? `<div class="error-banner">${data.orphan_keys.length} key(s) are bound to a client that is not configured and are refused: ${esc(data.orphan_keys.map((k) => `${k.id} (${k.client})`).join(", "))}</div>`
+      : "") +
+    (data.clients.length
+      ? `<div class="panel" style="padding:6px 0;overflow-x:auto"><table class="table">
+          <thead><tr><th>Client</th><th>Servers</th><th>Ceilings (scope, risk)</th><th>Keys</th><th></th></tr></thead>
+          <tbody>${rows}</tbody></table></div>`
+      : `<div class="empty"><div class="empty-ico">☺</div><div class="empty-title">No clients yet</div>
+          <div>Add one for each tool that calls Switchboard (Claude Code, Codex, a local model) so each has its own key, its own servers and its own ceiling.</div></div>`);
+
+  $("#cl-new").addEventListener("click", () => {
+    const m = openModal({
+      title: "Add a client",
+      body: clientFormHtml({ servers: ["*"], max_scope: "read", max_risk: "low" }, true),
+      footer: `<button class="btn" data-close="1" id="cl-cancel">Cancel</button>
+               <button class="btn btn-primary" id="cl-create">Create client</button>`,
+    });
+    $("#cl-cancel", m.root).addEventListener("click", m.close);
+    $("#cl-create", m.root).addEventListener("click", async () => {
+      const btn = $("#cl-create", m.root);
+      btn.disabled = true;
+      btn.innerHTML = `<span class="spinner"></span>`;
+      try {
+        const body = readClientForm(m, null);
+        body.id = $("#c-id", m.root).value.trim();
+        await api("/api/clients", { method: "POST", body: JSON.stringify(body) });
+        m.close();
+        toast("Client created. Its key is in the protected key file for the bridge.", "ok");
+        renderClients();
+      } catch (e) {
+        toast(e.message, "error");
+        btn.disabled = false;
+        btn.textContent = "Create client";
+      }
+    });
+  });
+
+  $$("[data-edit]").forEach((b) =>
+    b.addEventListener("click", () => {
+      const c = data.clients.find((x) => x.id === b.dataset.edit);
+      if (!c) return;
+      const m = openModal({
+        title: `Edit ${c.id}`,
+        body: clientFormHtml(c, false),
+        footer: `<button class="btn" data-close="1" id="cl-cancel">Cancel</button>
+                 <button class="btn btn-primary" id="cl-save">Save</button>`,
+      });
+      $("#cl-cancel", m.root).addEventListener("click", m.close);
+      $("#cl-save", m.root).addEventListener("click", async () => {
+        const btn = $("#cl-save", m.root);
+        btn.disabled = true;
+        btn.innerHTML = `<span class="spinner"></span>`;
+        try {
+          await api(`/api/clients/${encodeURIComponent(c.id)}`, { method: "PUT", body: JSON.stringify(readClientForm(m, c)) });
+          m.close();
+          toast("Saved. A running gateway applies it on the next call.", "ok");
+          renderClients();
+        } catch (e) {
+          toast(e.message, "error");
+          btn.disabled = false;
+          btn.textContent = "Save";
+        }
+      });
+    })
+  );
+
+  $$("[data-rotate]").forEach((b) =>
+    b.addEventListener("click", () => {
+      const id = b.dataset.rotate;
+      confirmModal({
+        title: `Rotate the key of ${id}?`,
+        body: "A new key replaces the old one in the client key file. The old key stops working at once, so a client that holds it directly must be given the new one.",
+        confirmLabel: "Rotate key",
+        onConfirm: async () => {
+          await api(`/api/clients/${encodeURIComponent(id)}/rotate`, { method: "POST", body: "{}" });
+          toast("Key rotated. The bridge reads the new one from the key file.", "ok");
+          renderClients();
+        },
+      });
+    })
+  );
+
+  $$("[data-revoke]").forEach((b) =>
+    b.addEventListener("click", () => {
+      const id = b.dataset.revoke;
+      confirmModal({
+        title: `Revoke the keys of ${id}?`,
+        body: "Every key of this client stops working and its key file is deleted. The client entry stays, so you can rotate a new key in later.",
+        confirmLabel: "Revoke keys",
+        danger: true,
+        onConfirm: async () => {
+          await api(`/api/clients/${encodeURIComponent(id)}?purge=0`, { method: "DELETE" });
+          toast("Keys revoked.", "ok");
+          renderClients();
+        },
+      });
+    })
+  );
+
+  $$("[data-remove]").forEach((b) =>
+    b.addEventListener("click", () => {
+      const id = b.dataset.remove;
+      confirmModal({
+        title: `Remove ${id}?`,
+        body: "Its keys are revoked, its key file is deleted and the client is removed from the config. This cannot be undone.",
+        confirmLabel: "Remove client",
+        danger: true,
+        onConfirm: async () => {
+          await api(`/api/clients/${encodeURIComponent(id)}`, { method: "DELETE" });
+          toast("Client removed.", "ok");
+          renderClients();
+        },
+      });
+    })
+  );
+}
+
+// ============================================================================
+// Chrome: pending count, kill-switch banner and toggle, sign out
+// ============================================================================
+function updateNavCount(n) {
+  const el = $("#nav-approvals-count");
+  if (!el) return;
+  el.hidden = !(n > 0);
+  el.textContent = String(n);
+}
+
+let killActive = false;
+
+function paintKill(st) {
+  killActive = Boolean(st && st.active);
+  let banner = $("#kill-banner");
+  if (killActive) {
+    if (!banner) {
+      banner = document.createElement("div");
+      banner.id = "kill-banner";
+      banner.className = "kill-banner";
+      banner.setAttribute("role", "alert");
+      document.body.prepend(banner);
+    }
+    banner.textContent = `Kill switch is ON${st.since ? ` since ${new Date(st.since).toLocaleString()}` : ""}: every tool call, resource read and prompt get is refused until it is turned off.`;
+  } else if (banner) {
+    banner.remove();
+  }
+  const btn = $("#kill-toggle");
+  if (btn) {
+    btn.textContent = killActive ? "Kill switch ON: turn off" : "Kill switch off: turn on";
+    btn.classList.toggle("btn-danger", !killActive);
+    btn.classList.toggle("btn-primary", killActive);
+  }
+}
+
+async function refreshChrome() {
+  try {
+    const [s, a] = await Promise.all([api("/api/state", { quiet: true }), api("/api/approvals", { quiet: true })]);
+    paintKill(s.kill_switch);
+    updateNavCount((a.pending || []).length);
+  } catch {
+    /* the sign-in banner already explains a 401; a transient failure just leaves the last state */
+  }
+}
+
+$("#kill-toggle").addEventListener("click", () => {
+  if (killActive) {
+    confirmModal({
+      title: "Turn the kill switch off?",
+      body: "Every tool call, resource read and prompt get is allowed again. Windows Hello (or the gateway's terminal) will ask you to confirm you are present on the machine that runs the gateway.",
+      confirmLabel: "Turn off",
+      onConfirm: async () => {
+        paintKill(await api("/api/kill", { method: "POST", body: JSON.stringify({ on: false }) }));
+        toast("Kill switch off. Calls are allowed again.", "ok");
+      },
+    });
+  } else {
+    confirmModal({
+      title: "Turn the kill switch on?",
+      body: "Every tool call, resource read and prompt get is refused at once, for every client, until you turn it off.",
+      confirmLabel: "Turn on",
+      danger: true,
+      onConfirm: async () => {
+        paintKill(await api("/api/kill", { method: "POST", body: JSON.stringify({ on: true }) }));
+        toast("Kill switch on. Everything is refused.", "ok");
+      },
+    });
+  }
+});
+
+$("#sign-out").addEventListener("click", async () => {
+  try {
+    await api("/api/session", { method: "DELETE" });
+  } catch {
+    /* already signed out */
+  }
+  csrfToken = null;
+  stopApprovalsTimers();
+  paintKill(null);
+  view().innerHTML = pageHead("Signed out", "Run switchboard dashboard login in a terminal on this machine to sign in again.");
+  showSignInBanner("You signed out.");
+});
+
+setInterval(() => {
+  if (csrfToken && !document.hidden) refreshChrome();
+}, 10000);
+
+// ============================================================================
 // Router
 // ============================================================================
 const routes = {
   "/catalog": renderCatalog,
   "/accounts": renderAccounts,
   "/servers": renderServers,
+  "/clients": renderClients,
+  "/approvals": renderApprovals,
   "/triggers": renderTriggers,
   "/playground": renderPlayground,
   "/logs": renderLogs,
@@ -1803,6 +2333,7 @@ function setActiveNav(path) {
 async function router() {
   const path = currentPath();
   const fn = routes[path] || routes["/catalog"];
+  stopApprovalsTimers();
   setActiveNav(path);
   window.scrollTo(0, 0);
   try {
@@ -1821,6 +2352,7 @@ async function start() {
   await establishSession(); // redeem #login=<code> or recover the CSRF value, before any view fetches
   if (!location.hash) location.hash = "#/catalog";
   refreshSidebar();
+  refreshChrome();
   router();
 }
 

@@ -30,14 +30,16 @@ import type {
   GetPromptResult,
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Registry, MountedServer } from "./registry.js";
-import type { LimitSpec, Scope, SwitchboardConfig } from "./types.js";
+import type { LimitSpec, Risk, Scope, SwitchboardConfig } from "./types.js";
 import { evaluate, resolveToolScope } from "./policy.js";
 import {
   gateAllowsServer,
   gateAllowsTool,
   gateLabel,
+  gateRiskCeiling,
   gateScopeCeiling,
   principalAudit,
+  principalLabel,
   resolveClientGate,
   type ClientGate,
   type Principal,
@@ -49,7 +51,14 @@ import {
   profileAllowsTool,
   profileScopeCeiling,
 } from "./profiles.js";
-import { approve } from "./approval.js";
+import {
+  Approvals,
+  ApprovalLimitError,
+  DEFAULT_TTL_SECONDS,
+  INTERNAL_PRINCIPAL,
+  MAX_WAIT_SECONDS,
+  type ApprovalRequest,
+} from "./approvals.js";
 import { audit, sanitizeForAudit, type AuditInput } from "./audit.js";
 import { deliverWebhook, type SecretResolver, type WebhookEvent } from "./webhook.js";
 import {
@@ -118,19 +127,29 @@ interface Caller {
   attr: { principal?: string; client?: string };
 }
 
+/** What settling an approval gate came to: go on, stop for the kill switch, or stop with a coded refusal. */
+type Settled =
+  | { go: true; approvalId: string }
+  | { go: false; killed: true }
+  | { go: false; killed?: false; code: SbErrorCode; message: string; auditReason: string; extra?: Record<string, unknown> };
+
 export class Router {
   /** Rate-limit + spend-budget enforcement, built once from the immutable config for this Router. */
   private readonly governor: Governor;
   /** Per-server circuit breaker — fails fast on a wedged/dead upstream instead of hanging. */
   private readonly breaker: Breaker;
+  /** Out-of-band approvals (design 3.3). The gateway passes the one its dashboard decides on; a Router built alone gets its own. */
+  private readonly approvals: Approvals;
 
   constructor(
     private readonly registry: Registry,
     private readonly cfg: SwitchboardConfig,
     private readonly resolveSecret: SecretResolver,
+    approvals?: Approvals,
   ) {
     this.governor = new Governor(cfg);
     this.breaker = new Breaker(cfg);
+    this.approvals = approvals ?? new Approvals();
   }
 
   /** Read-only health of every server's circuit breaker — for an observability endpoint/dashboard. */
@@ -460,8 +479,12 @@ export class Router {
 
   /** Govern, then forward, a real tool call to its upstream server. */
   private async forward(exposedName: string, args: Record<string, unknown>, caller: Caller): Promise<CallToolResult> {
-    // Every audit row of this call carries the caller's principal and client.
-    const rec = (e: AuditInput): void => this.record(e, caller);
+    // Every audit row of this call carries the caller's principal and client, its risk (once known) and the
+    // approval it ran under (once consumed).
+    let risk: Risk | undefined;
+    let approvalId: string | undefined;
+    const rec = (e: AuditInput): void =>
+      this.record({ ...(risk ? { risk } : {}), ...(approvalId ? { approval_id: approvalId } : {}), ...e }, caller);
     const gate = caller.gate;
     // Checked again here, not only in callTool(): each entry of a batch_call is its own call, and the
     // switch can be thrown between two of them.
@@ -483,7 +506,9 @@ export class Router {
       profileScopeCeiling(active),
       this.annotationsOf(server, toolName),
       gateScopeCeiling(gate),
+      gateRiskCeiling(gate),
     );
+    risk = verdict.risk;
 
     // Defense in depth: a tool hidden by the active profile must also be UNCALLABLE, not merely
     // absent from the listing. resolve() works off raw upstream names, so a client that names a
@@ -530,20 +555,25 @@ export class Router {
       return this.error(`upstream '${server.id}' is unavailable (circuit open)${retry}: ${health.reason}`, SB_ERR.UPSTREAM_UNAVAILABLE);
     }
 
-    // Settle the approval gate before executing. A denied approval is the only path that
-    // audits without an execution; everything allowed audits ONCE after the call so the row
-    // can carry timing and (opt-in) request/response.
+    // Settle the approval gate before executing (design 3.3). The gate no longer waits for a keystroke: a gated call
+    // either consumes an approval the owner already gave for exactly these arguments, or leaves a pending request
+    // and tells the caller how the owner approves it. A denied or unusable approval is the only path that audits
+    // without an execution; everything allowed audits ONCE after the call so the row can carry timing and (opt-in)
+    // request/response.
     let reason = verdict.reason;
     if (verdict.decision === "approval_required") {
-      // Notify the webhook that a call is waiting for a human decision. This is a NOTIFICATION
-      // only — it writes NO audit row, so it can never double-count against usage totals; the
-      // audit log records the eventual allow/deny once the gate is settled below.
-      this.fireWebhook({ decision: "approval_required", server: server.id, tool: toolName, scope: verdict.scope, reason: verdict.reason });
-      const allowed = await approve(server.id, toolName, verdict.scope, verdict.reason);
-      if (!allowed) {
-        rec({ server: server.id, tool: toolName, scope: verdict.scope, decision: "deny", reason: "approval denied/unavailable", error_code: SB_ERR.APPROVAL_DENIED });
-        return this.error(`approval required and not granted for '${exposedName}'`, SB_ERR.APPROVAL_DENIED);
+      // The hash is taken over the arguments as the client sent them: BEFORE applyArgTransforms below injects a secret.
+      const settled = await this.settleApproval(server, toolName, exposedName, args, verdict, caller, () => isKilled(this.cfg));
+      if (!settled.go) {
+        // The switch can be thrown while we waited for the owner. The approval stays unused for when it is cleared.
+        if (settled.killed) return this.refuseIfKilled(exposedName, caller) ?? this.error("kill switch is on", SB_ERR.KILL_SWITCH);
+        // A pending request already wrote its own approval_required row when it was created.
+        if (settled.code !== SB_ERR.APPROVAL_PENDING) {
+          rec({ server: server.id, tool: toolName, scope: verdict.scope, decision: "deny", reason: settled.auditReason, error_code: settled.code });
+        }
+        return this.error(settled.message, settled.code, settled.extra);
       }
+      approvalId = settled.approvalId;
       reason = "approved";
     }
 
@@ -788,7 +818,7 @@ export class Router {
       const promptName = name.slice(idx + SEP.length);
       const server = this.registry.get(serverId);
       if (server && server.client.getServerCapabilities()?.prompts) {
-        await this.governRead(server, "prompts/get", promptName, caller);
+        await this.governRead(server, "prompts/get", promptName, caller, { name: promptName, arguments: args ?? {} });
         return this.fetchPrompt(server, promptName, args, caller);
       }
     }
@@ -804,7 +834,7 @@ export class Router {
         continue; // not this server
       }
       if (!listed.includes(name)) continue;
-      await this.governRead(server, "prompts/get", name, caller);
+      await this.governRead(server, "prompts/get", name, caller, { name, arguments: args ?? {} });
       return this.fetchPrompt(server, name, args, caller);
     }
     throw new McpError(ErrorCode.InvalidParams, `[switchboard] unknown prompt '${name}'`);
@@ -844,7 +874,7 @@ export class Router {
    * buckets a tool call draws from), then the approval gate. Every refusal is audited and thrown as an
    * McpError(InvalidRequest) with the SB_* code in `data.code`.
    */
-  private async governRead(server: MountedServer, tool: ReadSurface, detail: string, caller: Caller): Promise<void> {
+  private async governRead(server: MountedServer, tool: ReadSurface, detail: string, caller: Caller, bound: unknown = { detail }): Promise<void> {
     const gate = caller.gate;
     const deny = (code: SbErrorCode, why: string, message: string): never => {
       this.record({ server: server.id, tool, scope: "read", decision: "deny", reason: `${why}: ${detail}`, error_code: code }, caller);
@@ -865,7 +895,7 @@ export class Router {
         gate.deny !== null ? `denied by policy: ${gate.deny}` : `denied by policy: '${server.id}' is not available to ${gateLabel(gate)}`,
       );
     }
-    const verdict = evaluate(server.config, tool, this.cfg, "read", profileScopeCeiling(active), undefined, gateScopeCeiling(gate));
+    const verdict = evaluate(server.config, tool, this.cfg, "read", profileScopeCeiling(active), undefined, gateScopeCeiling(gate), gateRiskCeiling(gate));
     if (verdict.decision === "deny") {
       return deny(SB_ERR.POLICY_DENY, verdict.reason, `denied by policy: ${verdict.reason}`);
     }
@@ -875,9 +905,14 @@ export class Router {
       return deny(SB_ERR.RATE_LIMITED, gov.reason ?? "limit exceeded", `rate limited: ${gov.reason ?? "limit exceeded"}${retry}`);
     }
     if (verdict.decision === "approval_required") {
-      this.fireWebhook({ decision: "approval_required", server: server.id, tool, scope: "read", reason: verdict.reason });
-      if (!(await approve(server.id, tool, "read", verdict.reason))) {
-        return deny(SB_ERR.APPROVAL_DENIED, "approval denied/unavailable", `approval required and not granted for ${tool} on '${server.id}'`);
+      const settled = await this.settleApproval(server, tool, `${tool} ${detail}`, bound, verdict, caller, () => isKilled(this.cfg));
+      if (!settled.go) {
+        if (settled.killed) {
+          this.assertNotKilled(tool, detail, caller);
+          return deny(SB_ERR.KILL_SWITCH, "kill switch is on", "kill switch is on");
+        }
+        if (settled.code === SB_ERR.APPROVAL_PENDING) throw this.refusal(settled.code, settled.message, settled.extra);
+        return deny(settled.code, settled.auditReason, settled.message);
       }
     }
   }
@@ -912,8 +947,103 @@ export class Router {
   }
 
   /** A governed refusal on a result-or-error surface: the code travels in the message and in `data`. */
-  private refusal(code: SbErrorCode, message: string): McpError {
-    return new McpError(ErrorCode.InvalidRequest, `[switchboard] ${code}: ${message}`, { code, hint: SB_HINTS[code] });
+  private refusal(code: SbErrorCode, message: string, extra?: Record<string, unknown>): McpError {
+    return new McpError(ErrorCode.InvalidRequest, `[switchboard] ${code}: ${message}`, { code, hint: SB_HINTS[code], ...extra });
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Approvals (design 3.3). One settle step shared by tool calls, resources/read and prompts/get.
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * A gated call has reached the approval gate. Consume the approval the owner gave for exactly this call
+   * (principal, server, tool, canonical arguments), or leave a pending request and say how to approve it.
+   * With `gateway.approval.wait_seconds` above 0 the call first waits that long for a decision; the kill
+   * switch is looked at again after any wait, because it can be thrown while nobody is watching the call.
+   * A store that cannot be used refuses the call (fail closed); it never reads as "no approvals needed".
+   */
+  private async settleApproval(
+    server: MountedServer,
+    toolName: string,
+    label: string,
+    bound: unknown,
+    verdict: { scope: Scope; risk: Risk; reason: string },
+    caller: Caller,
+    killed: () => boolean,
+  ): Promise<Settled> {
+    const conf = this.cfg.gateway.approval;
+    const ttl = conf?.ttl_seconds ?? DEFAULT_TTL_SECONDS;
+    const waitMs = Math.min(MAX_WAIT_SECONDS, Math.max(0, conf?.wait_seconds ?? 0)) * 1000;
+    const req: ApprovalRequest = {
+      principal: caller.principal ? principalLabel(caller.principal) : INTERNAL_PRINCIPAL,
+      client: caller.principal?.client ?? null,
+      server: server.id,
+      tool: toolName,
+      args: bound,
+      scope: verdict.scope,
+      risk: verdict.risk,
+      reason: verdict.reason,
+    };
+    const unusable = (err: unknown): Settled => {
+      if (err instanceof ApprovalLimitError) {
+        return { go: false, code: SB_ERR.RATE_LIMITED, message: `rate limited: ${err.message}`, auditReason: err.message };
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        go: false,
+        code: SB_ERR.APPROVAL_DENIED,
+        message: `approval required for '${label}' and the approval store cannot be used, so the call is refused: ${msg}`,
+        auditReason: `approval store unusable: ${msg}`.slice(0, 500),
+      };
+    };
+
+    let gate;
+    try {
+      gate = this.approvals.request(req, ttl);
+    } catch (err) {
+      return unusable(err);
+    }
+    // A NOTIFICATION only, once per request (a client repeating the call must not fire it again).
+    if ((gate.kind === "pending" && gate.created) || (gate.kind === "approved" && gate.via === "env-auto")) {
+      this.fireWebhook({ decision: "approval_required", server: server.id, tool: toolName, scope: verdict.scope, reason: verdict.reason });
+    }
+
+    if (gate.kind === "pending" && waitMs > 0) {
+      let decided;
+      try {
+        decided = await this.approvals.waitForDecision(gate.record.id, waitMs);
+      } catch (err) {
+        return unusable(err);
+      }
+      if (killed()) return { go: false, killed: true };
+      if (decided?.status === "denied" || decided?.status === "expired") {
+        return {
+          go: false,
+          code: SB_ERR.APPROVAL_DENIED,
+          message: `approval ${decided.id} for '${label}' was ${decided.status === "denied" ? "denied by the owner" : "not decided before it expired"}`,
+          auditReason: `approval ${decided.id} ${decided.status}`,
+        };
+      }
+      if (decided?.status === "approved") {
+        try {
+          gate = this.approvals.request(req, ttl); // consume it
+        } catch (err) {
+          return unusable(err);
+        }
+      }
+    }
+
+    if (gate.kind === "approved") return { go: true, approvalId: gate.record.id };
+
+    const id = gate.record.id;
+    const instruction = `approve in the Switchboard dashboard (Approvals) or run: switchboard approvals approve ${id}, then call the same tool again with the same arguments`;
+    return {
+      go: false,
+      code: SB_ERR.APPROVAL_PENDING,
+      message: `approval required for '${label}' (${gate.record.risk} risk). Approval ${id} is waiting for the owner and is valid until ${gate.record.expires}. To proceed: ${instruction}`,
+      auditReason: `approval ${id} pending`,
+      extra: { approval_id: id, expires: gate.record.expires, risk: gate.record.risk, instruction },
+    };
   }
 
   /** The upstream's annotations for a tool, from the tool list the registry cached at mount. */
@@ -974,11 +1104,11 @@ export class Router {
   /** Build an error result. When a `SB_*` code is supplied, the text is structured JSON carrying
    *  the message, the stable code, and a one-line actionable hint — so an agent gets a fixable
    *  failure instead of an opaque string. Without a code it stays plain text (back-compat). */
-  private error(message: string, code?: SbErrorCode): CallToolResult {
+  private error(message: string, code?: SbErrorCode, extra?: Record<string, unknown>): CallToolResult {
     const text =
       code === undefined
         ? `[switchboard] ${message}`
-        : JSON.stringify({ error: `[switchboard] ${message}`, code, hint: SB_HINTS[code] });
+        : JSON.stringify({ error: `[switchboard] ${message}`, code, hint: SB_HINTS[code], ...extra });
     return { isError: true, content: [{ type: "text", text }] };
   }
 }

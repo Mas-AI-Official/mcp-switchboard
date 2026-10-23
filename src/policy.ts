@@ -12,11 +12,37 @@
  * are never mistaken for reads. Anything with a destructive token is `full`; everything else is `write`.
  * Upstream annotations can only TIGHTEN the result (`destructiveHint: true` raises to `full`); a
  * `readOnlyHint` is a claim by the upstream and never lowers a scope.
+ *
+ * Scope is the CEILING check. A second axis, risk (design 3.4), decides APPROVAL: read is low, write is
+ * medium, full is high by default; a tool's own `risk`, the server's `risk_defaults` and `outward: true`
+ * (which raises write and full to high) refine it. Calls whose risk is listed in
+ * `gateway.approval.require_for_risk` (default high) need an out-of-band approval, OR-ed with the server's
+ * `approval.require_for` scopes. A client's `max_risk` is a ceiling like `max_scope`: above it, the call is refused.
  */
 
-import type { Scope, ServerConfig, SwitchboardConfig, ToolOverride } from "./types.js";
+import type { Risk, Scope, ServerConfig, SwitchboardConfig, ToolOverride } from "./types.js";
 
 const SCOPE_RANK: Record<Scope, number> = { read: 0, write: 1, full: 2 };
+
+export const RISK_RANK: Record<Risk, number> = { low: 0, medium: 1, high: 2 };
+
+/** Risk of a call by scope when nothing says otherwise (design 3.4). */
+export const DEFAULT_RISK_BY_SCOPE: Readonly<Record<Scope, Risk>> = { read: "low", write: "medium", full: "high" };
+
+/** Risks that need an approval when `gateway.approval.require_for_risk` is not set. */
+export const DEFAULT_REQUIRE_FOR_RISK: readonly Risk[] = ["high"];
+
+/**
+ * The risk of a call at `scope` on `server` (design 3.4). Precedence: the tool's own `risk` (the operator's
+ * explicit word, in both directions) > the server's `risk_defaults` for that scope > the built-in default.
+ * `outward: true` then raises write and full to high; it never lowers anything and never touches read.
+ */
+export function resolveRisk(server: Pick<ServerConfig, "risk_defaults" | "outward">, scope: Scope, override?: Pick<ToolOverride, "risk">): Risk {
+  if (override?.risk) return override.risk;
+  let risk: Risk = server.risk_defaults?.[scope] ?? DEFAULT_RISK_BY_SCOPE[scope];
+  if (server.outward === true && scope !== "read" && RISK_RANK[risk] < RISK_RANK.high) risk = "high";
+  return risk;
+}
 
 /**
  * Tool annotations as an upstream reports them (MCP `Tool.annotations`). Structural on purpose, so a
@@ -107,12 +133,20 @@ export function resolveToolScope(
 export interface PolicyDecision {
   decision: "allow" | "deny" | "approval_required";
   scope: Scope;
+  /** Risk of the call (design 3.4); it decides approval, scope decides the ceiling. */
+  risk: Risk;
   reason: string;
 }
 
 /** A caller's client and the scope ceiling its profile sets (design 3.1); an extra cap beside the server and the profile. */
 export interface ClientCeiling {
   scope: Scope;
+  client: string;
+}
+
+/** A caller's client and the highest risk it may request (`max_risk`, design 3.4). */
+export interface ClientRiskCeiling {
+  risk: Risk;
   client: string;
 }
 
@@ -124,17 +158,19 @@ export function evaluate(
   profileCeiling?: Scope,
   annotations?: ToolAnnotationsLike,
   clientCeiling?: ClientCeiling,
+  clientRiskCeiling?: ClientRiskCeiling,
 ): PolicyDecision {
   const override = server.tools?.[toolName];
 
   if (override?.enabled === false) {
-    return { decision: "deny", scope: "read", reason: `tool '${toolName}' is disabled in config` };
+    return { decision: "deny", scope: "read", risk: "low", reason: `tool '${toolName}' is disabled in config` };
   }
 
   // Precedence: explicit per-tool override > generator-supplied verb→scope hint (app2mcp) >
   // name-based inference, then upstream annotations tighten (never loosen) the result. The hint lets
   // OpenAPI HTTP verbs drive scope when the tool name alone (e.g. `findPetsByStatus`) would be misread.
   const scope: Scope = resolveToolScope(toolName, override, scopeHint, annotations);
+  const risk: Risk = resolveRisk(server, scope, override);
   // The effective ceiling is the TIGHTEST of the server/gateway cap, the active profile's cap and the
   // calling client's cap. A profile or a client can only ever LOWER the ceiling (read < write < full),
   // never raise it, so a `read` profile forces read-only even on a server configured for `full`.
@@ -154,18 +190,37 @@ export function evaluate(
     return {
       decision: "deny",
       scope,
+      risk,
       reason: `'${toolName}' needs '${scope}' but ${cappedBy} is capped at '${ceiling}'`,
     };
   }
 
-  const requireFor = server.approval?.require_for ?? [];
-  if (requireFor.includes(scope)) {
+  // The client's risk ceiling (design 3.4): refused before any approval exists, so a client that may not ask for
+  // a high-risk call can never put one in front of the owner.
+  if (clientRiskCeiling !== undefined && RISK_RANK[risk] > RISK_RANK[clientRiskCeiling.risk]) {
     return {
-      decision: "approval_required",
+      decision: "deny",
       scope,
-      reason: `approval gate: '${scope}' calls on '${server.id}' require confirmation`,
+      risk,
+      reason: `'${toolName}' is '${risk}' risk but client '${clientRiskCeiling.client}' may request at most '${clientRiskCeiling.risk}' (max_risk)`,
     };
   }
 
-  return { decision: "allow", scope, reason: "ok" };
+  // Two independent triggers, OR-ed (design 3.4): the server's scopes and the gateway's risks.
+  const requireFor = server.approval?.require_for ?? [];
+  const requireForRisk = cfg.gateway.approval?.require_for_risk ?? DEFAULT_REQUIRE_FOR_RISK;
+  const byScope = requireFor.includes(scope);
+  const byRisk = requireForRisk.includes(risk);
+  if (byScope || byRisk) {
+    return {
+      decision: "approval_required",
+      scope,
+      risk,
+      reason: byScope
+        ? `approval gate: '${scope}' calls on '${server.id}' require confirmation${byRisk ? ` (and '${risk}' risk calls do)` : ""}`
+        : `approval gate: '${risk}' risk calls require confirmation (gateway.approval.require_for_risk)`,
+    };
+  }
+
+  return { decision: "allow", scope, risk, reason: "ok" };
 }

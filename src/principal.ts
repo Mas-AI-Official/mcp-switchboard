@@ -13,7 +13,7 @@
  * or a refusal. Nothing here touches disk, the network or process state.
  */
 
-import type { ClientConfig, Scope } from "./types.js";
+import type { ClientConfig, Risk, Scope } from "./types.js";
 
 /** The documented client id shape (design 3.1). */
 export const CLIENT_ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -168,6 +168,12 @@ export function gateAllowsTool(gate: ClientGate, exposedName: string): boolean {
 export function gateScopeCeiling(gate: ClientGate | undefined): { scope: Scope; client: string } | undefined {
   if (!gate?.profile?.max_scope || !gate.client) return undefined;
   return { scope: gate.profile.max_scope, client: gate.client };
+}
+
+/** The highest risk the client may request (`max_risk`, design 3.4), if it sets one. Omitted means no extra cap (high). */
+export function gateRiskCeiling(gate: ClientGate | undefined): { risk: Risk; client: string } | undefined {
+  if (!gate?.profile?.max_risk || !gate.client) return undefined;
+  return { risk: gate.profile.max_risk, client: gate.client };
 }
 
 /** The tighter of two optional scope ceilings. */

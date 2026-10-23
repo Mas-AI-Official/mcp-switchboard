@@ -59,8 +59,12 @@ Every tool call is classified and checked:
 - **Kill switch:** the `$SWITCHBOARD_HOME/KILL` file or `gateway.kill_switch` refuses every tool call, resource read and prompt get (`SB_KILL_SWITCH`). Design vNext 3.8.
 - **Resources and prompts** run through the same policy, profile, kill-switch and governor gates at read scope. Design vNext 3.10.
 - **Per-tool overrides:** block `delete_repo`, allow `create_issue`, etc.
-- **Approval gates:** `write`/`full` calls can require an interactive human confirm
-  (`src/approval.ts`, fail-closed — the same CMD-vs-EXE separation idea applied to MCP tools).
+- **Risk and approval gates:** a second axis, risk (`low`/`medium`/`high`: read, write, full by default, raised by a server's
+  `outward: true` or a tool's `risk`), decides approval; scope stays the ceiling. A call whose risk is in
+  `gateway.approval.require_for_risk` (default `high`), or whose scope is in the server's `approval.require_for`, does not
+  prompt anyone: it returns `SB_APPROVAL_PENDING`, the owner approves out of band (dashboard Approvals page or
+  `switchboard approvals approve <id>`, each behind a presence check the gateway itself performs, Windows Hello), and the
+  identical call then runs exactly once (`src/approvals.ts`, design vNext 3.3 and 3.4). A client's `max_risk` caps what it may ask.
 - **Audit log:** append-only record of every call + verdict (`src/audit.ts`).
 
 ### 5. Tool Router / Tool-Search (`src/router.ts`) — the scaling fix
@@ -105,7 +109,8 @@ API — no spec, no magic; a reference without a resolvable spec still fails clo
 1. Agent calls `github__create_issue` on the gateway.
 2. Gateway → Router → Policy Engine: server `github` enabled? tool not blocked? inferred scope
    (`write`) ≤ the server's ceiling? approval required for this scope?
-3. If an approval gate is set → prompt the human (`approve()`), default no; deny if non-interactive.
+3. If an approval gate applies → consume the owner's approval for exactly this call (principal, server, tool, canonical
+   arguments), or leave a pending request and return `SB_APPROVAL_PENDING` with the id and how to approve it. Nothing prompts.
 4. The verdict is written to the append-only audit log.
 5. On *allow*, the registry's `github` client forwards the call (with `GITHUB_TOKEN` already injected
    from the vault at mount time) and the upstream result is returned to the agent.

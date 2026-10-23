@@ -11,9 +11,23 @@ export { OAuthStore, type ProviderStatus } from "./oauth.js";
 export { buildOpenApiServer, type OpenApiServer } from "./openapi.js";
 export { guardedFetch, NetGuardError, classifyAddress, type GuardedInit, type GuardedResponse } from "./netguard.js";
 export { loadConfig, writeConfig, starterConfig } from "./config.js";
-export { evaluate, inferScope, resolveToolScope, type PolicyDecision } from "./policy.js";
+export { evaluate, inferScope, resolveToolScope, resolveRisk, type PolicyDecision } from "./policy.js";
 export { isKilled, killStatus, setKillFile, killFilePath, type KillStatus } from "./killswitch.js";
 export { approve, setStdioActive } from "./approval.js";
+export {
+  Approvals,
+  ApprovalLimitError,
+  argsSha256,
+  presenceMessage,
+  summarizeArgs,
+  type ApprovalRecord,
+  type ApprovalView,
+  type ApprovalStatus,
+  type ApprovalGate,
+  type ApprovalOutcome,
+  type ApprovalRequest,
+  type PresenceProvider,
+} from "./approvals.js";
 export { audit, recentAudit, verifyAudit, AuditLog, type AuditEntry, type AuditVerifyResult } from "./audit.js";
 export { startDashboard, type DashboardHandle } from "./dashboard.js";
 export {

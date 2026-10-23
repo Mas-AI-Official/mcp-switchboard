@@ -14,6 +14,8 @@ export const SB_ERR = {
   POLICY_DENY: "SB_POLICY_DENY",
   /** A human declined the approval gate (or it was not approved in time). */
   APPROVAL_DENIED: "SB_APPROVAL_DENIED",
+  /** The call needs an out-of-band approval that has not been given yet. Approve it, then repeat the identical call. */
+  APPROVAL_PENDING: "SB_APPROVAL_PENDING",
   /** The upstream MCP server returned an error. */
   UPSTREAM_ERROR: "SB_UPSTREAM_ERROR",
   /** The upstream call exceeded `settings.call_timeout_ms`. */
@@ -35,9 +37,11 @@ export const SB_HINTS: Record<SbErrorCode, string> = {
   [SB_ERR.UNKNOWN_TOOL]:
     "No tool by that name is exposed. Call find_tools (or list tools) to see current names — the server may be disabled or the tool dropped.",
   [SB_ERR.POLICY_DENY]:
-    "This tool's scope exceeds a ceiling (the server `policy`, the active profile, or the calling client's `max_scope`), or it is hidden from the calling client. Raise the server `policy` (read < write < full), pin the tool's `policy`, or change the client's servers, tools and max_scope (`switchboard client list`) in config. Least privilege is the default.",
+    "This tool's scope exceeds a ceiling (the server `policy`, the active profile, or the calling client's `max_scope`), its risk is above the calling client's `max_risk`, or it is hidden from the calling client. Raise the server `policy` (read < write < full), pin the tool's `policy`, or change the client's servers, tools, max_scope and max_risk (`switchboard client list`) in config. Least privilege is the default.",
   [SB_ERR.APPROVAL_DENIED]:
-    "A human declined (or did not approve in time) the approval gate. Re-issue the call and approve it in the dashboard, or relax `approval.require_for`.",
+    "The approval was declined, it expired before it was used, or the approval store could not be used. Make the call again to create a new approval request, or relax `approval.require_for` / `gateway.approval.require_for_risk` in config.",
+  [SB_ERR.APPROVAL_PENDING]:
+    "This call needs the owner's approval, bound to these exact arguments. The owner approves it in the Switchboard dashboard (Approvals) or with `switchboard approvals approve <id>` on the machine that runs the gateway; then repeat the same call with the same arguments. An approval works once and expires.",
   [SB_ERR.UPSTREAM_ERROR]:
     "The upstream MCP server returned an error. Check that server's credentials and the Logs page for the underlying message.",
   [SB_ERR.UPSTREAM_TIMEOUT]:

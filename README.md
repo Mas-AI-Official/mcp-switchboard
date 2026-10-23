@@ -809,6 +809,26 @@ Every call is classified (`read`/`write`/`full`), checked against the server's s
 any per-tool override, optionally held for human approval, then forwarded — and **every verdict is
 written to an append-only audit log**. Full walkthrough in **[docs/BLUEPRINT.md](docs/BLUEPRINT.md)**.
 
+### Approvals and risk
+
+Scope (`read < write < full`) is the ceiling. A second axis, **risk** (`low`, `medium`, `high`), decides who has to say yes:
+read is low, write is medium, full is high, and `outward: true` on a server (it posts, sends, spends) makes its writes high.
+By default every **high** call needs the owner's approval, on top of any server `approval.require_for` scopes.
+
+A gated call does not wait at a prompt. It returns `SB_APPROVAL_PENDING` with an approval id and tells the caller to ask you:
+
+```bash
+switchboard approvals list                # what is waiting
+switchboard approvals approve ap_7KQ2M9XD # Windows Hello pops up on the machine that runs the gateway
+switchboard approvals deny ap_7KQ2M9XD
+```
+
+or use the dashboard's **Approvals** page. The approval is bound to the exact arguments, works once, and expires (15 minutes by
+default); the client then repeats the identical call. The gateway itself verifies you are present before it signs anything, so
+an agent that can run the CLI or edit `~/.switchboard/approvals.json` still cannot approve its own call. Tune it under
+`gateway.approval` (`require_for_risk`, `ttl_seconds`, `wait_seconds`), per tool with `risk`, per server with `risk_defaults`
+and `outward`, and per client with `max_risk`. See [the design](docs/architecture/MCP_SWITCHBOARD_VNEXT.md) (3.3 and 3.4).
+
 ### Tool-exposure modes
 
 Mount 30 servers and naive aggregation dumps ~600 tool schemas into your agent's context — accuracy

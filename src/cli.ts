@@ -17,6 +17,7 @@
  *   switchboard local-llm wire       wire a detected local server into the council
  *   switchboard toolkits sync        rebuild the integration catalog from open indexes
  *   switchboard toolkits stats       print catalog counts
+ *   switchboard approvals list|show|approve|deny   decide the calls waiting for the owner (talks to the running gateway)
  *   switchboard kill on|off|status   refuse every tool call, resource read and prompt get (kill switch)
  *   switchboard audit verify [--all] walk the audit log's hash chain; report the first break with its seq
  *   switchboard vault set <name>     store a secret (value read from stdin)
@@ -50,6 +51,9 @@ import { OAuthStore } from "./oauth.js";
 import { ApiKeyStore } from "./apikeys.js";
 import { ClientAdmin, ClientAdminError, NEW_CLIENT_DEFAULTS, type ClientSpec } from "./clientadmin.js";
 import { ClientConfigWatcher } from "./clientconfig.js";
+import { APPROVAL_ID_RE, APPROVALS_FILE, summarizeArgs, type ApprovalView } from "./approvals.js";
+import { readControlKey } from "./controlkey.js";
+import { readJsonFileSync } from "./atomicfile.js";
 import { BAD_CLIENT_ID, isValidClientId, type Principal } from "./principal.js";
 import { inferScope } from "./policy.js";
 import { killFilePath, killStatus, setKillFile } from "./killswitch.js";
@@ -189,6 +193,9 @@ program
       wantsStdio = false;
     }
 
+    if (!wantsHttp) {
+      log.warn("the HTTP listener is off (gateway.transport has no http): calls that need approval cannot be approved, because approvals are decided on the dashboard or with `switchboard approvals` against the running listener");
+    }
     if (wantsHttp) await requireFreeHttpPort(cfg);
     const gateway = await createGateway(cfg);
 
@@ -763,6 +770,172 @@ program
     log.ok(changed ? "kill switch OFF: calls are allowed again" : "kill switch was already off");
   });
 
+// ── approvals (design 3.3) ───────────────────────────────────────────────────────────────────────
+
+const approvalsCmd = program
+  .command("approvals")
+  .description("decide the calls that wait for the owner: list, show, approve, deny (talks to the running gateway)");
+
+/** An error the user should read as one line, with its exit code. */
+class CliFail extends Error {}
+
+/**
+ * Call the RUNNING gateway's control API. The CLI never decides anything itself: `approve` makes the gateway ask
+ * for owner presence (Windows Hello, or a challenge at the gateway's own console) and sign the decision. The
+ * control token that authenticates this call is a convenience, not the security boundary: anything that runs as
+ * this OS user can read it, so the presence prompt inside the gateway is the real gate.
+ */
+async function controlCall(
+  method: "GET" | "POST",
+  path: string,
+  timeoutMs: number,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const cfg = loadConfig(configPath());
+  const port = cfg.gateway.http.port;
+  let token: string | null;
+  try {
+    token = readControlKey();
+  } catch (err) {
+    throw new CliFail(err instanceof Error ? err.message : String(err));
+  }
+  if (token === null) throw new CliFail(`no control key in ${HOME_DIR}: no gateway has started here. Start one with \`switchboard dashboard\` or \`switchboard serve\`.`);
+  let res;
+  try {
+    // Explicit local call to our own gateway: loopback is permitted for this one request, nothing else.
+    res = await guardedFetch(`http://127.0.0.1:${port}/api/control${path}`, {
+      method,
+      headers: { authorization: `Bearer ${token}` },
+      timeoutMs,
+      allowLoopback: true,
+    });
+  } catch {
+    throw new CliFail(`no gateway answered on 127.0.0.1:${port} (or the request timed out). Is it running?`);
+  }
+  let body: Record<string, unknown> = {};
+  try {
+    body = (await res.json()) as Record<string, unknown>;
+  } catch {
+    /* an empty or non-JSON body is reported by status */
+  }
+  if (res.status === 401) {
+    throw new CliFail("the gateway rejected the control token: it was restarted since the key was read, or another gateway shares this SWITCHBOARD_HOME. Run the command again.");
+  }
+  return { status: res.status, body };
+}
+
+function checkApprovalId(id: string): void {
+  if (!APPROVAL_ID_RE.test(id)) throw new CliFail(`'${id}' is not an approval id (they look like ap_7KQ2M9XD)`);
+}
+
+function until(iso: string): string {
+  const ms = Date.parse(iso) - Date.now();
+  if (!Number.isFinite(ms)) return iso;
+  if (ms <= 0) return "expired";
+  const s = Math.round(ms / 1000);
+  return s < 90 ? `${s}s` : s < 5400 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`;
+}
+
+function approvalLine(a: ApprovalView): string {
+  const who = a.client ?? a.principal;
+  const state = a.status === "pending" || a.status === "approved" ? `${a.status}, ${until(a.expires)} left` : a.status;
+  return `  ${a.id}  ${a.risk.padEnd(6)} ${a.server}__${a.tool}  ${who}  [${state}]  ${summarizeArgs(a.args_preview, 70)}`;
+}
+
+function approvalAction<A extends unknown[]>(fn: (...args: A) => Promise<void>): (...args: A) => Promise<void> {
+  return async (...args: A) => {
+    try {
+      await fn(...args);
+    } catch (err) {
+      log.error(err instanceof CliFail || err instanceof Error ? err.message : String(err));
+      process.exitCode = 1;
+    }
+  };
+}
+
+approvalsCmd
+  .command("list")
+  .description("list the calls waiting for the owner, and the latest decisions")
+  .option("--all", "also show the finished ones (approved and used, denied, expired)")
+  .action(
+    approvalAction(async (opts: { all?: boolean }) => {
+      let data: { pending?: ApprovalView[]; approved?: ApprovalView[]; history?: ApprovalView[] };
+      try {
+        const r = await controlCall("GET", "/approvals", 15_000);
+        if (r.status !== 200) throw new CliFail(String(r.body.error ?? `the gateway answered ${r.status}`));
+        data = r.body as typeof data;
+      } catch (err) {
+        if (!(err instanceof CliFail) || !/no gateway answered|no control key/.test(err.message)) throw err;
+        // The gateway is not running. The file is all there is, and nothing in it is verified: say so.
+        log.warn(`${err.message}`);
+        log.warn(`showing the raw ${APPROVALS_FILE} instead. These records are NOT verified (only a running gateway can tell a real one from a forged one), and nothing can be approved until a gateway runs.`);
+        const raw = readJsonFileSync<{ approvals?: ApprovalView[] }>(resolve(HOME_DIR, APPROVALS_FILE))?.approvals ?? [];
+        data = { pending: raw.filter((a) => a.status === "pending"), approved: [], history: raw.filter((a) => a.status !== "pending") };
+      }
+      const pending = data.pending ?? [];
+      const approved = data.approved ?? [];
+      out(pending.length === 0 ? "no calls are waiting for the owner" : `${pending.length} waiting for the owner:`);
+      for (const a of pending) out(approvalLine(a));
+      if (approved.length > 0) {
+        out(`${approved.length} approved, not used yet:`);
+        for (const a of approved) out(approvalLine(a));
+      }
+      if (opts.all) {
+        out(`${(data.history ?? []).length} finished:`);
+        for (const a of data.history ?? []) out(approvalLine(a));
+      }
+      if (pending.length > 0) out("\n  decide with: switchboard approvals approve <id>   |   switchboard approvals deny <id>");
+    }),
+  );
+
+approvalsCmd
+  .command("show <id>")
+  .description("show one approval request in full")
+  .action(
+    approvalAction(async (id: string) => {
+      checkApprovalId(id);
+      const r = await controlCall("GET", `/approvals/${id}`, 15_000);
+      if (r.status !== 200) throw new CliFail(String(r.body.error ?? `the gateway answered ${r.status}`));
+      const a = r.body.approval as ApprovalView;
+      out(`${a.id}  ${a.status}`);
+      out(`  call:      ${a.server}__${a.tool}  (${a.scope} scope, ${a.risk} risk)`);
+      out(`  caller:    ${a.principal}${a.client ? `  client ${a.client}` : ""}`);
+      out(`  why:       ${a.reason}`);
+      out(`  created:   ${a.created}`);
+      out(`  expires:   ${a.expires}  (${until(a.expires)})`);
+      out(`  decided:   ${a.decided_via ? `${a.decided_via} at ${a.decided_at}${a.presence ? `, presence ${a.presence}` : ""}` : "not yet"}`);
+      out(`  args hash: ${a.args_sha256}`);
+      out(`  arguments: ${JSON.stringify(a.args_preview, null, 2).replace(/\n/g, "\n             ")}`);
+    }),
+  );
+
+approvalsCmd
+  .command("approve <id>")
+  .description("approve one request: the gateway asks for your presence (Windows Hello), then the client may repeat the identical call once")
+  .action(
+    approvalAction(async (id: string) => {
+      checkApprovalId(id);
+      out("asking the gateway to verify you are present (Windows Hello on this machine, or a challenge at the gateway's terminal)...");
+      const r = await controlCall("POST", `/approvals/${id}/approve`, 150_000);
+      if (r.status !== 200) throw new CliFail(String(r.body.error ?? `the gateway answered ${r.status}`));
+      const a = r.body.approval as ApprovalView;
+      log.ok(`approved ${a.id}: ${a.server}__${a.tool} for ${a.client ?? a.principal}`);
+      out(`  valid for ${until(a.expires)}, one use. The client must now repeat the same call with the same arguments.`);
+    }),
+  );
+
+approvalsCmd
+  .command("deny <id>")
+  .description("deny one request (no presence check is needed to say no)")
+  .action(
+    approvalAction(async (id: string) => {
+      checkApprovalId(id);
+      const r = await controlCall("POST", `/approvals/${id}/deny`, 15_000);
+      if (r.status !== 200) throw new CliFail(String(r.body.error ?? `the gateway answered ${r.status}`));
+      const a = r.body.approval as ApprovalView;
+      log.ok(`denied ${a.id}: ${a.server}__${a.tool} for ${a.client ?? a.principal}`);
+    }),
+  );
+
 const auditCmd = program.command("audit").description("inspect the tamper-evident audit log");
 
 auditCmd
@@ -1019,7 +1192,7 @@ clientCmd
   .description("create or update a client and issue its key (stored for `switchboard bridge --client <id>`; printed only with --print)")
   .option("--servers <list>", `comma separated server id globs the client may see and call (new client default: ${NEW_CLIENT_DEFAULTS.servers.join(",")})`)
   .option("--max-scope <scope>", `scope ceiling: read | write | full (new client default: ${NEW_CLIENT_DEFAULTS.max_scope})`)
-  .option("--max-risk <risk>", `highest risk it may request: low | medium | high (new client default: ${NEW_CLIENT_DEFAULTS.max_risk}; stored now, enforced later)`)
+  .option("--max-risk <risk>", `highest risk it may request: low | medium | high (new client default: ${NEW_CLIENT_DEFAULTS.max_risk}; a call above it is refused, high still needs an approval)`)
   .option("--print", "print the token once (otherwise it goes only to the client key file)")
   .action(
     clientAction((admin, _cfg, id: string, opts: { servers?: string; maxScope?: string; maxRisk?: string; print?: boolean }) => {

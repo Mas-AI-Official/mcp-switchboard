@@ -10,6 +10,11 @@
 // and EOF all deny). One typed line can therefore resolve at most one prompt, and a line typed before the
 // prompt existed can never approve anything.
 //
+// STATUS (design 3.3). The in-band TTY gate is no longer on the call path: the Router creates out-of-band, argument-bound
+// approvals instead (src/approvals.ts, proven by verify-approvals). Sections 1 to 5 and 7 still exercise the legacy
+// module src/approval.ts on its own, unchanged, and keep guarding it for as long as it is exported. Section 6, the
+// end-to-end Router case, was ADAPTED to the new contract (see there).
+//
 // This oracle plays the human against the REAL gate in a child process whose stdin and stdout look like a
 // terminal (scripts/fixtures/approval-child.mjs). It proves:
 //   concurrency   N concurrent approvals show ONE prompt at a time; one bare 'y' approves none; one code
@@ -18,8 +23,8 @@
 //   fail closed   EOF on stdin denies every pending call and the process is not left hanging; a flood is
 //                 bounded (calls beyond the queue limit are refused at once); spoofed prompt text in a tool
 //                 name is neutralised
-//   end to end    the real Router: a batch_call of three gated calls with a single 'y' executes nothing;
-//                 with one code it executes exactly one call
+//   end to end    the real Router: a batch_call of three gated calls prints no prompt, executes nothing, and a
+//                 typed 'y' or code approves nothing (adapted: it used to execute exactly one call per code)
 //   unchanged     SWITCHBOARD_AUTO_APPROVE=1 still approves, a non-TTY still denies (fail closed), an
 //                 active stdio transport still denies
 // Zero deps (node stdlib + the package's compiled output + its bundled MCP SDK). Build first.
@@ -260,27 +265,31 @@ const approved = (r) => (r.result?.results ?? []).filter((v) => v === true).leng
 
 // =====================================================================================================
 // 6. end to end through the real Router: batch_call with three gated calls
+//
+// ADAPTED for design 3.3. Before: the Router prompted on the terminal, so one 'y' approved all three calls (0.1.0)
+// and, after the fix, one typed code approved exactly the call it was shown for. Now the Router has no in-band
+// channel: a gated call returns SB_APPROVAL_PENDING and leaves a request only the owner can decide out of band
+// (dashboard or `switchboard approvals`, each behind a gateway-side presence check, proven by verify-approvals).
+// So the contract this section pins is: no prompt appears, nothing executes, every call is told how to proceed,
+// and nothing typed at the terminal approves anything. The old "a code executes exactly one call" check has no
+// counterpart here (the channel it exercised is gone); "an approval executes exactly one call" is in verify-approvals.
 // =====================================================================================================
 {
-  const single = await drive(["router-batch"], async (h) => {
-    await h.waitFor(/\[approval\]/);
-    await h.sleep(900);
-    h.send("y\n");
-    await h.sleep(1_500);
+  const quiet = await drive(["router-batch"], async (h) => {
+    await h.sleep(1_200);
     h.end();
   });
-  assert("6 batch_call of 3 gated calls (2 writes, 1 destructive) + one 'y': nothing executes (it executed all 3)", single.result && single.result.executed.length === 0, `executed ${JSON.stringify(single.result?.executed)}`);
+  assert("6 batch_call of 3 gated calls (2 writes, 1 destructive): the Router prints no in-band prompt", !/\[approval\]|Type [A-Z2-7]{4} to allow/.test(quiet.stdout), JSON.stringify(quiet.stdout.slice(0, 120)));
+  assert("6 ...and nothing executes (it executed all 3 in 0.1.0)", quiet.result && quiet.result.executed.length === 0, `executed ${JSON.stringify(quiet.result?.executed)}`);
+  assert("6 ...each of the three calls comes back SB_APPROVAL_PENDING (told how to proceed), none is silently dropped", quiet.result?.pending === 3, `pending ${quiet.result?.pending}`);
 
-  let m = null;
-  let tool = "";
-  const one = await drive(["router-batch"], async (h) => {
-    m = await h.waitFor(CODE_PROMPT);
-    tool = ((h.stdout.match(/\[approval\][^\n]*?(send_note|delete_thing)/) ?? [])[1]) ?? "";
-    if (m) h.send(`${m[1]}\n`);
-    await h.waitFor(CODE_PROMPT);
+  const typed = await drive(["router-batch"], async (h) => {
+    await h.sleep(500);
+    h.send("y\ny\nABCD\n");
+    await h.sleep(1_000);
     h.end();
   });
-  assert("6 batch_call + the code of the first prompt: exactly the call named in that prompt executes", !!one.result && one.result.executed.length === 1 && !!tool && one.result.executed[0].startsWith(`${tool}:`), `prompt named '${tool}', executed ${JSON.stringify(one.result?.executed)}`);
+  assert("6 a 'y' and a code typed at the terminal approve nothing", typed.result && typed.result.executed.length === 0 && typed.result.pending === 3, `executed ${JSON.stringify(typed.result?.executed)} pending ${typed.result?.pending}`);
 }
 
 // =====================================================================================================

@@ -34,6 +34,12 @@
           <a class="nav-item" href="#/servers" data-match="#/servers">
             <span class="nav-ico">⊟</span> Servers
           </a>
+          <a class="nav-item" href="#/clients" data-match="#/clients">
+            <span class="nav-ico">☺</span> Clients
+          </a>
+          <a class="nav-item" href="#/approvals" data-match="#/approvals">
+            <span class="nav-ico">✓</span> Approvals <span class="nav-count" id="nav-approvals-count" hidden></span>
+          </a>
           <a class="nav-item" href="#/triggers" data-match="#/triggers">
             <span class="nav-ico">⚡</span> Triggers
           </a>
@@ -60,6 +66,10 @@
             <div class="endpoint-label">MCP endpoint</div>
             <code class="endpoint-url" id="endpoint-url">loading…</code>
             <button class="btn btn-ghost btn-sm" id="copy-endpoint" type="button">Copy</button>
+          </div>
+          <div class="owner-row">
+            <button class="btn btn-sm btn-danger" id="kill-toggle" type="button">Kill switch</button>
+            <button class="btn btn-ghost btn-sm" id="sign-out" type="button">Sign out</button>
           </div>
           <div class="org-line" id="org-line"></div>
         </div>

@@ -23,9 +23,11 @@ import { VERSION } from "./gateway.js";
 import type { SwitchboardConfig, SettingsConfig, ServerConfig, CouncilConfig, ClientConfig } from "./types.js";
 import type { BreakerHealth, BreakerState } from "./breaker.js";
 import { writeConfig, parseTriggersConfig } from "./config.js";
-import { recentAudit, usageStats } from "./audit.js";
-import { resolveToolScope } from "./policy.js";
-import { killStatus } from "./killswitch.js";
+import { audit, recentAudit, usageStats } from "./audit.js";
+import { resolveRisk, resolveToolScope, DEFAULT_REQUIRE_FOR_RISK } from "./policy.js";
+import { killStatus, setKillFile } from "./killswitch.js";
+import { DEFAULT_TTL_SECONDS, type ApprovalChannel, type ApprovalOutcome } from "./approvals.js";
+import { bearerOf, controlTokenMatches, newControlToken, writeControlKey } from "./controlkey.js";
 import { activeProfileName, describeProfile } from "./profiles.js";
 import { ApiKeyStore } from "./apikeys.js";
 import { ClientAdmin, ClientAdminError } from "./clientadmin.js";
@@ -552,6 +554,86 @@ export async function startDashboard(
   });
 
   // ====================================================================
+  // Control API (design 3.3): how `switchboard approvals ...` reaches THIS running gateway. It is a separate
+  // router with its own credential, the control token minted at start and kept in SWITCHBOARD_HOME/control.key
+  // (DPAPI-wrapped). An owner session does not open it and the control token does not open the owner routes.
+  // The token is a convenience that keeps stray local callers out; the security boundary is the owner presence
+  // check the gateway performs inside approve() (Windows Hello), which no caller can answer for the owner.
+  // ====================================================================
+  const approvals = gateway.approvals;
+  const controlToken = newControlToken();
+  try {
+    writeControlKey(controlToken);
+  } catch (err) {
+    log.warn(`could not store the control key (${err instanceof Error ? err.message : String(err)}): \`switchboard approvals\` cannot reach this gateway; decide approvals in the dashboard`);
+  }
+
+  const outcomeToResponse = (res: Response, out: ApprovalOutcome, key: string): void => {
+    if (out.ok) {
+      res.json({ [key]: true, approval: out.record });
+      return;
+    }
+    res.status(out.status).json({ error: out.error, code: out.code, ...(out.record ? { approval: out.record } : {}) });
+  };
+  const approvalError = (res: Response, err: unknown): void => {
+    res.status(500).json({ error: `the approval store cannot be used: ${err instanceof Error ? err.message : String(err)}`, code: "SB_APPROVAL_STORE" });
+  };
+  /** Approve through the gateway's own presence check, whichever door the request came through. */
+  const approveVia = (via: ApprovalChannel) => async (req: Request, res: Response): Promise<void> => {
+    try {
+      outcomeToResponse(res, await approvals.approve(String(req.params.id), via), "approved");
+    } catch (err) {
+      approvalError(res, err);
+    }
+  };
+  const denyVia = (via: ApprovalChannel) => (req: Request, res: Response): void => {
+    try {
+      outcomeToResponse(res, approvals.deny(String(req.params.id), via), "denied");
+    } catch (err) {
+      approvalError(res, err);
+    }
+  };
+  const approvalsPayload = () => ({
+    ...approvals.list(),
+    now: new Date().toISOString(),
+    ttl_seconds: cfg.gateway.approval?.ttl_seconds ?? DEFAULT_TTL_SECONDS,
+    require_for_risk: cfg.gateway.approval?.require_for_risk ?? [...DEFAULT_REQUIRE_FOR_RISK],
+    // Harness switches that weaken the gate: the page says so out loud when either is on.
+    auto_approve: process.env.SWITCHBOARD_AUTO_APPROVE === "1",
+    insecure_presence: process.env.SWITCHBOARD_INSECURE_APPROVAL === "1",
+  });
+
+  const control = express.Router();
+  control.use((req: Request, res: Response, next: () => void) => {
+    res.setHeader("Cache-Control", "no-store");
+    const presented = bearerOf(req.headers["authorization"]);
+    if (presented === null || !controlTokenMatches(presented, controlToken)) {
+      res.status(401).json({ error: "control token required: `switchboard approvals` reads it from SWITCHBOARD_HOME/control.key", code: "SB_CONTROL_TOKEN" });
+      return;
+    }
+    next();
+  });
+  control.get("/approvals", (_req: Request, res: Response) => {
+    try {
+      res.json(approvalsPayload());
+    } catch (err) {
+      approvalError(res, err);
+    }
+  });
+  control.get("/approvals/:id", (req: Request, res: Response) => {
+    try {
+      const rec = approvals.get(String(req.params.id));
+      if (!rec) res.status(404).json({ error: `no approval '${req.params.id}'`, code: "SB_APPROVAL_UNKNOWN" });
+      else res.json({ approval: rec });
+    } catch (err) {
+      approvalError(res, err);
+    }
+  });
+  control.post("/approvals/:id/approve", approveVia("cli"));
+  control.post("/approvals/:id/deny", denyVia("cli"));
+  app.use("/api/control", control);
+
+  // ====================================================================
   // Owner gate: every /api route below needs a valid owner session cookie, and every mutating one the
   // X-Switchboard-CSRF header. Client API keys are never read here (defect D4: a loopback peer is not
   // the owner).
@@ -592,6 +674,7 @@ export async function startDashboard(
         name: t.name,
         enabled: s.tools?.[t.name]?.enabled !== false,
         scope: resolveToolScope(t.name, s.tools?.[t.name], mounted?.scopeHints?.[t.name], t.annotations),
+        risk: resolveRisk(s, resolveToolScope(t.name, s.tools?.[t.name], mounted?.scopeHints?.[t.name], t.annotations), s.tools?.[t.name]),
       }));
       return {
         id: s.id,
@@ -624,6 +707,70 @@ export async function startDashboard(
       profiles,
       servers,
     });
+  });
+
+  // --- Approvals (design 3.3). Owner session and CSRF as for every /api route; approving also needs the
+  // owner to be PRESENT: the gateway shows Windows Hello (or a challenge on its own console) before it signs. ---
+  app.get("/api/approvals", (_req: Request, res: Response) => {
+    try {
+      res.json(approvalsPayload());
+    } catch (err) {
+      approvalError(res, err);
+    }
+  });
+  app.get("/api/approvals/:id", (req: Request, res: Response) => {
+    try {
+      const rec = approvals.get(String(req.params.id));
+      if (!rec) res.status(404).json({ error: `no approval '${req.params.id}'`, code: "SB_APPROVAL_UNKNOWN" });
+      else res.json({ approval: rec });
+    } catch (err) {
+      approvalError(res, err);
+    }
+  });
+  app.post("/api/approvals/:id/approve", approveVia("dashboard"));
+  app.post("/api/approvals/:id/deny", denyVia("dashboard"));
+
+  // --- Kill switch from the dashboard. ON is immediate. OFF is the dangerous direction (it re-opens every tool),
+  // so it needs the owner present, performed by the gateway, exactly like an approval. ---
+  const ownerAudit = (tool: string, reason: string): void => {
+    try {
+      audit({ server: "switchboard", tool, scope: "full", decision: "allow", reason, principal: "owner:dashboard" });
+    } catch (err) {
+      log.error(`audit write failed for ${tool}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+  app.get("/api/kill", (_req: Request, res: Response) => {
+    res.json(killStatus(cfg));
+  });
+  app.post("/api/kill", async (req: Request, res: Response) => {
+    const on = (req.body as { on?: unknown } | undefined)?.on;
+    if (typeof on !== "boolean") {
+      res.status(400).json({ error: "body must be {\"on\": true|false}" });
+      return;
+    }
+    try {
+      if (on) {
+        const { changed } = setKillFile(true);
+        ownerAudit("kill.on", changed ? "kill switch turned ON from the dashboard" : "kill switch was already on");
+        res.json(killStatus(cfg));
+        return;
+      }
+      if (cfg.gateway.kill_switch === true) {
+        res.status(409).json({ error: "gateway.kill_switch is true in the config, which the dashboard cannot clear: set it to false and restart the gateway", code: "SB_KILL_CONFIG" });
+        return;
+      }
+      const presence = await approvals.verifyPresence("Turn the MCP Switchboard kill switch OFF: tool calls will be allowed again");
+      if (!presence.ok) {
+        ownerAudit("kill.off_refused", `presence check failed (${presence.method}): ${presence.reason}`);
+        res.status(403).json({ error: `owner presence was not verified (${presence.method}): ${presence.reason}`, code: "SB_PRESENCE_FAILED" });
+        return;
+      }
+      const { changed } = setKillFile(false);
+      ownerAudit("kill.off", `${changed ? "kill switch turned OFF" : "kill switch was already off"} from the dashboard (presence ${presence.method})`);
+      res.json(killStatus(cfg));
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
   });
 
   app.get("/api/audit", (_req: Request, res: Response) => {
@@ -851,8 +998,10 @@ export async function startDashboard(
   app.delete("/api/clients/:id", (req: Request, res: Response) => {
     try {
       const id = String(req.params.id);
-      const r = clientAdmin.remove(id, { purge: true });
-      res.json({ removed: id, revoked_keys: r.revokedKeys, key_file_removed: r.keyFileRemoved });
+      // Default: remove the client entirely. `?purge=0` revokes its keys and key file but keeps the config entry.
+      const purge = req.query.purge !== "0" && req.query.purge !== "false";
+      const r = clientAdmin.remove(id, { purge });
+      res.json({ removed: id, purged: r.purged, revoked_keys: r.revokedKeys, key_file_removed: r.keyFileRemoved });
     } catch (err) {
       clientError(res, err);
     }

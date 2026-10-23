@@ -319,8 +319,11 @@ async function main() {
           `  - id: ${id}\n    source: binary\n    command: ${q(process.execPath)}\n    args: [${q(SELF)}, "--upstream", ${q(id)}]\n    policy: ${POLICY[id]}\n    env:\n      SB_FIXTURE_LOG: ${q(FIXLOG)}`,
       )
       .join("\n");
+  // Adapted for design 3.4 (risk): a full-scope call is high risk and needs an out-of-band approval by default. This
+  // oracle measures principals, client filters and ceilings, not approvals, so the gateway it starts says that no risk
+  // needs one (`approval.require_for_risk: []`). Approvals have their own oracle (verify-approvals).
   const configYaml = ({ port, transport = "[http]", exposure = "namespaced", clients = "", servers = ["alpha", "beta", "gamma"], extra = "" }) =>
-    `# ORACLE-MARKER keep this comment\ngateway:\n  transport: ${transport}\n  http: { host: 127.0.0.1, port: ${port}, require_auth: auto }\n  tool_exposure: ${exposure}\n  default_policy: read\nvault:\n  backend: encrypted-file\nservers:\n${serversYaml(servers)}\nsettings:\n  logs:\n    capture_io: false\n${extra}${clients}`;
+    `# ORACLE-MARKER keep this comment\ngateway:\n  transport: ${transport}\n  http: { host: 127.0.0.1, port: ${port}, require_auth: auto }\n  tool_exposure: ${exposure}\n  default_policy: read\n  approval:\n    require_for_risk: []\nvault:\n  backend: encrypted-file\nservers:\n${serversYaml(servers)}\nsettings:\n  logs:\n    capture_io: false\n${extra}${clients}`;
 
   const ALL = ["alpha__create_note", "alpha__delete_note", "alpha__get_info", "alpha__get_status", "beta__get_info", "beta__get_weather", "beta__send_message", "gamma__get_time", "gamma__ping"];
 
@@ -920,7 +923,9 @@ clients:
 
       // --- add again: update, keep the key ---
       const keyFileBytes = readFileSync(CK.clientKeyPath("coder"));
-      const add2 = await cli(["client", "add", "coder", "--max-scope", "write", "--print"]);
+      // Adapted for design 3.4: max_risk is enforced now. A new client is created with max_risk low, and a write is medium
+      // risk, so "may now write" needs the risk ceiling raised together with the scope ceiling (the denial names max_risk).
+      const add2 = await cli(["client", "add", "coder", "--max-scope", "write", "--max-risk", "medium", "--print"]);
       assert("C: `client add` on an existing client updates it and keeps the working key", add2.code === 0 && /updated/.test(add2.stderr) && /existing key is kept/.test(add2.stdout) && !secretShape.test(add2.stdout + add2.stderr), (add2.stdout + add2.stderr).slice(0, 240));
       assert("C: the key file was not rewritten and the servers list was kept", readFileSync(CK.clientKeyPath("coder")).equals(keyFileBytes) && loadConfig(cfgPathC).clients.coder.max_scope === "write" && loadConfig(cfgPathC).clients.coder.servers[0] === "alpha");
       const bridge2 = await lineSession(["bridge", "--client", "coder", "--url", urlC], [initMsg(1), callMsg(2, "alpha__create_note")], { want: 2 });

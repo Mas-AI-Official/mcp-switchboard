@@ -230,8 +230,11 @@ const srv = (over = {}) => ({ id: "s", source: "npx", enabled: true, policy: "fu
 
   const capped = evaluate(srv({ policy: "write" }), "get_item", baseCfg, undefined, undefined, { destructiveHint: true });
   assert("destructiveHint on a read name under a write ceiling is denied with scope full", capped.decision === "deny" && capped.scope === "full", capped.reason);
-  const allowed = evaluate(srv({ policy: "full" }), "get_item", baseCfg, undefined, undefined, { destructiveHint: true });
+  const noRiskGate = { ...baseCfg, gateway: { ...baseCfg.gateway, approval: { require_for_risk: [] } } };
+  const allowed = evaluate(srv({ policy: "full" }), "get_item", noRiskGate, undefined, undefined, { destructiveHint: true });
   assert("destructiveHint under a full ceiling is allowed at scope full", allowed.decision === "allow" && allowed.scope === "full");
+  const byDefault = evaluate(srv({ policy: "full" }), "get_item", baseCfg, undefined, undefined, { destructiveHint: true });
+  assert("under the default approval rule that same call needs approval (scope full is high risk), it is not denied", byDefault.decision === "approval_required" && byDefault.scope === "full" && byDefault.risk === "high");
   const gated = evaluate(srv({ policy: "full", approval: { require_for: ["full"] } }), "get_item", baseCfg, undefined, undefined, { destructiveHint: true });
   assert("destructiveHint raises into the full approval gate", gated.decision === "approval_required" && gated.scope === "full");
   const profiled = evaluate(srv({ policy: "full" }), "get_item", baseCfg, undefined, "write", { destructiveHint: true });
@@ -274,8 +277,12 @@ function makeUpstream({ tools = [], resources = [], templates = [], reads = {}, 
   }
   return { server, spy };
 }
+// Adapted for design 3.4 (risk): a full-scope call is high risk and needs an out-of-band approval by default. This
+// oracle measures scope classification, annotations and the read surfaces, not approvals, so its configs say that
+// no risk needs one (`require_for_risk: []`). The scope-based gates it tests (`approval.require_for`) are untouched,
+// and the default rule is asserted where the annotation block needs it (see "under the default approval rule").
 const mkCfg = (over = {}) => ({
-  gateway: { transport: ["stdio"], http: { host: "127.0.0.1", port: 1, require_auth: "auto" }, tool_exposure: "namespaced", default_policy: "full" },
+  gateway: { transport: ["stdio"], http: { host: "127.0.0.1", port: 1, require_auth: "auto" }, tool_exposure: "namespaced", default_policy: "full", approval: { require_for_risk: [] } },
   vault: { backend: "env" },
   servers: [],
   settings: {},
@@ -731,9 +738,11 @@ const KILL_PATH = join(SB_HOME, "KILL");
     alphaCfg.approval = { require_for: ["read"] };
     const rg = reads();
     const eAp = await mcpError(() => router.readResource("alpha://doc/1"));
-    assert("a read-scope approval gate holds resources/read (fail closed, SB_APPROVAL_DENIED)", refusedWith(eAp, "SB_APPROVAL_DENIED") && reads() === rg, eAp?.message);
+    // Adapted for design 3.3: the gate used to fail closed with SB_APPROVAL_DENIED (no terminal to ask). It now leaves a
+    // pending approval and refuses with SB_APPROVAL_PENDING. Still fail closed: the upstream was not read.
+    assert("a read-scope approval gate holds resources/read (fail closed, SB_APPROVAL_PENDING)", refusedWith(eAp, "SB_APPROVAL_PENDING") && reads() === rg, eAp?.message);
     const eAp2 = await mcpError(() => router.getPrompt("alpha__summarize"));
-    assert("...and prompts/get", refusedWith(eAp2, "SB_APPROVAL_DENIED"));
+    assert("...and prompts/get", refusedWith(eAp2, "SB_APPROVAL_PENDING"));
     process.env.SWITCHBOARD_AUTO_APPROVE = "1";
     assert("with approval granted (test harness env) the gated read goes through", text(await router.readResource("alpha://doc/1")) === "ALPHA-1");
     delete process.env.SWITCHBOARD_AUTO_APPROVE;
