@@ -10,6 +10,7 @@
  *   switchboard catalog              list OAuth providers + connection status
  *   switchboard connect <provider>   authorize a provider via local loopback OAuth
  *   switchboard install <client>     wire MCP Switchboard into an MCP client's config
+ *   switchboard bridge --client <id> relay a client's stdio to the shared HTTP gateway as that client
  *   switchboard local-llm            detect a local LLM server for the offline council
  *   switchboard local-llm wire       wire a detected local server into the council
  *   switchboard toolkits sync        rebuild the integration catalog from open indexes
@@ -51,6 +52,7 @@ import {
   applyTaxonomyToSnapshot,
 } from "./catalog.js";
 import { SUPPORTED_CLIENTS, buildPlan, writePlan, type ClientId } from "./clients.js";
+import { DEFAULT_BRIDGE_URL, runBridge } from "./bridge.js";
 import {
   KNOWN_RUNTIMES,
   probeRuntime,
@@ -452,6 +454,17 @@ program
       for (const note of plan.notes) out(`  → ${note}`);
     },
   );
+
+program
+  .command("bridge")
+  .description("relay a client's stdio (JSON-RPC lines) to the shared HTTP gateway, authenticating as that client")
+  .requiredOption("--client <id>", "the registered client this bridge speaks for (its key is read from the client key store)")
+  .option("--url <url>", "the gateway's /mcp endpoint", DEFAULT_BRIDGE_URL)
+  .option("--key-file <path>", "read the bearer token from a plain-text file (used after SWITCHBOARD_KEY, before the key store)")
+  .action(async (opts: { client: string; url: string; keyFile?: string }) => {
+    // stdout is the JSON-RPC channel: runBridge writes nothing else there, and flushes it before returning.
+    process.exit(await runBridge({ clientId: opts.client, url: opts.url, keyFile: opts.keyFile }));
+  });
 
 const llmCmd = program
   .command("local-llm")
