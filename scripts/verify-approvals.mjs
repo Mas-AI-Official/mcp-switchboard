@@ -1110,8 +1110,12 @@ try {
       const byTool = (t) => rows.filter((r) => r.tool === t);
       assert("D8 the audit log has approval_required, approved, consumed and denied rows with approval ids and risk", ["approval.approval_required", "approval.approved", "approval.consumed", "approval.denied"].every((t) => byTool(t).length > 0 && byTool(t).every((r) => /^ap_/.test(r.approval_id ?? "") && r.risk)), JSON.stringify(rows.map((r) => r.tool)).slice(0, 300));
       assert("D8 the approved row came from the CLI channel", byTool("approval.approved").some((r) => r.principal === "owner:cli" && /decided_via cli/.test(r.reason)));
-      const execRow = rows.find((r) => r.server === "social" && r.tool === "send_note" && r.decision === "allow" && r.approval_id === id);
+      // Adapted (wave 2, design 3.7): a write-scope call writes an `attempt` row ahead of the upstream call, and it carries the
+      // approval id and risk too, so the RESULT row is the one that is not an attempt. The attempt row is asserted separately.
+      const execRow = rows.find((r) => r.server === "social" && r.tool === "send_note" && r.decision === "allow" && r.approval_id === id && r.phase !== "attempt");
       assert("D8 the executed call's row carries the approval id and risk", execRow?.risk === "high" && execRow?.reason === "approved");
+      const attemptRow = rows.find((r) => r.server === "social" && r.tool === "send_note" && r.phase === "attempt" && r.approval_id === id);
+      assert("D8 ...and so does the attempt row written ahead of it, which the result row points back to", attemptRow?.risk === "high" && execRow?.attempt_seq === attemptRow?.seq && attemptRow?.seq < execRow?.seq);
       const av = await cli(["audit", "verify"]);
       assert("D8 the audit hash chain is intact with the new row types (`audit verify` exits 0)", av.code === 0 && /chain OK/.test(av.stdout), (av.stdout + av.stderr).slice(0, 200));
       const ctlFile = join(sbD, "control.key");

@@ -53,6 +53,7 @@ import { HOME_DIR, loadVaultKey, seal, unseal, type SealedSecret } from "./vault
 import { stripTrailingSlashes } from "./httpsec.js";
 import type { SwitchboardConfig, SettingsConfig } from "./types.js";
 import { log } from "./logger.js";
+import { safeText } from "./safetext.js";
 
 /** Scopes this AS advertises (RFC 8414 `scopes_supported`). Recorded, not per-call enforced. */
 export const OAUTH_SCOPES_SUPPORTED = ["read", "write", "full"] as const;
@@ -266,7 +267,7 @@ export class SwitchboardAuthProvider implements OAuthServerProvider {
         const full = client as OAuthClientInformationFull;
         this.state.clients[full.client_id] = full;
         this.save();
-        log.info(`registered OAuth client '${full.client_name ?? full.client_id}' (${full.client_id})`);
+        log.info(`registered OAuth client '${safeText(full.client_name ?? full.client_id, 80)}' (${safeText(full.client_id, 80)})`);
         return full;
       },
     };
@@ -535,7 +536,7 @@ export class SwitchboardAuthProvider implements OAuthServerProvider {
   ): string {
     const accent = /^#[0-9a-fA-F]{3,8}$/.test(this.brand.accent_color ?? "") ? this.brand.accent_color! : "#2dd4bf";
     const title = esc(this.brand.title || "Authorize access");
-    const clientName = esc(client.client_name ?? client.client_id);
+    const clientName = esc(safeText(client.client_name ?? client.client_id, 80));
     const logo =
       this.brand.logo_url && /^https?:\/\//.test(this.brand.logo_url)
         ? `<img src="${esc(this.brand.logo_url)}" alt="" style="height:40px;margin-bottom:18px"/>`
@@ -603,7 +604,7 @@ code{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:2px 6
 a{color:${accent};word-break:break-all}
 </style></head><body><div class="card">
 <h1>${title}</h1>
-<p><strong>${esc(clientName)}</strong> asked to connect to this MCP Switchboard. Only the owner of this machine can approve that, and no owner session came with this request.</p>
+<p><strong>${esc(safeText(clientName, 80))}</strong> asked to connect to this MCP Switchboard. Only the owner of this machine can approve that, and no owner session came with this request.</p>
 <p>On the machine that runs Switchboard, run <code>switchboard dashboard login</code>. Then open this link in the browser it opens:</p>
 <p><a href="${esc(resumeUrl)}">${esc(resumeUrl)}</a></p>
 <p>The request stays pending for ten minutes.</p>

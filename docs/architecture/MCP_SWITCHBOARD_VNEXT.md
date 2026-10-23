@@ -130,6 +130,11 @@ code makes a choice the text above leaves open, it is recorded here:
   `X-Frame-Options: DENY`, a restrictive CSP for the SPA; `x-powered-by` disabled.
 - OAuth AS consent (`/oauth/consent`) requires an owner session. DCR is rate limited and capped.
 - `listen` errors (port in use) fail loudly and exit non-zero instead of shadowing.
+- `GET /mcp` (wave 2): the endpoint is stateless, so there is no session for a standalone GET to attach an event stream
+  to, and the SDK would hold the socket open for as long as the caller likes. After authentication a GET gets 405 with
+  `Allow: POST` (an unauthenticated one is still 401). `PUT /api/settings` builds the change on a copy, validates the
+  whole result with the config schema and answers 400 `SB_CONFIG_INVALID` with the issues BEFORE the running config or
+  the file changes; 0.1.0 saved `require_auth: "bogus"` and then could not load its own file.
 - Request URLs longer than 4096 characters get 414 in the first middleware after the security headers, before
   the Host check parses the path. Anything that runs before authentication must be linear in its input: the
   trailing-slash trim on the request path and on the OAuth `resource` parameter is a loop, not a regex
@@ -265,10 +270,27 @@ Every scrub is linear in its input and looks at no more than 8192 characters: lo
 boundary (so no half of a secret survives) and marked `[truncated:<length>]`. This applies to captured I/O and to
 `error` text, which is scrubbed whether or not `capture_io` is on, because an upstream chooses it.
 
+Write-ahead (wave 2). For write and full scope the router appends an `attempt` row BEFORE it contacts the upstream:
+`phase: "attempt"`, the call's principal, client, risk, approval id and, when `capture_io` is on, the redacted
+arguments. It is written with `audit()` directly, not as a verdict: it is not a webhook event and the usage stats skip
+it. If the append throws, the call is refused with `SB_AUDIT_FAILED` and the upstream is never contacted (fail
+closed); an approval that was already consumed is spent, so the call needs a new one. The result row that follows
+(success, upstream error or timeout) carries `attempt_seq`, the `seq` of its attempt row. Read scope keeps after-call
+logging: it changes nothing, and a failed append there costs the row (logged loudly), never the result. A call that
+waits for an approval writes no attempt row, because nothing has started.
+
 ### 3.8 Kill switch
 
 `switchboard kill on|off` (file `~/.switchboard/KILL`) or `gateway.kill_switch: true`: every tool call,
 resource read and prompt get is refused with `SB_KILL_SWITCH` until cleared. Checked per call.
+
+Turning it off (wave 2). OFF re-opens every tool, so it needs the owner present, performed by the gateway as for an
+approval: the dashboard route does it, and so does `switchboard kill off`, which asks the running gateway
+(`POST /api/control/kill/off`, control token) instead of deleting the file itself. A caller that can only run the
+CLI, such as an agent with a shell, therefore cannot undo the owner's emergency stop. No gateway reachable: exit 1 and
+the file stays (starting a gateway is safe, it refuses every call while the file exists). Nothing to clear: no gateway
+needed. `kill on` and `kill status` need none. The control API has no other kill-switch route. Both doors write
+`kill.off` and `kill.off_refused` audit rows under `owner:dashboard` or `owner:cli`.
 
 ### 3.9 Storage
 
@@ -324,6 +346,45 @@ with a JSON-RPC error (not a crash) when the gateway is down. Logs go to stderr 
 and vscode. Default mode writes a bridge entry. Flow: preview, validate, backup, confirm (`--yes` skips the
 prompt), write (the client's own CLI when it has one, else an atomic file write), probe, roll back on probe
 failure.
+
+### 3.14 Wave 2 hardening (review findings, oracle `verify:hardening-2`)
+
+Eleven findings from the wave 1 adversarial review, each reproduced before it was closed. The contract:
+
+- **Unlisted tools (router).** A namespaced name resolves only to a tool the upstream LISTED at mount. `serverId__x` for
+  an `x` the server never listed is `SB_UNKNOWN_TOOL`, in `tools/call`, `call_tool` and every `batch_call` entry; when
+  the prefix names a real server the refusal is audited as a deny (a name that names nothing stays unaudited). 0.1.0
+  split the name and forwarded the rest, so every listing-based control (profiles, client globs, tool overrides) was
+  bypassed by naming a hidden tool directly. A tool an upstream adds after mount is unknown until the next mount.
+- **Server ids.** `^[a-z0-9][a-z0-9_-]{0,63}$` with no `__` (the first `__` splits id from tool), unique in the file.
+  Config load fails with the path of the bad id (`servers.2.id`) and names both positions of a duplicate. The dashboard
+  add path derives its id with `uniqueServerId` (prefix stripped, cut to leave room for `-NN`, `toolkit` as the fallback)
+  and refuses an entry the strict schema would not load again.
+- **Package strings.** An npx package is a name, optionally `@version`: no leading `-` (`--call=...` runs a command),
+  no whitespace, no URL, path or git spec (`packagespec.ts`; a PyPI validator is provided for a future `uvx` source, none
+  exists yet). A floating name is VALID, because existing configs have them: it still mounts, with a `WARNING` line in the
+  startup log for each one and in `switchboard doctor` (kept in `warnings`, apart from `problems`). A NEW mount (dashboard
+  or catalog add) must carry an exact version, `name@x.y.z`: the catalog's own version when `toolkits sync` recorded one,
+  else the one sent with the add (`{"version":"1.2.3"}`); anything else is 400 `SB_PACKAGE_UNPINNED`. The registry
+  re-checks the string before it spawns anything. `init` writes a pinned starter server.
+- **Remote MCP upstreams.** `source: remote` passes `guardedMcpFetch(network)` to the SDK transport as its `fetch`: the same
+  address classes, exact-host `allow_private`, pinned connection and per-hop redirect checks as every other outbound call.
+  It streams (an MCP reply can be an event stream open for the whole session), so the deadline covers resolution, connect
+  and headers only, there is no body cap, and aborting the caller's signal errors the body with the abort reason.
+  `redirect: "manual"` (what SDK 1.32 asks for) returns the 3xx unfollowed so the SDK's same-origin policy applies and
+  each permitted hop calls the guard again.
+- **Path parameters (http-tool, app2mcp).** `.` and `..` are refused before a request exists, and so is a filled path
+  containing a dot segment (two values can form one together). Writing the dots as `%2E` is not a fix: the WHATWG URL
+  parser collapses `%2e%2e` too, so the design's "encode or reject" is "reject". Every other value stays one encoded
+  segment, so `a/../x` cannot leave the declared path.
+- **Provider strings.** `stripControl` (ANSI sequences, C0, DEL, C1, bidi and zero-width formatting characters, the line
+  separators; newline and tab kept) runs on every message of the logger, stderr and stdout, so no caller can forget it.
+  `safeText(value, max)` is the form for one value inside a message (control characters gone, whitespace collapsed, capped
+  with `...`); it is applied to the DCR `client_name` in the registration log and on the consent and sign-in pages, to
+  upstream tool, resource and error text in router warnings, and to the names the CLI prints for `list`, `toolkits
+  discover` and `local-llm`. The stored `client_name` is not altered: the client mapping of 3.1 compares it exactly.
+- **Webhook.** The `error` carried by a webhook payload is scrubbed with the audit's `redactSecretShapes` before it is
+  handed over; the audit row scrubs its own copy, so the two never differ in what they hide.
 
 ## 4. Order of work
 

@@ -422,7 +422,7 @@ assert("every kind in the spec is covered: sk-/sk-proj-, AIza, ghp_/gho_/github_
   const SECRET_DEEP = "sk-proj-" + rep("Tt4Uu5Vv", 5);
   let upstreamCalls = 0;
   const upstream = new Server({ name: "alpha", version: "0.0.0" }, { capabilities: { tools: {} } });
-  upstream.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: "echo", inputSchema: { type: "object", properties: {} } }] }));
+  upstream.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: "echo", inputSchema: { type: "object", properties: {} } }, { name: "get_echo", inputSchema: { type: "object", properties: {} } }] }));
   upstream.setRequestHandler(CallToolRequestSchema, async (req) => {
     upstreamCalls++;
     return { content: [{ type: "text", text: `echo:${req.params.arguments?.msg ?? ""} saw ${SECRET_OUT}` }] };
@@ -466,14 +466,22 @@ assert("every kind in the spec is covered: sk-/sk-proj-, AIza, ghp_/gho_/github_
   let res;
   const failed = await captureStderr(async () => {
     try {
-      res = await off.callTool("alpha__echo", { msg: "during-disk-error" });
+      res = await off.callTool("alpha__get_echo", { msg: "during-disk-error" });
     } catch (err) {
       threw = err;
     }
   });
-  assert("...the failed audit write is logged loudly, naming the server and tool", /audit write failed for alpha\/echo/.test(failed.logged), /audit write failed/.test(failed.logged) ? "" : failed.logged.slice(0, 120));
+  // Adapted (wave 2, design 3.7): the call above is READ scope, where logging stays after the call. A WRITE or full scope
+  // call writes an attempt row first and is refused when that fails; that contract is asserted right after these checks.
+  assert("...the failed audit write is logged loudly, naming the server and tool", /audit write failed for alpha\/get_echo/.test(failed.logged), /audit write failed/.test(failed.logged) ? "" : failed.logged.slice(0, 120));
   assert("a disk error writing the audit row does NOT throw out of forward()", threw === null, threw ? String(threw.message).slice(0, 120) : "");
   assert("...the upstream call happened and its result came back intact", upstreamCalls === before + 1 && res?.content?.[0]?.text?.startsWith("echo:during-disk-error") && !res?.isError, JSON.stringify(res).slice(0, 120));
+  const beforeWrite = upstreamCalls;
+  let writeRes;
+  await captureStderr(async () => {
+    writeRes = await off.callTool("alpha__echo", { msg: "write-during-disk-error" });
+  });
+  assert("a WRITE-scope call is refused with SB_AUDIT_FAILED while the audit log cannot be written, and never reaches the upstream (write-ahead)", writeRes?.isError === true && /SB_AUDIT_FAILED/.test(writeRes?.content?.[0]?.text ?? "") && upstreamCalls === beforeWrite, JSON.stringify(writeRes).slice(0, 160));
   const denied = (await captureStderr(() => off.callTool("nope__missing", {}).catch((e) => ({ threw: e })))).value;
   assert("...and the router keeps answering after the failed write", !denied.threw);
   rmSync(logPath, { recursive: true, force: true });

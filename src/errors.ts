@@ -28,6 +28,8 @@ export const SB_ERR = {
   RATE_LIMITED: "SB_RATE_LIMITED",
   /** The kill switch is on: every tool call, resource read and prompt get is refused until it is cleared. */
   KILL_SWITCH: "SB_KILL_SWITCH",
+  /** The audit log cannot be written, so a write or full scope call is refused rather than run unrecorded. */
+  AUDIT_FAILED: "SB_AUDIT_FAILED",
 } as const;
 
 export type SbErrorCode = (typeof SB_ERR)[keyof typeof SB_ERR];
@@ -54,4 +56,6 @@ export const SB_HINTS: Record<SbErrorCode, string> = {
     "This call hit a configured rate limit or spend budget (settings.limits / server.limits / tool.limits). Wait for the window to refill, raise the limit, or lower the tool's `cost`. Limits fail closed to cap runaway loops and API spend.",
   [SB_ERR.KILL_SWITCH]:
     "The operator turned the kill switch on (the SWITCHBOARD_HOME/KILL file or gateway.kill_switch). Every tool call, resource read and prompt get is refused until it is cleared: run `switchboard kill off` and make sure gateway.kill_switch is not true. The file takes effect on the next call; the config flag is read at startup.",
+  [SB_ERR.AUDIT_FAILED]:
+    "A write or full scope call is recorded in the audit log BEFORE it runs, and the log could not be written (disk full, read-only home, a locked or damaged audit.log), so the call was refused instead of running unrecorded. Fix the audit log (see the gateway's stderr for the reason) and repeat the call. Read scope calls are not affected.",
 };

@@ -14,7 +14,41 @@ import { atomicWriteFileSync } from "./atomicfile.js";
 import type { ClientConfig, SwitchboardConfig, TriggersConfig } from "./types.js";
 import { passthroughProblem } from "./childenv.js";
 import { parseAllowEntry } from "./netguard.js";
+import { checkNpmSpec } from "./packagespec.js";
 import { BAD_CLIENT_ID, MAX_GLOB_PATTERNS, MAX_GLOB_LENGTH, isValidClientId, isValidGlob } from "./principal.js";
+import { safeText } from "./safetext.js";
+
+/**
+ * A server id names the tool namespace (`<id>__<tool>`), appears in audit rows, client globs and file paths, and
+ * is split back out of a tool name at the FIRST `__`. So it is a short lowercase token and never contains `__`
+ * (a second separator would make `a__b__tool` ambiguous and route the call to the wrong server).
+ */
+export const SERVER_ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+export const BAD_SERVER_ID =
+  "a server id is 1 to 64 characters of a-z, 0-9, '-' and '_', starting with a letter or digit (^[a-z0-9][a-z0-9_-]{0,63}$), and must not contain '__', which separates the server id from the tool name";
+
+export function isValidServerId(id: unknown): id is string {
+  return typeof id === "string" && SERVER_ID_RE.test(id) && !id.includes("__");
+}
+
+/**
+ * A valid, unused server id derived from a catalog slug (`mcp:io.github.Owner/Name` becomes `io-github-owner-name`).
+ * Long slugs are cut so that a `-NN` suffix still fits in 64 characters; nothing usable falls back to `toolkit`.
+ */
+export function uniqueServerId(slug: string, taken: Iterable<string>): string {
+  const used = new Set(taken);
+  const stem = slug
+    .replace(/^[^:]+:/, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 56)
+    .replace(/-+$/, "");
+  const base = stem || "toolkit";
+  let id = base;
+  for (let n = 2; used.has(id); n++) id = `${base}-${n}`;
+  return id;
+}
 
 const scope = z.enum(["read", "write", "full"]);
 const risk = z.enum(["low", "medium", "high"]);
@@ -157,7 +191,7 @@ const envName = z.string().min(1).regex(/^[^=\s\x00]+$/, { message: "must be a p
 
 const serverConfig = z
   .object({
-    id: z.string().min(1),
+    id: z.string().refine(isValidServerId, { message: BAD_SERVER_ID }),
     source: z.enum(["npx", "binary", "remote", "app2mcp", "http-tool"]),
     enabled: z.boolean().default(true),
     policy: scope.optional(),
@@ -189,6 +223,12 @@ const serverConfig = z
   .superRefine((s, ctx) => {
     const problem = passthroughProblem(s.env_passthrough, s.env_passthrough_secrets);
     if (problem) ctx.addIssue({ code: "custom", message: problem, path: ["env_passthrough"] });
+    // The package string goes onto the runner's command line: a name, optionally with @version, nothing else.
+    // A floating name is valid here (existing configs keep mounting); pinning is warned about, and required for new mounts.
+    if (s.source === "npx" && s.package !== undefined) {
+      const bad = checkNpmSpec(s.package);
+      if (bad) ctx.addIssue({ code: "custom", message: bad, path: ["package"] });
+    }
   });
 
 const gateway = z
@@ -434,7 +474,22 @@ const configSchema = z
       )
       .optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((cfg, ctx) => {
+    // Ids name the tool namespace, so two servers with one id would shadow each other: refuse the file.
+    const firstAt = new Map<string, number>();
+    cfg.servers.forEach((s, i) => {
+      const at = firstAt.get(s.id);
+      if (at === undefined) firstAt.set(s.id, i);
+      else {
+        ctx.addIssue({
+          code: "custom",
+          message: `duplicate server id '${safeText(s.id, 80)}' (also at servers.${at}): ids must be unique because they name the tool namespace`,
+          path: ["servers", i, "id"],
+        });
+      }
+    });
+  });
 
 /** Validate one client entry (its id and its body) exactly as the config schema would. Throws a readable error. */
 export function parseClientEntry(id: string, raw: unknown): ClientConfig {
@@ -457,6 +512,16 @@ export function validateConfig(raw: unknown, label: string): SwitchboardConfig {
     throw new Error(`invalid config (${label}):\n${issues}`);
   }
   return result.data as SwitchboardConfig;
+}
+
+/**
+ * Every problem the strict schema finds in a config document, as `path: message` lines, or null when it is valid.
+ * For a caller that must refuse a change before anything is written (the dashboard's settings PUT).
+ */
+export function configIssues(raw: unknown): string[] | null {
+  const result = configSchema.safeParse(raw ?? {});
+  if (result.success) return null;
+  return result.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`);
 }
 
 /** Parse + validate a YAML config file into a typed config. Throws on any error. */
@@ -514,7 +579,7 @@ export function starterConfig(): SwitchboardConfig {
       {
         id: "everything",
         source: "npx",
-        package: "@modelcontextprotocol/server-everything",
+        package: "@modelcontextprotocol/server-everything@1.0.0",
         enabled: true,
         policy: "read",
       },

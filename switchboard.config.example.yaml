@@ -199,10 +199,11 @@ settings:
   # or a tighter `{ failure_threshold: 2 }` for a flaky upstream).
 
 servers:
-  # --- mount an existing MCP server from npm ---
+  # --- mount an existing MCP server from npm. Pin an exact version (name@x.y.z): an unpinned name still
+  # mounts, but the startup log and `switchboard doctor` warn, and the dashboard adds only pinned packages. ---
   - id: github
     source: npx
-    package: "@modelcontextprotocol/server-github"
+    package: "@modelcontextprotocol/server-github@2025.4.8"
     enabled: true
     policy: write                       # this app may read + write, but not "full"
     credentials:
@@ -234,7 +235,7 @@ servers:
   # --- a read-only server ---
   - id: notion
     source: npx
-    package: "@notionhq/notion-mcp-server"
+    package: "@notionhq/notion-mcp-server@2.5.2"
     enabled: true
     policy: read
     credentials:
@@ -256,7 +257,7 @@ servers:
   # --- the bundled test server: real, no credentials, great for a first run ---
   - id: everything
     source: npx
-    package: "@modelcontextprotocol/server-everything"
+    package: "@modelcontextprotocol/server-everything@1.0.0"
     enabled: true
     policy: read
     approval:

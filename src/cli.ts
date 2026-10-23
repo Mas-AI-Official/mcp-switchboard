@@ -82,6 +82,7 @@ import {
   installGuide,
 } from "./localllm.js";
 import { log, out } from "./logger.js";
+import { safeText } from "./safetext.js";
 import { guardedFetch, type NetworkSettings } from "./netguard.js";
 
 const DEFAULT_CONFIG = "switchboard.config.yaml";
@@ -194,7 +195,7 @@ program
     }
 
     if (!wantsHttp) {
-      log.warn("the HTTP listener is off (gateway.transport has no http): calls that need approval cannot be approved, because approvals are decided on the dashboard or with `switchboard approvals` against the running listener");
+      log.warn("the HTTP listener is off (gateway.transport has no http): calls that need approval cannot be approved, because approvals are decided on the dashboard or with `switchboard approvals` against the running listener, and `switchboard kill off` cannot clear the kill switch for the same reason (`kill on` still works)");
     }
     if (wantsHttp) await requireFreeHttpPort(cfg);
     const gateway = await createGateway(cfg);
@@ -346,7 +347,7 @@ program
     out(`\n${tools.length} tools exposed:\n`);
     for (const t of tools) {
       const scope = inferScope(t.name.split("__").pop() ?? t.name, t.annotations);
-      out(`  ${t.name.padEnd(42)} [${scope}]  ${t.description?.split("\n")[0] ?? ""}`);
+      out(`  ${safeText(t.name, 42).padEnd(42)} [${scope}]  ${safeText(t.description?.split("\n")[0], 160)}`);
     }
     await gateway.shutdown();
   });
@@ -389,7 +390,8 @@ program
     }
 
     out("");
-    if (report.ok) log.ok("config looks healthy");
+    for (const w of report.warnings) log.warn(`WARNING: ${w}`);
+    if (report.ok) log.ok(report.warnings.length === 0 ? "config looks healthy" : `config is valid, but ${report.warnings.length} warning(s) above should be fixed`);
     else log.error(`${report.problems.length} issue(s) found (see above)`);
     process.exitCode = report.ok ? 0 : 1;
   });
@@ -474,9 +476,9 @@ toolkitsCmd
     }
     out(`\n${results.length} discovery result(s) — vet before mounting, none are auto-installed:`);
     for (const r of results) {
-      out(`  • ${r.name}  [${r.category}]`);
-      out(`    ${r.repository}`);
-      if (r.description) out(`    ${r.description}`);
+      out(`  • ${safeText(r.name, 80)}  [${safeText(r.category, 40)}]`);
+      out(`    ${safeText(r.repository, 200)}`);
+      if (r.description) out(`    ${safeText(r.description, 300)}`);
     }
   });
 
@@ -646,8 +648,8 @@ const llmCmd = program
     out("");
     for (const r of live) {
       const n = r.models.length;
-      out(`  ${r.runtime.label.padEnd(26)} ${r.runtime.baseUrl}  (${n} model${n === 1 ? "" : "s"})`);
-      for (const m of r.models.slice(0, 8)) out(`      - ${m}`);
+      out(`  ${safeText(r.runtime.label, 26).padEnd(26)} ${safeText(r.runtime.baseUrl, 120)}  (${n} model${n === 1 ? "" : "s"})`);
+      for (const m of r.models.slice(0, 8)) out(`      - ${safeText(m, 80)}`);
       if (r.models.length > 8) out(`      … and ${r.models.length - 8} more`);
     }
     out("\nWire one into the council: `switchboard local-llm wire` (uses the first reachable server + a sensible model).");
@@ -728,47 +730,71 @@ llmCmd
 
 program
   .command("kill <action>")
-  .description("kill switch: refuse every tool call, resource read and prompt get until cleared (on | off | status)")
-  .action((action: string) => {
-    if (action !== "on" && action !== "off" && action !== "status") {
-      log.error(`unknown action '${action}': use 'switchboard kill on', 'off' or 'status'`);
-      process.exitCode = 1;
-      return;
-    }
-    // The config is optional here: the file switch must work even when the config is missing or broken.
-    let cfg: SwitchboardConfig | undefined;
-    try {
-      cfg = loadConfig(configPath());
-    } catch {
-      cfg = undefined;
-    }
-    const report = () => {
-      const st = killStatus(cfg);
-      out(`kill switch: ${st.active ? "ON" : "OFF"}`);
-      out(`  file:   ${killFilePath()} (${st.file ? `present${st.since ? `, since ${st.since}` : ""}` : "absent"})`);
-      out(`  config: gateway.kill_switch is ${st.config ? "true" : cfg ? "not set" : "unknown (no readable config)"}`);
-      return st;
-    };
-    if (action === "status") {
-      report();
-      return;
-    }
-    if (action === "on") {
-      const { changed } = setKillFile(true);
-      log.warn(changed ? "kill switch ON: every tool call, resource read and prompt get is now refused" : "kill switch was already on");
-      out("a running gateway sees the file on its next call; no restart needed. Clear it with 'switchboard kill off'.");
-      report();
-      return;
-    }
-    const { changed } = setKillFile(false);
-    const st = report();
-    if (st.active) {
-      log.error("the KILL file is cleared but gateway.kill_switch is still true in the config: set it to false and restart the gateway");
-      process.exitCode = 1;
-      return;
-    }
-    log.ok(changed ? "kill switch OFF: calls are allowed again" : "kill switch was already off");
-  });
+  .description("kill switch: refuse every tool call, resource read and prompt get until cleared (on | off | status). Turning it off needs the running gateway to verify you are present")
+  .action(
+    approvalAction(async (action: string) => {
+      if (action !== "on" && action !== "off" && action !== "status") {
+        log.error(`unknown action '${action}': use 'switchboard kill on', 'off' or 'status'`);
+        process.exitCode = 1;
+        return;
+      }
+      // The config is optional here: the file switch must work even when the config is missing or broken.
+      let cfg: SwitchboardConfig | undefined;
+      try {
+        cfg = loadConfig(configPath());
+      } catch {
+        cfg = undefined;
+      }
+      const report = () => {
+        const st = killStatus(cfg);
+        out(`kill switch: ${st.active ? "ON" : "OFF"}`);
+        out(`  file:   ${killFilePath()} (${st.file ? `present${st.since ? `, since ${st.since}` : ""}` : "absent"})`);
+        out(`  config: gateway.kill_switch is ${st.config ? "true" : cfg ? "not set" : "unknown (no readable config)"}`);
+        return st;
+      };
+      const configStillHolds = () => {
+        log.error("the KILL file is cleared but gateway.kill_switch is still true in the config: set it to false and restart the gateway");
+        process.exitCode = 1;
+      };
+      if (action === "status") {
+        report();
+        return;
+      }
+      if (action === "on") {
+        const { changed } = setKillFile(true);
+        log.warn(changed ? "kill switch ON: every tool call, resource read and prompt get is now refused" : "kill switch was already on");
+        out("a running gateway sees the file on its next call; no restart needed. Clear it with 'switchboard kill off' (the gateway asks you to prove you are present).");
+        report();
+        return;
+      }
+      // OFF re-opens every tool, so it is the one direction that needs the owner present. The CLI cannot show a trusted
+      // prompt itself (anything that can run this command could run a copy of it that skipped the prompt), so it asks the
+      // RUNNING gateway, which performs the presence check (Windows Hello, or a challenge at its own console) and clears
+      // the file. With nothing to clear there is nothing to protect, so that case needs no gateway.
+      if (!killStatus(cfg).file) {
+        const st = report();
+        if (st.active) configStillHolds();
+        else log.ok("kill switch was already off");
+        return;
+      }
+      out("asking the gateway to verify you are present (Windows Hello on this machine, or a challenge at the gateway's terminal)...");
+      let r;
+      try {
+        r = await controlCall("POST", "/kill/off", 150_000);
+      } catch (err) {
+        if (err instanceof CliFail && /no gateway answered|no control key/.test(err.message)) {
+          throw new CliFail(
+            `${err.message} The kill switch stays ON: clearing it needs the running gateway to check owner presence (Windows Hello), and no gateway is reachable. Start one (\`switchboard dashboard\` or \`switchboard serve\`; it refuses every call while the KILL file exists), then run \`switchboard kill off\` again.`,
+          );
+        }
+        throw err;
+      }
+      if (r.status !== 200) throw new CliFail(String(r.body.error ?? `the gateway answered ${r.status}`));
+      const st = report();
+      if (st.active) configStillHolds();
+      else log.ok("kill switch OFF: calls are allowed again");
+    }),
+  );
 
 // ── approvals (design 3.3) ───────────────────────────────────────────────────────────────────────
 

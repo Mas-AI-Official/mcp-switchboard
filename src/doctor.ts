@@ -15,6 +15,7 @@
 
 import type { ServerConfig, SwitchboardConfig, Scope } from "./types.js";
 import { evaluate } from "./policy.js";
+import { unpinnedPackageWarnings } from "./packagespec.js";
 
 /** Minimum Node that the runtime relies on (global `fetch`, stable ESM). Mirrors package.json `engines.node`. */
 export const NODE_FLOOR = "18.18.0";
@@ -45,6 +46,12 @@ export interface DoctorReport {
   servers: DoctorServerFinding[];
   /** Flat, human-readable list of everything actionable — the CLI tail and the oracle both read this. */
   problems: string[];
+  /**
+   * Things worth fixing that do not stop the gateway: an npx server whose package is not pinned to an exact
+   * version still mounts, but every start fetches whatever is newest. Kept apart from `problems` so a working
+   * install still reports `ok`.
+   */
+  warnings: string[];
   /** True when nothing actionable was found. */
   ok: boolean;
 }
@@ -154,6 +161,7 @@ export function buildDoctorReport(inputs: DoctorInputs): DoctorReport {
     endpoint: `http://${cfg.gateway.http.host}:${cfg.gateway.http.port}/mcp`,
     servers,
     problems,
+    warnings: unpinnedPackageWarnings(cfg.servers),
     ok: problems.length === 0,
   };
 }

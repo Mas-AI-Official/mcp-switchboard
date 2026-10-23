@@ -34,6 +34,8 @@ import { setStdioActive } from "./approval.js";
 import { Approvals } from "./approvals.js";
 import { buildCouncilServer, COUNCIL_SERVER_ID } from "./council.js";
 import { retryDelay, resolveMountRetry } from "./retry.js";
+import { unpinnedPackageWarnings } from "./packagespec.js";
+import { safeText } from "./safetext.js";
 import type { Principal } from "./principal.js";
 import { log } from "./logger.js";
 
@@ -82,12 +84,14 @@ export class Gateway {
   async mountAll(): Promise<void> {
     const enabled = this.cfg.servers.filter((s) => s.enabled !== false);
     log.info(`mounting ${enabled.length} server${enabled.length === 1 ? "" : "s"}…`);
+    // A floating npx package still mounts (existing configs keep working), but never quietly.
+    for (const warning of unpinnedPackageWarnings(enabled)) log.warn(`WARNING: ${warning}`);
     for (const server of enabled) {
       try {
         await this.registry.mount(server);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        log.error(`failed to mount '${server.id}': ${msg}`);
+        log.error(`failed to mount '${server.id}': ${safeText(msg, 500)}`);
         // Self-heal: a transient failure (slow upstream, DNS blip, child still warming up)
         // is retried in the background on a capped backoff instead of staying dead-until-restart.
         this.scheduleRemount(server, 1);
@@ -132,7 +136,7 @@ export class Gateway {
       log.ok(`recovered '${server.id}' on retry ${attempt}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      log.error(`retry ${attempt} to mount '${server.id}' failed: ${msg}`);
+      log.error(`retry ${attempt} to mount '${server.id}' failed: ${safeText(msg, 500)}`);
       this.scheduleRemount(server, attempt + 1);
     }
   }

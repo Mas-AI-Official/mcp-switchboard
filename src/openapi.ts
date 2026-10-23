@@ -29,6 +29,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { Scope, ServerConfig } from "./types.js";
 import { BULK_DOCUMENT_MAX_BYTES, BULK_DOCUMENT_TIMEOUT_MS, guardedFetch, type NetworkSource } from "./netguard.js";
+import { dotSegmentProblem, pathParamProblem } from "./pathparam.js";
 
 const HTTP_METHODS = ["get", "put", "post", "delete", "options", "head", "patch", "trace"] as const;
 const MAX_RESPONSE_CHARS = 50_000;
@@ -372,6 +373,11 @@ async function invokeOperation(
     switch (meta.location) {
       case "path": {
         const serialized = Array.isArray(value) ? value.join(",") : String(value);
+        // `.` and `..` survive encodeURIComponent and are navigation to a URL parser: refuse before a request exists.
+        const bad = pathParamProblem(serialized);
+        if (bad) {
+          return { content: [{ type: "text", text: `refusing request: path parameter '${meta.originalName}': ${bad}` }], isError: true };
+        }
         path = path.replace(`{${meta.originalName}}`, encodeURIComponent(serialized));
         break;
       }
@@ -399,6 +405,9 @@ async function invokeOperation(
     }
   }
 
+  // Two values that only form a dot segment together (`{a}{b}`), or a template that carries one, are refused too.
+  const dot = dotSegmentProblem(path);
+  if (dot) return { content: [{ type: "text", text: `refusing request: path parameter substitution: ${dot}` }], isError: true };
   const url = new URL(baseUrl + path);
   // Belt and braces behind the build-time path check: the final URL must stay on the base origin.
   if (url.origin !== new URL(baseUrl).origin) {

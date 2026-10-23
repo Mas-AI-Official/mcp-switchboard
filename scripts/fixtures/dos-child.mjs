@@ -75,7 +75,8 @@ if (mode === "redact-router") {
     out[`${label}_ms`] = Number(process.hrtime.bigint() - t0) / 1e6;
     out[`${label}_isError`] = res.isError === true;
   }
-  const rows = recentAudit(50).filter((r) => r.server === "hostile");
+  // Result rows only: since wave 2 a write-scope call also writes an `attempt` row ahead of the upstream call (design 3.7).
+  const rows = recentAudit(50).filter((r) => r.server === "hostile" && r.phase !== "attempt");
   out.rows = rows.length;
   out.maxErrorLen = Math.max(0, ...rows.map((r) => (typeof r.error === "string" ? r.error.length : 0)));
   done(out);

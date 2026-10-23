@@ -60,6 +60,14 @@ export interface AuditEntry {
   error?: string;
   /** Stable `SB_*` taxonomy code for a failure row (deny / approval-denied / upstream error/timeout). */
   error_code?: string;
+  /**
+   * `"attempt"` marks the write-ahead row of a write or full scope call: it is appended BEFORE the upstream is
+   * called, so a crash or a hang in the middle of a mutating call still leaves a record that it started. It is not
+   * a verdict: usage stats skip it, and the call's own result row follows and points back at it with `attempt_seq`.
+   */
+  phase?: "attempt";
+  /** On a result row: the `seq` of the attempt row written ahead of this call. */
+  attempt_seq?: number;
 }
 
 /** What a caller hands to `audit()`: the chain fields and the timestamp are added by the log. */
@@ -388,8 +396,8 @@ export class AuditLog {
     }
   }
 
-  /** Append one row to the chain. Throws on a disk or lock failure (the router catches it). */
-  append(entry: AuditInput): void {
+  /** Append one row to the chain and return its `seq`. Throws on a disk or lock failure (the router decides what that costs). */
+  append(entry: AuditInput): number {
     ensureDir(this.home);
     // An upstream error message can echo a credential; scrub it whether or not capture_io is on.
     const input = typeof entry.error === "string" ? { ...entry, error: redactSecretShapes(entry.error) } : entry;
@@ -400,7 +408,7 @@ export class AuditLog {
       hash: _hash,
       ...fields
     } = input as Record<string, unknown>;
-    withFileLock(this.path, () => {
+    return withFileLock(this.path, () => {
       const state = this.tail();
       let torn = state.torn;
       if ((statSync(this.path, { throwIfNoEntry: false })?.size ?? 0) >= AUDIT_ROTATE_BYTES) {
@@ -413,6 +421,7 @@ export class AuditLog {
       appendFileSync(this.path, `${torn ? "\n" : ""}${JSON.stringify({ ...base, hash })}\n`, { mode: 0o600 });
       const stamp = fileStamp(this.path);
       this.cache = stamp ? { stamp, seq: state.seq + 1, hash } : null;
+      return state.seq + 1;
     });
   }
 
@@ -551,9 +560,9 @@ export class AuditLog {
 
 const defaultLog = new AuditLog(HOME_DIR);
 
-/** Append one row to the process-wide audit log (`<SWITCHBOARD_HOME>/audit.log`). */
-export function audit(entry: AuditInput): void {
-  defaultLog.append(entry);
+/** Append one row to the process-wide audit log (`<SWITCHBOARD_HOME>/audit.log`) and return its `seq`. */
+export function audit(entry: AuditInput): number {
+  return defaultLog.append(entry);
 }
 
 /** Verify the process-wide audit log. */
@@ -614,6 +623,8 @@ export function usageStats(cap = 50_000): UsageStats {
     } catch {
       continue;
     }
+    // A write-ahead attempt row is the announcement of a call, not a verdict: its result row is the one that counts.
+    if (e.phase === "attempt") continue;
     if (e.decision === "allow") allow++;
     else if (e.decision === "deny") deny++;
     else if (e.decision === "approval_required") approval++;

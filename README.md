@@ -279,7 +279,7 @@ node dist/cli.js vault list      # names only, never values
 servers:
   - id: github
     source: npx
-    package: "@modelcontextprotocol/server-github"
+    package: "@modelcontextprotocol/server-github@2025.4.8"
     enabled: true
     policy: write
     credentials:
@@ -304,12 +304,23 @@ writes, not reads. Upstream annotations can only tighten this: `destructiveHint:
 ```bash
 node dist/cli.js kill on        # every tool call, resource read and prompt get is refused (SB_KILL_SWITCH)
 node dist/cli.js kill status
-node dist/cli.js kill off
+node dist/cli.js kill off       # asks the RUNNING gateway, which checks you are present (Windows Hello)
 ```
 
 It works by creating `~/.switchboard/KILL` (or `$SWITCHBOARD_HOME/KILL`), which the gateway checks on every
 call. `gateway.kill_switch: true` in the config does the same from startup. `/healthz` and `/api/health`
 report it as `kill_switch`. Listing tools, resources and prompts still works; calling them does not.
+Turning it **off** re-opens every tool, so it needs you at the machine: `kill off` and the dashboard toggle both
+make the gateway run its own owner-presence check before the file is removed, so a process that can only run the
+CLI cannot undo your emergency stop. With no gateway reachable `kill off` exits 1 and leaves the switch on
+(starting a gateway is safe: it refuses every call while the file exists). `kill on` and `kill status` need no gateway.
+
+**Server ids and packages.** A server id is 1 to 64 characters of `a-z 0-9 - _`, starting with a letter or digit, with no
+`__` (it separates the id from the tool name), and unique in the file; the config will not load otherwise. An `npx`
+package is a name with an optional `@version` and nothing else: no leading `-`, no spaces, no URL, path or git spec. Pin
+an exact version (`"@scope/name@1.2.3"`). An unpinned name still mounts, but the startup log and `switchboard doctor`
+warn loudly, and the dashboard adds a catalog npm toolkit only with an exact version (`POST /api/toolkits/:slug/add`
+with `{"version":"1.2.3"}`; the dashboard asks for it).
 
 **Child environment.** A stdio server you launch (`npx` or `binary`) no longer inherits your shell's
 environment. It gets the MCP SDK's safe defaults, the variables a process needs to start on your OS
@@ -433,8 +444,11 @@ settings:
 
 The council `local` provider needs its host listed (`switchboard local-llm wire` adds it for you). The
 `local-llm` probes and the CLI's own `/healthz` check are explicit local probes: loopback passes without an
-entry, nothing else does. Remote MCP upstreams (`source: remote`) use the MCP SDK's own HTTP client and are
-not routed through this guard. Pinned by `npm run verify:netguard`.
+entry, nothing else does. Remote MCP upstreams (`source: remote`) go through the same guard: the SDK's HTTP
+client is given a streaming guarded fetch (the deadline covers connect and response headers, then an event
+stream flows without a cap), so a remote upstream on a loopback, LAN or metadata address is refused unless its
+exact host is in `allow_private`, and every redirect hop is re-checked. Pinned by `npm run verify:netguard` and
+`npm run verify:hardening-2`.
 
 ### Cross-provider council (Phase 5)
 
@@ -624,7 +638,7 @@ settings:
 servers:
   - id: openai-tools
     source: npx
-    package: "@example/openai-mcp"
+    package: "@example/openai-mcp@1.0.0"
     limits: { per_hour: 200 }   # server-level ceiling
     tools:
       expensive_call:

@@ -20,12 +20,13 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isExactNpmVersion } from "./packagespec.js";
 import { BULK_DOCUMENT_MAX_BYTES, BULK_DOCUMENT_TIMEOUT_MS, guardedFetch, type NetworkSource } from "./netguard.js";
 
 /** How a catalog entry can be mounted. Mirrors the relevant `ServerConfig` fields. */
 export type ToolkitMount =
   | { source: "remote"; url: string; transport: string }
-  | { source: "npx"; package: string }
+  | { source: "npx"; package: string; /** An exact version the registry lists for this package; absent when it lists none or a floating one. */ version?: string }
   | { source: "app2mcp"; openapi: string; base_url?: string }
   | { source: "manual"; note: string };
 
@@ -153,6 +154,7 @@ interface RegistryRemote {
 interface RegistryPackage {
   registryType?: string;
   identifier?: string;
+  version?: string;
   transport?: { type?: string };
 }
 interface RegistryServer {
@@ -202,7 +204,8 @@ function toolkitFromRegistry(srv: RegistryServer, taxonomy?: Map<string, string>
   } else {
     const npm = (srv.packages ?? []).find((p) => p.registryType === "npm" && p.identifier);
     if (npm?.identifier) {
-      mount = { source: "npx", package: npm.identifier };
+      // Keep the registry's version only when it is an exact one: a new mount of this package is pinned to it.
+      mount = { source: "npx", package: npm.identifier, ...(isExactNpmVersion(npm.version) ? { version: npm.version } : {}) };
     } else {
       const other = (srv.packages ?? []).find((p) => p.identifier);
       if (other?.identifier) {

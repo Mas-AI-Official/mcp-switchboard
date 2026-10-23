@@ -26,6 +26,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { HttpToolDef, Scope, ServerConfig } from "./types.js";
 import { guardedFetch, type NetworkSource } from "./netguard.js";
+import { dotSegmentProblem, pathParamProblem, rawPathOf } from "./pathparam.js";
 
 const MAX_RESPONSE_CHARS = 50_000;
 const BODY_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
@@ -61,17 +62,29 @@ interface HttpToolPlan {
   scope: Scope;
 }
 
-/** Replace `{name}` segments from same-named args; returns the filled string + the consumed keys. */
-function fillPath(template: string, args: Record<string, unknown>): { filled: string; consumed: Set<string> } {
+/**
+ * Replace `{name}` segments from same-named args; returns the filled string, the consumed keys and, when a value
+ * would move the request out of the declared path (`.` or `..`, which a URL parser reads as navigation), the reason.
+ */
+function fillPath(template: string, args: Record<string, unknown>): { filled: string; consumed: Set<string>; refused?: string } {
   const consumed = new Set<string>();
+  let refused: string | undefined;
   const filled = template.replace(/\{([^}]+)\}/g, (whole, name: string) => {
     if (Object.prototype.hasOwnProperty.call(args, name) && args[name] !== undefined && args[name] !== null) {
       consumed.add(name);
-      return encodeURIComponent(String(args[name]));
+      const text = String(args[name]);
+      const bad = pathParamProblem(text);
+      if (bad && refused === undefined) refused = `path parameter '${name}': ${bad}`;
+      return encodeURIComponent(text);
     }
     return whole; // leave an unfilled placeholder visible rather than silently dropping it
   });
-  return { filled, consumed };
+  // Two values can form a dot segment only together (`{a}{b}`), and a template can carry one: check the whole path too.
+  if (refused === undefined) {
+    const dot = dotSegmentProblem(rawPathOf(filled));
+    if (dot) refused = `path parameter substitution: ${dot}`;
+  }
+  return { filled, consumed, refused };
 }
 
 /** Execute one declared endpoint as an HTTP request and shape the MCP result. */
@@ -82,7 +95,8 @@ async function invoke(
   network: NetworkSource,
 ): Promise<CallToolResult> {
   const template = plan.absolute ?? plan.base + plan.path;
-  const { filled, consumed } = fillPath(template, args);
+  const { filled, consumed, refused } = fillPath(template, args);
+  if (refused) return { content: [{ type: "text", text: `refusing request: ${refused}` }], isError: true };
 
   const url = new URL(filled);
   const headers: Record<string, string> = { accept: "application/json", ...authHeaders };

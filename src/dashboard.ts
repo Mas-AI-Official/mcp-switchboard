@@ -22,7 +22,8 @@ import type { Gateway } from "./gateway.js";
 import { VERSION } from "./gateway.js";
 import type { SwitchboardConfig, SettingsConfig, ServerConfig, CouncilConfig, ClientConfig } from "./types.js";
 import type { BreakerHealth, BreakerState } from "./breaker.js";
-import { writeConfig, parseTriggersConfig } from "./config.js";
+import { writeConfig, parseTriggersConfig, configIssues, uniqueServerId } from "./config.js";
+import { isExactNpmVersion, isPinnedNpmSpec, npmPackageName } from "./packagespec.js";
 import { audit, recentAudit, usageStats } from "./audit.js";
 import { resolveRisk, resolveToolScope, DEFAULT_REQUIRE_FOR_RISK } from "./policy.js";
 import { killStatus, setKillFile } from "./killswitch.js";
@@ -58,6 +59,7 @@ import {
 } from "./httpsec.js";
 import { log } from "./logger.js";
 import { guardedFetch } from "./netguard.js";
+import { safeText } from "./safetext.js";
 
 export interface DashboardHandle {
   url: string;
@@ -126,14 +128,14 @@ export function correlateMountedSlugs(toolkits: Toolkit[], servers: ServerConfig
   const byApp2mcp = new Map<string, string>();
   for (const t of toolkits) {
     if (t.mount.source === "remote") byRemote.set(t.mount.url, t.slug);
-    else if (t.mount.source === "npx") byNpx.set(t.mount.package, t.slug);
+    else if (t.mount.source === "npx") byNpx.set(npmPackageName(t.mount.package), t.slug);
     else if (t.mount.source === "app2mcp") byApp2mcp.set(t.mount.openapi, t.slug);
   }
   const mounted = new Set<string>();
   for (const s of servers) {
     let slug: string | undefined;
     if (s.url) slug = byRemote.get(s.url);
-    else if (s.package) slug = byNpx.get(s.package);
+    else if (s.package) slug = byNpx.get(npmPackageName(s.package)); // a pinned `name@1.2.3` is still the catalog's `name`
     else if (s.openapi) slug = byApp2mcp.get(s.openapi);
     if (slug) mounted.add(slug);
   }
@@ -335,6 +337,15 @@ export function mountMcpEndpoint(app: express.Express, gateway: Gateway, opts: M
       return;
     }
     const principal = decision.principal;
+    // This endpoint is stateless (a fresh Server and transport per request), so there is no session for a standalone
+    // GET to attach a server-to-client stream to. The SDK would open an event stream anyway and hold the socket for
+    // as long as the client likes: an unbounded resource per caller. The Streamable HTTP spec lets a server answer
+    // 405 to say it offers no such stream. Authentication comes first, so an unauthenticated GET is still a 401.
+    if (req.method === "GET") {
+      res.set("Allow", "POST");
+      res.status(405).json({ error: "method not allowed: this MCP endpoint is stateless and offers no event stream; POST JSON-RPC messages to /mcp" });
+      return;
+    }
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       ...(opts.enableJsonResponse ? { enableJsonResponse: true } : {}),
@@ -603,6 +614,38 @@ export async function startDashboard(
     insecure_presence: process.env.SWITCHBOARD_INSECURE_APPROVAL === "1",
   });
 
+  // Owner decisions are audited under the channel they came through (`owner:dashboard`, `owner:cli`).
+  const ownerAudit = (tool: string, reason: string, actor: "dashboard" | "cli"): void => {
+    try {
+      audit({ server: "switchboard", tool, scope: "full", decision: "allow", reason, principal: `owner:${actor}` });
+    } catch (err) {
+      log.error(`audit write failed for ${tool}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+  /**
+   * Turn the kill switch OFF, the one kill-switch direction that re-opens every tool. It is performed by THIS gateway
+   * after its own owner-presence check (Windows Hello, or a challenge at its console), whichever door the request came
+   * through: the dashboard (owner session plus CSRF) or the control API (`switchboard kill off`). A process that is not
+   * the gateway cannot answer the presence prompt, which is the point: `kill off` used to delete the KILL file directly,
+   * so anything that could run the CLI (an agent with a shell) could undo the owner's emergency stop.
+   */
+  const killOff = async (actor: "dashboard" | "cli"): Promise<{ status: number; body: Record<string, unknown> }> => {
+    if (cfg.gateway.kill_switch === true) {
+      return {
+        status: 409,
+        body: { error: "gateway.kill_switch is true in the config, which a running gateway cannot clear: set it to false and restart the gateway", code: "SB_KILL_CONFIG" },
+      };
+    }
+    const presence = await approvals.verifyPresence("Turn the MCP Switchboard kill switch OFF: tool calls will be allowed again");
+    if (!presence.ok) {
+      ownerAudit("kill.off_refused", `presence check failed (${presence.method}): ${presence.reason}`, actor);
+      return { status: 403, body: { error: `owner presence was not verified (${presence.method}): ${presence.reason}`, code: "SB_PRESENCE_FAILED" } };
+    }
+    const { changed } = setKillFile(false);
+    ownerAudit("kill.off", `${changed ? "kill switch turned OFF" : "kill switch was already off"} from the ${actor === "cli" ? "CLI" : "dashboard"} (presence ${presence.method})`, actor);
+    return { status: 200, body: { ...killStatus(cfg) } };
+  };
+
   const control = express.Router();
   control.use((req: Request, res: Response, next: () => void) => {
     res.setHeader("Cache-Control", "no-store");
@@ -631,6 +674,16 @@ export async function startDashboard(
   });
   control.post("/approvals/:id/approve", approveVia("cli"));
   control.post("/approvals/:id/deny", denyVia("cli"));
+  // `switchboard kill off`: the only kill-switch route here. Turning it ON needs no gateway, and the control API
+  // has no route that does anything else to the switch.
+  control.post("/kill/off", async (_req: Request, res: Response) => {
+    try {
+      const off = await killOff("cli");
+      res.status(off.status).json(off.body);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
   app.use("/api/control", control);
 
   // ====================================================================
@@ -731,14 +784,7 @@ export async function startDashboard(
   app.post("/api/approvals/:id/deny", denyVia("dashboard"));
 
   // --- Kill switch from the dashboard. ON is immediate. OFF is the dangerous direction (it re-opens every tool),
-  // so it needs the owner present, performed by the gateway, exactly like an approval. ---
-  const ownerAudit = (tool: string, reason: string): void => {
-    try {
-      audit({ server: "switchboard", tool, scope: "full", decision: "allow", reason, principal: "owner:dashboard" });
-    } catch (err) {
-      log.error(`audit write failed for ${tool}: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  };
+  // so it needs the owner present, performed by the gateway (see killOff above), exactly like an approval. ---
   app.get("/api/kill", (_req: Request, res: Response) => {
     res.json(killStatus(cfg));
   });
@@ -751,23 +797,12 @@ export async function startDashboard(
     try {
       if (on) {
         const { changed } = setKillFile(true);
-        ownerAudit("kill.on", changed ? "kill switch turned ON from the dashboard" : "kill switch was already on");
+        ownerAudit("kill.on", changed ? "kill switch turned ON from the dashboard" : "kill switch was already on", "dashboard");
         res.json(killStatus(cfg));
         return;
       }
-      if (cfg.gateway.kill_switch === true) {
-        res.status(409).json({ error: "gateway.kill_switch is true in the config, which the dashboard cannot clear: set it to false and restart the gateway", code: "SB_KILL_CONFIG" });
-        return;
-      }
-      const presence = await approvals.verifyPresence("Turn the MCP Switchboard kill switch OFF: tool calls will be allowed again");
-      if (!presence.ok) {
-        ownerAudit("kill.off_refused", `presence check failed (${presence.method}): ${presence.reason}`);
-        res.status(403).json({ error: `owner presence was not verified (${presence.method}): ${presence.reason}`, code: "SB_PRESENCE_FAILED" });
-        return;
-      }
-      const { changed } = setKillFile(false);
-      ownerAudit("kill.off", `${changed ? "kill switch turned OFF" : "kill switch was already off"} from the dashboard (presence ${presence.method})`);
-      res.json(killStatus(cfg));
+      const off = await killOff("dashboard");
+      res.status(off.status).json(off.body);
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
@@ -873,18 +908,43 @@ export async function startDashboard(
       res.status(400).json({ error: `'${tk.name}' must be installed manually: ${tk.mount.note}` });
       return;
     }
-    // Derive a config id from the slug; ensure it is unique.
-    const base = tk.slug.replace(/^[^:]+:/, "").replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase() || "toolkit";
-    let id = base;
-    let n = 1;
-    while (cfg.servers.some((s) => s.id === id)) id = `${base}-${++n}`;
+    // An npx toolkit runs code fetched from the npm registry at every start, so a NEW mount must name one exact
+    // version (`name@1.2.3`): the catalog's own version when it lists one, else the one the owner sends. A floating
+    // name is never added. (An unpinned entry already in a config file still mounts, with a warning.)
+    let npxPackage: string | undefined;
+    if (tk.mount.source === "npx") {
+      const sent = ((req.body ?? {}) as { version?: unknown }).version;
+      const spec = tk.mount.package;
+      const name = npmPackageName(spec);
+      const version = sent !== undefined ? sent : tk.mount.version;
+      if (sent === undefined && isPinnedNpmSpec(spec)) npxPackage = spec;
+      else if (isExactNpmVersion(version)) npxPackage = `${name}@${version as string}`;
+      else {
+        res.status(400).json({
+          error: `'${safeText(tk.name, 80)}' runs the npm package '${safeText(name, 80)}', and a new mount needs one exact version: send {"version": "x.y.z"} (the catalog lists ${tk.mount.version ? `'${safeText(tk.mount.version, 40)}', which is not an exact version` : "none"}). Floating versions such as 'latest' or '^1.2.0' are not added.`,
+          code: "SB_PACKAGE_UNPINNED",
+          package: name,
+        });
+        return;
+      }
+    }
+
+    // Derive a valid config id from the slug; ensure it is unique.
+    const id = uniqueServerId(tk.slug, cfg.servers.map((s) => s.id));
 
     const server: SwitchboardConfig["servers"][number] =
       tk.mount.source === "remote"
         ? { id, source: "remote", url: tk.mount.url, enabled: false, auth: "none" }
         : tk.mount.source === "npx"
-          ? { id, source: "npx", package: tk.mount.package, enabled: false, policy: cfg.gateway.default_policy }
+          ? { id, source: "npx", package: npxPackage, enabled: false, policy: cfg.gateway.default_policy }
           : { id, source: "app2mcp", openapi: tk.mount.openapi, enabled: false, policy: cfg.gateway.default_policy };
+
+    // Whatever is written must load again: refuse an entry the strict schema would reject at the next start.
+    const issues = configIssues({ ...cfg, servers: [...cfg.servers, server] });
+    if (issues) {
+      res.status(400).json({ error: `'${safeText(tk.name, 80)}' cannot be added: ${issues.join("; ")}`, code: "SB_CONFIG_INVALID", issues });
+      return;
+    }
 
     cfg.servers.push(server);
     try {
@@ -1053,27 +1113,65 @@ export async function startDashboard(
       gateway?: { require_auth?: "auto" | "always" | "never"; tool_exposure?: "namespaced" | "flat" | "search"; default_policy?: "read" | "write" | "full" };
     };
 
+    // The change is built on a COPY and checked with the same strict schema the file is loaded with, BEFORE anything
+    // live or on disk changes. 0.1.0 merged the body into the running config and wrote it: `require_auth: "bogus"`
+    // or an unknown key was accepted, saved, and the next start failed to load the file.
+    const next = JSON.parse(JSON.stringify(cfg)) as SwitchboardConfig;
+    next.settings = next.settings ?? {};
+    if (body.settings?.general) next.settings.general = { ...next.settings.general, ...body.settings.general };
+    if (body.settings?.auth_screen) next.settings.auth_screen = { ...next.settings.auth_screen, ...body.settings.auth_screen };
+    if (body.settings?.webhook) next.settings.webhook = { ...next.settings.webhook, ...body.settings.webhook };
+    if (body.gateway?.require_auth) next.gateway.http.require_auth = body.gateway.require_auth;
+    if (body.gateway?.tool_exposure) next.gateway.tool_exposure = body.gateway.tool_exposure;
+    if (body.gateway?.default_policy) next.gateway.default_policy = body.gateway.default_policy;
+    const issues = configIssues(next);
+    if (issues) {
+      res.status(400).json({
+        error: `these settings would make the configuration invalid, so nothing was changed: ${issues.join("; ")}`,
+        code: "SB_CONFIG_INVALID",
+        issues,
+      });
+      return;
+    }
+
+    // Apply only what the body touched, to the live objects the rest of the gateway holds.
+    const hadSettings = cfg.settings !== undefined;
     cfg.settings = cfg.settings ?? {};
-    if (body.settings?.general) cfg.settings.general = { ...cfg.settings.general, ...body.settings.general };
-    if (body.settings?.auth_screen) cfg.settings.auth_screen = { ...cfg.settings.auth_screen, ...body.settings.auth_screen };
-    if (body.settings?.webhook) cfg.settings.webhook = { ...cfg.settings.webhook, ...body.settings.webhook };
+    const before = {
+      general: cfg.settings.general,
+      auth_screen: cfg.settings.auth_screen,
+      webhook: cfg.settings.webhook,
+      require_auth: cfg.gateway.http.require_auth,
+      tool_exposure: cfg.gateway.tool_exposure,
+      default_policy: cfg.gateway.default_policy,
+    };
+    if (body.settings?.general) cfg.settings.general = next.settings.general;
+    if (body.settings?.auth_screen) cfg.settings.auth_screen = next.settings.auth_screen;
+    if (body.settings?.webhook) cfg.settings.webhook = next.settings.webhook;
+    cfg.gateway.http.require_auth = next.gateway.http.require_auth;
+    cfg.gateway.tool_exposure = next.gateway.tool_exposure;
+    cfg.gateway.default_policy = next.gateway.default_policy;
 
-    if (body.gateway?.require_auth) cfg.gateway.http.require_auth = body.gateway.require_auth;
-    if (body.gateway?.tool_exposure) cfg.gateway.tool_exposure = body.gateway.tool_exposure;
-    if (body.gateway?.default_policy) cfg.gateway.default_policy = body.gateway.default_policy;
-
+    try {
+      if (configPath) writeConfig(configPath, cfg);
+    } catch (err) {
+      // The write is atomic, so the old file is intact; put the running config back to match it.
+      cfg.settings.general = before.general;
+      cfg.settings.auth_screen = before.auth_screen;
+      cfg.settings.webhook = before.webhook;
+      if (!hadSettings && Object.values(cfg.settings).every((v) => v === undefined)) cfg.settings = undefined;
+      cfg.gateway.http.require_auth = before.require_auth;
+      cfg.gateway.tool_exposure = before.tool_exposure;
+      cfg.gateway.default_policy = before.default_policy;
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ error: msg });
+      return;
+    }
     // Re-evaluate the live auth posture so a require_auth change takes effect immediately.
     // The OAuth AS, when enabled, is a hard floor: a settings edit must never drop the
     // `/mcp` gate below "required" while a public issuer is exposing the endpoint.
     requireAuth = authRequired(cfg.gateway.http.require_auth, host) || Boolean(oauthOpts);
-
-    try {
-      if (configPath) writeConfig(configPath, cfg);
-      res.json({ ok: true, enforced: requireAuth });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      res.status(500).json({ error: msg });
-    }
+    res.json({ ok: true, enforced: requireAuth });
   });
 
   // Send a sample event to the configured webhook so the operator can verify it end to end.

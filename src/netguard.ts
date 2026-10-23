@@ -37,8 +37,8 @@
  *
  * Range choices worth knowing: 198.18.0.0/15 (benchmarking) is deliberately NOT blocked, because
  * fake-IP proxy and VPN setups answer every lookup from it and would otherwise break all outbound
- * calls. Remote MCP upstreams (`source: remote`) use the MCP SDK's own HTTP transport and are not
- * routed through this module.
+ * calls. Remote MCP upstreams (`source: remote`) use the MCP SDK's HTTP transport with
+ * {@link guardedMcpFetch} as its fetch, so their POSTs, event streams and redirects pass the same checks.
  *
  * Test seam: {@link setResolverForTests} and {@link useFetchStubForTests} let oracles inject DNS answers
  * and a fetch-shaped transport. Production never calls them.
@@ -588,6 +588,8 @@ export interface GuardedInit {
   credentialHeaders?: string[];
   /** Explicit local probe: loopback targets pass without an allow_private entry. Nothing else does. */
   allowLoopback?: boolean;
+  /** `manual` hands a 3xx back to the caller unfollowed (the MCP SDK applies its own redirect policy and calls again). */
+  redirect?: "follow" | "manual";
 }
 
 export interface GuardedResponse {
@@ -669,7 +671,7 @@ export async function guardedFetch(input: string | URL, init: GuardedInit = {}, 
     else init.signal.addEventListener("abort", onCaller, { once: true });
   }
   try {
-    return await run(parseUrl(input), init, eff, ctrl.signal);
+    return (await run(parseUrl(input), init, eff, ctrl.signal, false)) as GuardedResponse;
   } catch (e) {
     if (ctrl.signal.aborted) {
       const r = ctrl.signal.reason;
@@ -682,7 +684,17 @@ export async function guardedFetch(input: string | URL, init: GuardedInit = {}, 
   }
 }
 
-async function run(first: URL, init: GuardedInit, eff: Effective, signal: AbortSignal): Promise<GuardedResponse> {
+/** What the streaming path hands back: the response head, and the still-open body for the caller to read. */
+interface StreamedResponse extends GuardedResponse {
+  raw: TransportResponse;
+}
+
+/**
+ * One guarded request with redirects. `stream` false reads and caps the whole body (guardedFetch). `stream` true
+ * returns as soon as the head arrives and leaves the body open (guardedMcpFetch): the caller owns reading it and
+ * cancelling it, and the abort signal still destroys the connection.
+ */
+async function run(first: URL, init: GuardedInit, eff: Effective, signal: AbortSignal, stream: boolean): Promise<GuardedResponse | StreamedResponse> {
   let url = first;
   let method = (init.method ?? "GET").toUpperCase();
   let body = init.body;
@@ -701,7 +713,7 @@ async function run(first: URL, init: GuardedInit, eff: Effective, signal: AbortS
 
     const resp = await transport({ url, method, headers, body, addresses, signal });
     const location = resp.headers.get("location");
-    if (REDIRECT_STATUS.has(resp.status) && location) {
+    if (REDIRECT_STATUS.has(resp.status) && location && init.redirect !== "manual") {
       resp.destroy();
       if (hop >= MAX_REDIRECTS) throw new NetGuardError("redirect_limit", `more than ${MAX_REDIRECTS} redirects, giving up at ${where(url)}`);
       let next: URL;
@@ -735,6 +747,21 @@ async function run(first: URL, init: GuardedInit, eff: Effective, signal: AbortS
 
     // HEAD, 204 and 304 carry no body even when Content-Length describes the entity: never size-check them.
     const bodyless = method === "HEAD" || resp.status === 204 || resp.status === 304;
+    if (stream) {
+      if (bodyless) resp.destroy();
+      const head: StreamedResponse = {
+        status: resp.status,
+        statusText: resp.statusText,
+        ok: resp.status >= 200 && resp.status < 300,
+        headers: resp.headers,
+        url: url.href,
+        redirected,
+        text: async () => "",
+        json: async () => ({}),
+        raw: bodyless ? { ...resp, body: null } : resp,
+      };
+      return head;
+    }
     let bytes: Buffer;
     if (bodyless) {
       resp.destroy();
@@ -755,4 +782,111 @@ async function run(first: URL, init: GuardedInit, eff: Effective, signal: AbortS
       json: async () => JSON.parse(new TextDecoder().decode(bytes)),
     };
   }
+}
+
+// --- guardedMcpFetch -----------------------------------------------------------------------------------------------
+
+/** The fetch shape the MCP SDK's HTTP transport takes (`StreamableHTTPClientTransportOptions.fetch`). */
+export type McpFetch = (input: string | URL, init?: RequestInit) => Promise<Response>;
+
+/** The body shapes the SDK transport sends (a JSON string) plus the byte forms; anything else is a caller bug. */
+function mcpBody(body: RequestInit["body"] | undefined): string | Uint8Array | URLSearchParams | undefined {
+  if (body === undefined || body === null) return undefined;
+  if (typeof body === "string" || body instanceof Uint8Array || body instanceof URLSearchParams) return body;
+  if (body instanceof ArrayBuffer) return new Uint8Array(body);
+  throw new TypeError("guardedMcpFetch: unsupported request body type");
+}
+
+/**
+ * A fetch for the MCP SDK's Streamable HTTP client, so a `source: remote` upstream is held to the same rules as
+ * every other outbound request (private, loopback and cloud-metadata targets refused unless the exact host is in
+ * `settings.network.allow_private`; the connection pinned to the validated address; every redirect hop checked).
+ *
+ * It differs from {@link guardedFetch} in one way that matters: the response is STREAMED. An MCP reply can be a
+ * server-sent event stream that stays open for the whole session, so there is no body cap and no overall
+ * deadline. The deadline (`settings.network.timeout_ms`) covers resolution, connect and response headers; after
+ * that the body flows until it ends, the caller aborts (the SDK's signal) or the consumer cancels it. Aborting
+ * errors the body stream with the abort reason, which the SDK recognises as its own abort.
+ *
+ * `redirect: "manual"` (what SDK 1.32 asks for) returns the 3xx unfollowed so the SDK can apply its same-origin
+ * policy and call again; without it the guard follows up to MAX_REDIRECTS itself, revalidating each hop.
+ * `accept-encoding` defaults to identity so an event stream is never held back by a decompressor's buffering.
+ */
+export function guardedMcpFetch(network?: NetworkSource): McpFetch {
+  return async (input, init = {}) => {
+    const eff = effective(network, {});
+    const ctrl = new AbortController();
+    const caller = init.signal ?? undefined;
+    const onCaller = () => ctrl.abort(caller?.reason instanceof Error ? caller.reason : new NetGuardError("aborted", "request aborted by the caller"));
+    const detach = () => caller?.removeEventListener("abort", onCaller);
+    if (caller) {
+      if (caller.aborted) onCaller();
+      else caller.addEventListener("abort", onCaller, { once: true });
+    }
+    const timer = setTimeout(
+      () => ctrl.abort(new NetGuardError("timeout", `no response headers after ${eff.timeoutMs} ms (settings.network.timeout_ms)`)),
+      eff.timeoutMs,
+    );
+    const headers = Object.fromEntries(new Headers(init.headers).entries());
+    if (!Object.keys(headers).some((h) => h.toLowerCase() === "accept-encoding")) headers["accept-encoding"] = "identity";
+    let head: StreamedResponse;
+    try {
+      head = (await run(
+        parseUrl(input),
+        { method: init.method, headers, body: mcpBody(init.body), redirect: init.redirect === "manual" ? "manual" : "follow" },
+        eff,
+        ctrl.signal,
+        true,
+      )) as StreamedResponse;
+    } catch (e) {
+      detach();
+      if (ctrl.signal.aborted) {
+        const r = ctrl.signal.reason;
+        throw r instanceof Error ? r : new NetGuardError("aborted", "request aborted");
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
+
+    const { raw } = head;
+    const nullBody = raw.body === null || head.status === 204 || head.status === 205 || head.status === 304;
+    let body: ReadableStream<Uint8Array> | null = null;
+    if (!nullBody) {
+      const it = (raw.body as AsyncIterable<Uint8Array>)[Symbol.asyncIterator]();
+      let finished = false;
+      const end = () => {
+        if (finished) return;
+        finished = true;
+        detach();
+      };
+      const reasonOf = (): unknown => (ctrl.signal.reason instanceof Error ? ctrl.signal.reason : new NetGuardError("aborted", "request aborted"));
+      body = new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          try {
+            const next = await it.next();
+            if (next.done) {
+              end();
+              controller.close();
+              return;
+            }
+            controller.enqueue(Uint8Array.from(next.value));
+          } catch (e) {
+            end();
+            controller.error(ctrl.signal.aborted ? reasonOf() : e);
+          }
+        },
+        cancel() {
+          end();
+          raw.destroy();
+        },
+      });
+    } else {
+      detach();
+      raw.destroy();
+    }
+    let statusText = head.statusText;
+    if (!/^[\t\x20-\x7e\x80-\xff]*$/.test(statusText)) statusText = "";
+    return new Response(body, { status: head.status, statusText, headers: head.headers });
+  };
 }

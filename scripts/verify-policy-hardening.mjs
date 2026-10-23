@@ -585,9 +585,14 @@ const KILL_PATH = join(SB_HOME, "KILL");
     assert("a gateway in THIS process refuses the very next call after the CLI turned it on", coded(await router.callTool("kk__get_ping", {}))?.code === SB_ERR.KILL_SWITCH && refusedWith(await mcpError(() => router.readResource("kk://doc/1")), "SB_KILL_SWITCH"));
     const s1 = cli(cfgOff, "kill", "status");
     assert("CLI: kill status reports ON, the file and its since note", s1.status === 0 && /kill switch: ON/.test(s1.stdout) && /present, since /.test(s1.stdout), s1.stdout);
+    // Adapted (wave 2, design 3.8): `kill off` no longer deletes the file itself. It asks a RUNNING gateway, which checks
+    // the owner is present first, so with no gateway answering it exits 1 and the switch stays on. The path with a live
+    // gateway (presence granted, refused, already off) is proven in verify-hardening-2. Here the owner's presence-checked
+    // clearing is done directly with setKillFile(false), because this oracle runs no HTTP gateway.
     const off = cli(cfgOff, "kill", "off");
-    assert("CLI: kill off exits 0 and removes the file", off.status === 0 && !existsSync(KILL_PATH), off.stdout + off.stderr);
-    assert("a gateway in THIS process works again after the CLI turned it off", !(await router.callTool("kk__get_ping", {})).isError);
+    assert("CLI: kill off with no gateway answering exits 1, leaves the file and says why (it needs gateway-side owner presence)", off.status === 1 && existsSync(KILL_PATH) && /presence/.test(off.stderr), off.stdout + off.stderr);
+    ks.setKillFile(false);
+    assert("a gateway in THIS process works again after the switch is cleared", !(await router.callTool("kk__get_ping", {})).isError);
     const s2 = cli(cfgOn, "kill", "status");
     assert("CLI: status reports ON from gateway.kill_switch alone", s2.status === 0 && /kill switch: ON/.test(s2.stdout) && /gateway\.kill_switch is true/.test(s2.stdout), s2.stdout);
     const off2 = cli(cfgOn, "kill", "off");
@@ -596,7 +601,7 @@ const KILL_PATH = join(SB_HOME, "KILL");
     assert("CLI: an unknown action exits 1", bad.status === 1 && /unknown action/.test(bad.stderr), bad.stderr);
     const noCfg = cli(join(cliDir, "missing.yaml"), "kill", "on");
     assert("CLI: kill on works with no readable config", noCfg.status === 0 && existsSync(KILL_PATH), noCfg.stdout + noCfg.stderr);
-    cli(cfgOff, "kill", "off");
+    ks.setKillFile(false); // adapted: `kill off` needs a running gateway (see above), so the harness clears its own file
     assert("CLI: cleaned up", !existsSync(KILL_PATH));
 
     // ---- health endpoints report it ----------------------------------------------------------------------

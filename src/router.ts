@@ -59,7 +59,8 @@ import {
   MAX_WAIT_SECONDS,
   type ApprovalRequest,
 } from "./approvals.js";
-import { audit, sanitizeForAudit, type AuditInput } from "./audit.js";
+import { audit, redactSecretShapes, sanitizeForAudit, type AuditInput } from "./audit.js";
+import { safeText } from "./safetext.js";
 import { deliverWebhook, type SecretResolver, type WebhookEvent } from "./webhook.js";
 import {
   shapeExposedTool,
@@ -312,7 +313,7 @@ export class Router {
         // A profile's tool allow/deny list hides individual tools by their EXPOSED name.
         if (!profileAllowsTool(active, exposedName)) continue;
         if (claimed.has(exposedName)) {
-          log.warn(`tool name collision on '${exposedName}' — dropping the copy from '${server.id}'`);
+          log.warn(`tool name collision on '${safeText(exposedName)}': dropping the copy from '${server.id}'`);
           continue;
         }
         claimed.add(exposedName);
@@ -326,7 +327,7 @@ export class Router {
         if (orphaned.length) {
           this.warnOnce(
             `${exposedName}:${orphaned.join(",")}`,
-            `tool '${exposedName}' hides/drops required param(s) [${orphaned.join(", ")}] with no inject_args value — calls may fail upstream`,
+            `tool '${safeText(exposedName)}' hides/drops required param(s) [${safeText(orphaned.join(", "), 200)}] with no inject_args value: calls may fail upstream`,
           );
         }
 
@@ -385,15 +386,25 @@ export class Router {
     return pool.slice(0, limit).map(({ exposedName, tool }) => ({ ...tool, name: exposedName }) as Tool);
   }
 
-  /** Resolve a downstream tool name back to its upstream (server, realToolName). */
+  /** The mounted server a namespaced name points at (`serverId__...`), whether or not that server lists the tool. */
+  private namespaceOwner(exposedName: string): { server: MountedServer; toolName: string } | undefined {
+    if (this.mode === "flat") return undefined;
+    const idx = exposedName.indexOf(SEP);
+    if (idx === -1) return undefined;
+    const server = this.registry.get(exposedName.slice(0, idx));
+    return server ? { server, toolName: exposedName.slice(idx + SEP.length) } : undefined;
+  }
+
+  /**
+   * Resolve a downstream tool name back to its upstream (server, realToolName). A namespaced name resolves only to a
+   * tool the upstream LISTED: 0.1.0 split `serverId__anything` and forwarded the rest, so a client could call a
+   * tool its upstream never advertised (a hidden admin tool, a debug handler) and every listing-based control
+   * (profiles, client globs, per-tool overrides) was bypassed by naming it directly.
+   */
   private resolve(exposedName: string): { server: MountedServer; toolName: string } | undefined {
     if (this.mode !== "flat") {
-      const idx = exposedName.indexOf(SEP);
-      if (idx === -1) return undefined;
-      const serverId = exposedName.slice(0, idx);
-      const toolName = exposedName.slice(idx + SEP.length);
-      const server = this.registry.get(serverId);
-      return server ? { server, toolName } : undefined;
+      const owner = this.namespaceOwner(exposedName);
+      return owner && owner.server.tools.some((t) => t.name === owner.toolName) ? owner : undefined;
     }
     // flat mode: find the first server that owns this tool name.
     for (const server of this.registry.list()) {
@@ -483,8 +494,17 @@ export class Router {
     // approval it ran under (once consumed).
     let risk: Risk | undefined;
     let approvalId: string | undefined;
+    let attemptSeq: number | undefined;
     const rec = (e: AuditInput): void =>
-      this.record({ ...(risk ? { risk } : {}), ...(approvalId ? { approval_id: approvalId } : {}), ...e }, caller);
+      this.record(
+        {
+          ...(risk ? { risk } : {}),
+          ...(approvalId ? { approval_id: approvalId } : {}),
+          ...(attemptSeq !== undefined ? { attempt_seq: attemptSeq } : {}),
+          ...e,
+        },
+        caller,
+      );
     const gate = caller.gate;
     // Checked again here, not only in callTool(): each entry of a batch_call is its own call, and the
     // switch can be thrown between two of them.
@@ -492,7 +512,22 @@ export class Router {
     if (killed) return killed;
 
     const target = this.resolve(exposedName);
-    if (!target) return this.error(`unknown tool '${exposedName}'`, SB_ERR.UNKNOWN_TOOL);
+    if (!target) {
+      // A name that points at a real server but at a tool it never listed is a probe worth a row; a name that points
+      // at nothing is noise and stays unaudited (as before), so a flood of junk names cannot grow the log.
+      const owner = this.namespaceOwner(exposedName);
+      if (owner) {
+        rec({
+          server: owner.server.id,
+          tool: safeText(owner.toolName, 128),
+          scope: "read",
+          decision: "deny",
+          reason: "the upstream does not list this tool",
+          error_code: SB_ERR.UNKNOWN_TOOL,
+        });
+      }
+      return this.error(`unknown tool '${exposedName}'`, SB_ERR.UNKNOWN_TOOL);
+    }
 
     const { server, toolName } = target;
     const override = server.config.tools?.[toolName];
@@ -600,6 +635,38 @@ export class Router {
     const callOpts = typeof timeoutMs === "number" ? { timeout: timeoutMs } : undefined;
 
     const capture = this.cfg.settings?.logs?.capture_io === true;
+
+    // Write-ahead (design 3.7): a write or full scope call is recorded BEFORE the upstream is contacted. After-call
+    // logging alone leaves nothing behind when the process dies or hangs in the middle of a mutating call, and lets
+    // a full disk turn into mutations nobody recorded. If the row cannot be written the call is refused (fail
+    // closed); the owner's approval, if one was consumed, is spent and the call must be approved again. Read scope
+    // keeps after-call logging: it changes nothing, and a broken log must not take the read surface down with it.
+    // The attempt row is written with audit() directly, not record(): it is not a verdict, so it is not a webhook event.
+    if (verdict.scope !== "read") {
+      try {
+        attemptSeq = audit({
+          server: server.id,
+          tool: toolName,
+          scope: verdict.scope,
+          decision: "allow",
+          reason: "attempt: written before the upstream call",
+          phase: "attempt",
+          ...caller.attr,
+          ...(risk ? { risk } : {}),
+          ...(approvalId ? { approval_id: approvalId } : {}),
+          ...(capture ? { request: sanitizeForAudit(finalArgs, injectedKeys) } : {}),
+        });
+      } catch (err) {
+        log.error(
+          `audit write-ahead failed for ${server.id}/${safeText(toolName, 128)}: ${safeText(err instanceof Error ? err.message : String(err), 300)}; the ${verdict.scope} scope call is refused`,
+        );
+        return this.error(
+          `the audit log cannot be written, so this ${verdict.scope} scope call is refused rather than run unrecorded (the reason is in the gateway log)`,
+          SB_ERR.AUDIT_FAILED,
+        );
+      }
+    }
+
     const start = Date.now();
     try {
       const raw = (await server.client.callTool({ name: toolName, arguments: finalArgs }, undefined, callOpts)) as CallToolResult;
@@ -689,7 +756,7 @@ export class Router {
         for (const resource of resources ?? []) {
           if (this.resourceOwner.has(resource.uri)) {
             log.warn(
-              `resource URI collision on '${resource.uri}' — keeping '${this.resourceOwner.get(resource.uri)}', dropping the copy from '${server.id}'`,
+              `resource URI collision on '${safeText(resource.uri, 200)}': keeping '${this.resourceOwner.get(resource.uri)}', dropping the copy from '${server.id}'`,
             );
             continue;
           }
@@ -698,7 +765,7 @@ export class Router {
           out.push(resource);
         }
       } catch (err) {
-        log.warn(`listResources failed for '${server.id}': ${err instanceof Error ? err.message : String(err)}`);
+        log.warn(`listResources failed for '${server.id}': ${safeText(err instanceof Error ? err.message : String(err), 300)}`);
       }
     }
     return out;
@@ -715,7 +782,7 @@ export class Router {
         const { resourceTemplates } = await server.client.listResourceTemplates();
         for (const tpl of resourceTemplates ?? []) out.push(tpl);
       } catch (err) {
-        log.warn(`listResourceTemplates failed for '${server.id}': ${err instanceof Error ? err.message : String(err)}`);
+        log.warn(`listResourceTemplates failed for '${server.id}': ${safeText(err instanceof Error ? err.message : String(err), 300)}`);
       }
     }
     return out;
@@ -776,7 +843,7 @@ export class Router {
         const { resourceTemplates } = await server.client.listResourceTemplates();
         if ((resourceTemplates ?? []).some((t) => templateMatches(t.uriTemplate, uri, budget))) return server.id;
       } catch (err) {
-        log.warn(`listResourceTemplates failed for '${server.id}': ${err instanceof Error ? err.message : String(err)}`);
+        log.warn(`listResourceTemplates failed for '${server.id}': ${safeText(err instanceof Error ? err.message : String(err), 300)}`);
       }
       if (budget.steps <= 0) {
         log.warn("resource template matching hit its work limit; treating the URI as unknown");
@@ -799,7 +866,7 @@ export class Router {
           out.push({ ...prompt, name: `${server.config.id}${SEP}${prompt.name}` });
         }
       } catch (err) {
-        log.warn(`listPrompts failed for '${server.id}': ${err instanceof Error ? err.message : String(err)}`);
+        log.warn(`listPrompts failed for '${server.id}': ${safeText(err instanceof Error ? err.message : String(err), 300)}`);
       }
     }
     return out;
@@ -1063,7 +1130,7 @@ export class Router {
     try {
       audit(entry);
     } catch (err) {
-      log.error(`audit write failed for ${entry.server}/${entry.tool} (${entry.decision}): ${err instanceof Error ? err.message : String(err)}`);
+      log.error(`audit write failed for ${entry.server}/${entry.tool} (${entry.decision}): ${safeText(err instanceof Error ? err.message : String(err), 300)}`);
     }
   }
 
@@ -1080,7 +1147,8 @@ export class Router {
       scope: entry.scope,
       ...(entry.reason ? { reason: entry.reason } : {}),
       ...(typeof entry.duration_ms === "number" ? { duration_ms: entry.duration_ms } : {}),
-      ...(entry.error ? { error: entry.error } : {}),
+      // An upstream chooses its error text and it can echo a credential: the audit row scrubs it, so does the webhook.
+      ...(entry.error ? { error: redactSecretShapes(entry.error) } : {}),
     });
   }
 

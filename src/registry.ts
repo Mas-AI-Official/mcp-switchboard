@@ -27,7 +27,9 @@ import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { Scope, ServerConfig } from "./types.js";
 import type { Vault } from "./vault.js";
 import type { OAuthStore } from "./oauth.js";
-import type { NetworkSource } from "./netguard.js";
+import { guardedMcpFetch, type NetworkSource } from "./netguard.js";
+import { checkNpmSpec } from "./packagespec.js";
+import { safeText } from "./safetext.js";
 import { buildOpenApiServer } from "./openapi.js";
 import { buildHttpToolServer } from "./httptool.js";
 import { authSchemeEnv, authSchemeHeaders } from "./authscheme.js";
@@ -151,8 +153,11 @@ export class Registry {
     if (config.source === "remote") {
       if (!config.url) throw new Error(`server '${config.id}': remote source needs a 'url'`);
       const headers = await this.resolveHeaders(config);
+      // Every request of the transport (POSTs, the event stream, redirects) goes through the SSRF guard, with the
+      // live `settings.network`: a remote upstream gets no wider reach than an http-tool or a webhook does.
       return new StreamableHTTPClientTransport(new URL(config.url), {
         requestInit: { headers },
+        fetch: guardedMcpFetch(this.network),
       });
     }
 
@@ -163,6 +168,10 @@ export class Registry {
 
     if (config.source === "npx") {
       if (!config.package) throw new Error(`server '${config.id}': npx source needs a 'package'`);
+      // Config load already refuses a bad string; this is the same check for a config object that did not come
+      // through it (the dashboard toggling an in-memory entry, an embedding application). Nothing is spawned first.
+      const bad = checkNpmSpec(config.package);
+      if (bad) throw new Error(`server '${config.id}': npx package ${JSON.stringify(safeText(config.package, 80))} refused: ${bad}`);
       command = process.platform === "win32" ? "npx.cmd" : "npx";
       args = ["-y", config.package, ...(config.args ?? [])];
     } else {

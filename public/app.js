@@ -66,6 +66,7 @@ async function api(path, opts = {}) {
     const msg = (body && body.error) || `${res.status} ${res.statusText}`;
     const err = new Error(msg);
     err.status = res.status;
+    err.code = body && body.code;
     throw err;
   }
   return body;
@@ -494,19 +495,28 @@ async function openToolkitDetail(slug) {
   if (addBtn) addBtn.addEventListener("click", () => addToolkit(slug, addBtn, m.close));
 }
 
-async function addToolkit(slug, btn, onDone) {
+async function addToolkit(slug, btn, onDone, version) {
   const original = btn ? btn.innerHTML : "";
   if (btn) { btn.disabled = true; btn.innerHTML = `<span class="spinner"></span>`; }
+  let needVersion = false;
   try {
-    const res = await api(`/api/toolkits/${encodeURIComponent(slug)}/add`, { method: "POST" });
+    const opts = { method: "POST" };
+    if (version) opts.body = JSON.stringify({ version });
+    const res = await api(`/api/toolkits/${encodeURIComponent(slug)}/add`, opts);
     toast(`Added as server “${res.id}” (disabled). Configure it under Servers, then toggle it on.`, "ok");
     if (onDone) onDone();
     refreshSidebar();
     if ($("#tk-grid")) reloadCatalog(); // flip the card to its Mounted state
   } catch (e) {
-    toast(e.message, "error");
+    // An npm toolkit is added pinned to one exact version; the server says when it has none to offer.
+    if (e.code === "SB_PACKAGE_UNPINNED" && !version) needVersion = true;
+    else toast(e.message, "error");
   } finally {
     if (btn) { btn.disabled = false; btn.innerHTML = original; }
+  }
+  if (needVersion) {
+    const v = window.prompt("This toolkit runs an npm package, and a new mount needs one exact version. Enter it (for example 1.2.3):", "");
+    if (v && v.trim()) return addToolkit(slug, btn, onDone, v.trim());
   }
 }
 
@@ -681,7 +691,7 @@ async function renderLogs() {
         <td><code>${esc(e.server)}</code></td>
         <td class="mono">${esc(e.tool)}</td>
         <td>${scopeBadge(e.scope)}</td>
-        <td class="decision-${esc(e.decision)} mono">${esc(e.decision)}</td>
+        <td class="decision-${esc(e.decision)} mono">${esc(e.phase === "attempt" ? "attempt" : e.decision)}</td>
         <td class="dim">${esc(e.reason || "")}</td>
       </tr>`
     )
