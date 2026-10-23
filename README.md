@@ -91,7 +91,7 @@ policy, audit, council) runs on your hardware. See **[Run it fully offline with 
 | **One connector, every assistant** | Add it once; **Claude *and* ChatGPT** share the same governed tools | Per-vendor, per-app setup |
 | **Where your tokens live** | A local AES-256 vault on **your** machine | Their cloud |
 | **Integrations** | **Mounts existing MCP servers** — no treadmill | Hand-built, must be maintained |
-| **One-command setup** | `switchboard install claude-code` wires it into 5 clients | Copy-paste JSON per client |
+| **One-command setup** | `switchboard install claude-code` wires it into 8 clients, with a preview, a backup, a probe and a rollback | Copy-paste JSON per client |
 | **Browse & connect** | A local catalog of thousands of toolkits (MCP Registry + APIs.guru) | A curated vendor shortlist |
 | **Governance** | Per-tool `read/write/full` + approval gates + audit log | Usually all-or-nothing |
 | **Profiles** | Named views — a locked-down "demo" vs a full "dev" surface, one switch | None |
@@ -139,7 +139,7 @@ Remove-Item -Recurse -Force "$env:USERPROFILE\.switchboard"
 ```
 
 Open the dashboard at **http://127.0.0.1:8088** and sign in (see [Dashboard sign-in](#dashboard-sign-in)), then point an agent at the MCP endpoint. Wire a
-client in one command with `switchboard install <client>` (see [below](#wire-it-into-your-client--one-command)).
+client in one command with `switchboard install <client>` (see [below](#wire-it-into-your-client-one-command)).
 
 ### Fastest start — one click (no terminal)
 
@@ -196,23 +196,56 @@ accepted by the admin API. Every request must also carry a Host header that name
 OAuth routes), and a browser Origin on writes must match it; anything else gets a 403. If the port is
 already taken, `switchboard serve`, `dashboard` and `expose` print the reason and exit non-zero.
 
-### Wire it into your client — one command
+### Wire it into your client: one command
 
-`switchboard install <client>` writes the right config block, in the right file, for the client you
-name — Claude Desktop, Claude Code, Cursor, VS Code, or Codex — so you never hand-edit a JSON config:
+`switchboard install <client> [--mode bridge|http] [--scope user|project] [--yes] [--dry-run]` registers
+Switchboard in the client you name: `claude-code`, `claude-desktop`, `codex`, `gemini`, `antigravity`
+(the `agy` CLI), `dsh` (the DeepSeek harness), `cursor` or `vscode`. The default entry is the
+[bridge](#bridge-one-stdio-command-for-every-client): the client starts `switchboard bridge --client <id>`,
+which relays to the shared gateway as that client, so no token is ever written into a client file.
 
 ```bash
-node dist/cli.js install claude-code        # project-local config in the current dir
-node dist/cli.js install claude-desktop --global   # the client's user/global config
-node dist/cli.js install cursor --print     # preview the exact block without writing it
+node dist/cli.js install claude-code --dry-run     # show the plan, change nothing
+node dist/cli.js install claude-code               # preview, ask, back up, write, probe
+node dist/cli.js install cursor --scope project --yes   # <project>/.cursor/mcp.json, no question
+node dist/cli.js install dsh --dsh-profile web     # a row in ~/.dsh/profiles/web/cordis.patch.yml
+node dist/cli.js uninstall claude-code             # removes only the switchboard entry
 ```
 
-It is **non-destructive** — it merges into the client's existing servers, never clobbers them — and
-`--print` shows you exactly what it would write first. Prefer to wire it by hand? The endpoints are:
+Every install runs the same steps: it **builds the plan and prints it** (the exact entry and the target file
+or the client's own CLI command), **refuses a file that does not parse** (nothing is touched), **asks you to
+confirm** (`--yes` skips the question), registers the client with the gateway when it is not yet configured
+(the equivalent of `switchboard client add <id>`: all servers, `max_scope write`, `max_risk high`),
+**backs the target up** to `<file>.bak-switchboard-<timestamp>` (for `claude mcp` the previous entry is
+recorded instead), **writes** (through the client's own CLI when it is on PATH: `claude mcp add-json`,
+`codex mcp add`, `agy mcp add`; otherwise an atomic temp-file-and-rename edit that keeps every other entry),
+**probes** (`claude mcp get`, `codex mcp get`, `agy mcp list`, or a re-read of the file, then the bridge
+entry is started once with an `initialize` request when a gateway answers), and **rolls back from the backup
+when the probe fails**. `--dry-run` writes nothing at all. A second install of an identical entry changes
+nothing. `uninstall` removes only the switchboard entry, after a backup, and keeps the registered client.
+
+| Client | User file (default scope) | `--scope project` | Writes through |
+|---|---|---|---|
+| `claude-code` | `~/.claude.json` | `<dir>/.mcp.json` | `claude mcp add-json` |
+| `claude-desktop` | `%APPDATA%\Claude\claude_desktop_config.json` | none | file |
+| `codex` | `$CODEX_HOME` or `~/.codex/config.toml` | `<dir>/.codex/config.toml` | `codex mcp add` (user scope) |
+| `gemini` | `~/.gemini/settings.json` | `<dir>/.gemini/settings.json` | file |
+| `antigravity` | `~/.gemini/config/mcp_config.json` | none | `agy mcp add` |
+| `dsh` | `$DSH_HOME` or `~/.dsh/profiles/<profile>/cordis.patch.yml` | none | file |
+| `cursor` | `~/.cursor/mcp.json` | `<dir>/.cursor/mcp.json` | file |
+| `vscode` | `%APPDATA%\Code\User\mcp.json` | `<dir>/.vscode/mcp.json` | file |
+
+`--mode http` writes the gateway's `/mcp` URL instead, with the token named by environment reference
+(`SWITCHBOARD_TOKEN`), for `claude-code`, `codex`, `cursor`, `vscode` and `dsh`; the other clients cannot
+carry a token by reference and are refused. The default scope is `user`: a bridge entry holds absolute paths
+of this machine, which do not belong in a file you commit. Older flags still work (`--global` is `--scope
+user`, `--print` is `--dry-run`).
+
+Prefer to wire it by hand? The endpoints are:
 
 ```bash
-# Claude Code / Claude Desktop, stdio transport:
-claude mcp add switchboard -- node /absolute/path/to/switchboard/dist/cli.js serve
+# Claude Code / Claude Desktop, stdio transport (the bridge):
+claude mcp add switchboard -- node /absolute/path/to/switchboard/dist/cli.js bridge --client claude-code
 
 # or the Streamable HTTP endpoint, for any HTTP MCP client:
 #   http://127.0.0.1:8088/mcp
@@ -791,7 +824,8 @@ stops working at once, on a running gateway too), `client rm <id>` revokes its k
 | `switchboard serve` | Run the gateway (stdio and/or HTTP, per config); `--client <id>` runs the stdio transport as a registered client |
 | `switchboard dashboard` | Run only the HTTP endpoint + web console |
 | `switchboard dashboard login` | Mint a one-time owner login code (after an owner-presence check) and open the dashboard signed in; `--presence` takes auto, hello, tty or none; `--no-open` only prints the URL |
-| `switchboard install <client>` | Wire MCP Switchboard into a client (`claude-desktop`, `claude-code`, `cursor`, `vscode`, `codex`) — `--global` / `--dir` / `--name` / `--print` |
+| `switchboard install <client>` | Register MCP Switchboard in a client (`claude-code`, `claude-desktop`, `codex`, `gemini`, `antigravity`, `dsh`, `cursor`, `vscode`): preview, back up, write, probe, roll back on failure. `--mode bridge\|http` / `--scope user\|project` / `--yes` / `--dry-run` / `--dsh-profile` / `--dir` / `--name` |
+| `switchboard uninstall <client>` | Remove only the Switchboard entry from a client (backup first); the registered client and its key stay |
 | `switchboard client add <id>\|list\|rotate <id>\|rm <id>` | Register clients (who may call `/mcp`, with which servers, tools and ceiling) and manage their keys: `add` takes `--servers`, `--max-scope`, `--max-risk`, `--print`; `rm` takes `--purge` |
 | `switchboard bridge --client <id>` | Relay a client's stdio to the shared HTTP gateway as that client (`--url`, `--key-file`) |
 | `switchboard expose` | Open an HTTPS tunnel to the local endpoint (for claude.ai web / ChatGPT / remote clients) |
@@ -891,9 +925,10 @@ through the governed path.
 
 **Beyond hosted parity — the net-new tier:**
 
-- **One-command install** — `switchboard install <client>` non-destructively wires MCP Switchboard into
-  Claude Desktop, Claude Code, Cursor, VS Code, or Codex (`--global` / `--dir` / `--name` / `--print`).
-  Verified by `npm run verify:install` — 57/57.
+- **One-command install**: `switchboard install <client>` registers MCP Switchboard (as a bridge entry by
+  default) in Claude Code, Claude Desktop, Codex, Gemini CLI, Antigravity, dsh, Cursor or VS Code, with a
+  preview, a timestamped backup, a probe and a rollback; `uninstall` removes only its own entry.
+  Verified by `npm run verify:install` (58/58, the file merge helpers) and `npm run verify:installers` (411/411).
 - **Offline local-LLM auto-detect** — `switchboard local-llm` probes for a running Ollama/LM Studio/
   llama.cpp/vLLM server and `local-llm wire` writes the keyless council provider; never auto-downloads.
   It also **guards against wiring a non-chat model** (an embedding/rerank/speech model) as the council
@@ -940,7 +975,8 @@ npm run verify     # build + npm audit + 26 oracles = 1171 checks, all green
 | BM25F `find_tools` search | `verify:search` | 21 |
 | Resources + prompts pass-through | `verify:resources-prompts` | 34 |
 | Classifier, child env, kill switch, resources and prompts through policy | `verify:policy-hardening` | 203 |
-| One-command `install` | `verify:install` | 57 |
+| One-command `install`: merge helpers | `verify:install` | 58 |
+| Client registration for 8 clients: bridge entry, backup, probe, rollback, uninstall | `verify:installers` | 411 |
 | Offline local-LLM detect + wire | `verify:local-llm` | 107 |
 | Local AES-256-GCM vault | `verify:vault` | 43 |
 | Dashboard API | `verify:dashboard` | 73 |

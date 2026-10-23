@@ -10,7 +10,8 @@
  *   switchboard doctor               check the environment + config
  *   switchboard catalog              list OAuth providers + connection status
  *   switchboard connect <provider>   authorize a provider via local loopback OAuth
- *   switchboard install <client>     wire MCP Switchboard into an MCP client's config
+ *   switchboard install <client>     register MCP Switchboard in an MCP client (bridge by default; preview, backup, probe, rollback)
+ *   switchboard uninstall <client>   remove only the Switchboard entry from an MCP client (backup first)
  *   switchboard bridge --client <id> relay a client's stdio to the shared HTTP gateway as that client
  *   switchboard client add|list|rotate|rm   register clients (who may call /mcp) and manage their keys
  *   switchboard local-llm            detect a local LLM server for the offline council
@@ -68,7 +69,8 @@ import {
   fetchAwesomeTaxonomy,
   applyTaxonomyToSnapshot,
 } from "./catalog.js";
-import { SUPPORTED_CLIENTS, buildPlan, writePlan, type ClientId } from "./clients.js";
+import { SUPPORTED_CLIENTS, type ClientId } from "./clients.js";
+import { runInstall, runUninstall } from "./installer.js";
 import { DEFAULT_BRIDGE_URL, runBridge } from "./bridge.js";
 import {
   KNOWN_RUNTIMES,
@@ -572,54 +574,70 @@ program
     });
   });
 
+/** Shared body of `install` and `uninstall`: validate the flags, load the config, run, set the exit code. */
+async function installAction(
+  client: string,
+  opts: { mode?: string; scope?: string; global?: boolean; dir?: string; name: string; dshProfile: string; yes?: boolean; dryRun?: boolean; print?: boolean },
+  uninstall: boolean,
+): Promise<void> {
+  try {
+    if (!SUPPORTED_CLIENTS.includes(client as ClientId)) {
+      log.error(`unknown client '${client}'. Supported: ${SUPPORTED_CLIENTS.join(", ")}`);
+      process.exitCode = 1;
+      return;
+    }
+    const mode = opts.mode ?? "bridge";
+    if (mode !== "bridge" && mode !== "http") throw new Error("--mode must be bridge or http");
+    if (opts.scope !== undefined && opts.scope !== "user" && opts.scope !== "project") throw new Error("--scope must be user or project");
+    if (opts.global && opts.scope === "project") throw new Error("--global means --scope user; it conflicts with --scope project");
+    const scope: "user" | "project" = opts.scope === "project" ? "project" : "user";
+    const cfgPath = configPath();
+    const cfg = loadConfig(cfgPath);
+    const common = {
+      client: client as ClientId,
+      scope,
+      name: opts.name,
+      dir: resolve(opts.dir ?? process.cwd()),
+      dshProfile: opts.dshProfile,
+      yes: opts.yes === true,
+      dryRun: opts.dryRun === true || opts.print === true,
+      cfg,
+      cfgPath,
+    };
+    // import.meta.url is dist/cli.js at runtime: exactly what a bridge entry must run.
+    const result = uninstall ? await runUninstall(common) : await runInstall({ ...common, mode, nodePath: process.execPath, cliPath: fileURLToPath(import.meta.url) });
+    process.exitCode = result.exitCode;
+  } catch (err) {
+    log.error(err instanceof Error ? err.message : String(err));
+    process.exitCode = 1;
+  }
+}
+
 program
   .command("install <client>")
-  .description(`wire MCP Switchboard into an MCP client's config (${SUPPORTED_CLIENTS.join(", ")})`)
-  .option("--global", "write the client's user/global config instead of a project-local one")
-  .option("--dir <path>", "project directory for project-local configs (default: cwd)")
+  .description(`register MCP Switchboard in an MCP client: preview, back up, write, probe, roll back on failure (${SUPPORTED_CLIENTS.join(", ")})`)
+  .option("--mode <mode>", "bridge (default: the client starts `switchboard bridge`, which authenticates as that client) or http (the client dials the gateway URL)", "bridge")
+  .option("--scope <scope>", "user (default) or project (<dir>/.mcp.json, .cursor, .vscode, .codex, .gemini)")
+  .option("--yes", "do not ask for confirmation")
+  .option("--dry-run", "show the plan and change nothing (no file, no client, no command that writes)")
+  .option("--dsh-profile <name>", "dsh profile whose cordis.patch.yml is edited", "web")
+  .option("--dir <path>", "project directory for --scope project (default: cwd)")
   .option("--name <name>", "server name to register under", "switchboard")
-  .option("--print", "print the resulting config without writing it")
-  .action(
-    (
-      client: string,
-      opts: { global?: boolean; dir?: string; name: string; print?: boolean },
-    ) => {
-      if (!SUPPORTED_CLIENTS.includes(client as ClientId)) {
-        log.error(`unknown client '${client}' — supported: ${SUPPORTED_CLIENTS.join(", ")}`);
-        process.exitCode = 1;
-        return;
-      }
-      const cfgPath = configPath();
-      const cfg = loadConfig(cfgPath);
-      // import.meta.url is dist/cli.js at runtime — exactly what a stdio launcher must exec.
-      const cliPath = fileURLToPath(import.meta.url);
-      const plan = buildPlan(client as ClientId, {
-        name: opts.name,
-        endpoint: {
-          host: cfg.gateway.http.host,
-          port: cfg.gateway.http.port,
-          requireAuth: cfg.gateway.http.require_auth,
-        },
-        launcher: { command: process.execPath, cliPath, configPath: cfgPath },
-        global: opts.global,
-        baseDir: opts.dir ? resolve(opts.dir) : undefined,
-      });
+  .option("--global", "same as --scope user (kept for older scripts)")
+  .option("--print", "same as --dry-run (kept for older scripts)")
+  .action((client: string, opts) => installAction(client, opts, false));
 
-      if (opts.print) {
-        out(`\n# ${plan.target.label} — ${plan.target.path}\n`);
-        out(plan.content);
-        for (const note of plan.notes) out(`note: ${note}`);
-        return;
-      }
-      if (plan.existed && !plan.changed) {
-        log.ok(`${plan.target.label} already points at this MCP Switchboard (${plan.target.path}) — no change`);
-      } else {
-        writePlan(plan);
-        log.ok(`${plan.existed ? "updated" : "wrote"} ${plan.target.label} config → ${plan.target.path}`);
-      }
-      for (const note of plan.notes) out(`  → ${note}`);
-    },
-  );
+program
+  .command("uninstall <client>")
+  .description("remove only the MCP Switchboard entry from an MCP client (a backup is taken first); the Switchboard client and its key are kept")
+  .option("--scope <scope>", "user (default) or project", undefined)
+  .option("--yes", "do not ask for confirmation")
+  .option("--dry-run", "show what would be removed and change nothing")
+  .option("--dsh-profile <name>", "dsh profile whose cordis.patch.yml is edited", "web")
+  .option("--dir <path>", "project directory for --scope project (default: cwd)")
+  .option("--name <name>", "server name the entry is registered under", "switchboard")
+  .option("--global", "same as --scope user (kept for older scripts)")
+  .action((client: string, opts) => installAction(client, opts, true));
 
 program
   .command("bridge")

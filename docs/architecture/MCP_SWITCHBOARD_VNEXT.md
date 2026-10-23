@@ -347,6 +347,66 @@ and vscode. Default mode writes a bridge entry. Flow: preview, validate, backup,
 prompt), write (the client's own CLI when it has one, else an atomic file write), probe, roll back on probe
 failure.
 
+Implementation notes (step 3, `src/clients.ts`, `installer.ts`, `cliexec.ts`, `tomlscan.ts`, `dshpatch.ts`; oracle
+`verify:installers`). Where the code makes a choice the text above leaves open, it is recorded here:
+
+- Commands: `switchboard install <client> [--mode bridge|http] [--scope user|project] [--yes] [--dry-run] [--dsh-profile <p>]
+  [--dir <d>] [--name <n>]` and `switchboard uninstall <client>` with the same flags (it removes only the entry, after a backup,
+  and keeps the registered client and its key). The default scope is `user`: a bridge entry holds absolute paths of this
+  machine, which do not belong in a project file that gets committed (0.1.0 defaulted to project-local). `--global` and `--print`
+  remain as aliases of `--scope user` and `--dry-run`. A project scope needs an existing `--dir`, and is refused for Claude
+  Desktop, Antigravity and dsh, which have none.
+- Entry: `command` is the absolute path of the running node, `args` are `[dist/cli.js, bridge, --client, <id>]` plus `--url` exactly
+  when the gateway URL is not `http://127.0.0.1:8088/mcp` (so also a LAN bind on port 8088, which the default URL would not
+  reach). `type: "stdio"` is added where the client's own docs show it (Claude Code, Cursor, VS Code). The key never appears.
+- Registration: after the confirmation and before the client file is touched, an unconfigured client is created with
+  `servers ["*"]`, `max_scope write`, `max_risk high` (the install defaults of this section; `client add` with no flags gives
+  read and low). A configured client keeps its settings and gets a key only when it has no working one. A rollback of the client
+  file does not undo the registration. The preview says all of this, `--dry-run` registers nothing.
+- Write route: the client's own CLI when it is on PATH (`claude mcp add-json <name> <json> --scope user|project`, which refuses an
+  existing name, so the old entry is removed first; `codex mcp add <name> -- <command> <args...>`, user scope only, replaces;
+  `agy mcp add <name> -- <command> <args...>`, "add or update", syntax confirmed from `agy mcp add --help`). CLIs are started by
+  the absolute path found in PATH (never the working directory, relative PATH entries skipped) without a shell. A Windows
+  `.cmd` shim (an npm-installed `codex` or `claude`) needs cmd.exe: every argument is quoted for the C runtime and one holding
+  `& | < > ^ %` or `!` or a line break is refused, and then the file is edited instead. Otherwise, and for every client without
+  a documented command, the file is edited and replaced atomically through the shared helper, following a symlink so a dotfile
+  manager's link is not replaced.
+- Refusal and drift: a JSON file must be an object (comments and trailing commas are not accepted, a BOM is kept), a TOML file
+  must pass `tomlscan.ts` (a syntax scanner, there is no TOML dependency) and keep the entry as a `[mcp_servers.<name>]` table
+  (dotted keys or an inline table are refused, not duplicated), a dsh patch file must be a block-style YAML list whose
+  `# BEGIN <name>` / `# END <name>` pairs balance. The file is read again just before the write; if it changed while the owner
+  read the preview, nothing is written. The entry name must match `^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$` (a TOML bare key and a dsh
+  serverName).
+- Backup and rollback: a timestamped byte copy `<file>.bak-switchboard-<YYYYMMDDTHHMMSSZ>` (a counter is added within the same
+  second) is taken for every file route and for codex and agy; for `claude mcp` no copy of the large, constantly rewritten
+  `~/.claude.json` is made, the previous entry is recorded (and saved under `SWITCHBOARD_HOME/install-backups`) and put back with
+  `add-json`. A failed probe or write restores the file byte for byte, removes a file the install created, or asks the CLI to
+  remove the entry when there was none. Backups are never deleted.
+- Probe: registration first (`claude mcp get <name>`, which exits 0 even for "Failed to connect", observed; `codex mcp get <name>
+  --json`, whose command and args must match; `agy mcp list`, whose row must name our script; or a re-read of the file). Then,
+  in bridge mode and only when a TCP connect to the gateway address succeeds, the bridge entry is started once with an
+  `initialize` request (without the operator's `SWITCHBOARD_KEY`, so the stored client key is what is tested) and must answer
+  with a result. A gateway that is not running is reported, not a failure. Codex rewrites its own TOML, so an existing entry
+  counts as identical when its `get --json` says so, not by text.
+- Antigravity: `agy` 1.4.5 reads `~/.gemini/config/mcp_config.json` (observed: `agy mcp list` shows exactly that file's servers and
+  none of the ones left in `~/.gemini/antigravity/mcp_config.json`, the older location, which is left alone). The file target is
+  the newer path unless only the older file exists and there is no `~/.gemini/config/.migrated` marker. Where `agy mcp add`
+  itself writes is inferred from that listing, not observed.
+- dsh: the profile file is `$DSH_HOME` (default `~/.dsh`) `/profiles/<profile>/cordis.patch.yml`, default profile `web`. The
+  row is a root-level `insert` entry (`dsh --dump-config-schema`: "An insert appends entries") for `@deepseek-ai/dsh-mcp-client`
+  (its README: `serverName`, `transport: stdio | streamable-http`, `command`, `args`, `url`, `headers`). It is appended at the
+  end of the file, outside every generated block, between `# switchboard:begin` and `# switchboard:end`, a spelling that is not a
+  BEGIN/END pair, so it can be found again and a generated-block reader never takes it for one. A row with the same id that
+  this tool did not write is refused (install) or left alone (uninstall).
+- `--mode http` is supported where the client's config can name the token by environment reference: Claude Code (`${VAR}`),
+  Cursor and VS Code (`${env:VAR}`), Codex (`bearer_token_env_var`), dsh (a `!!js` header expression). Claude Desktop, Gemini CLI
+  and Antigravity are refused with that reason, because the alternative would be a token inside a client file. The 0.1.0 header
+  for Claude Code, `${env:VAR}`, was wrong for its documented syntax and is now `${VAR}`. The library `buildPlan` without a mode
+  keeps its 0.1.0 meaning (http where the client can dial a URL); the CLI always passes the mode.
+- Not covered: a Store (MSIX) install of Claude Desktop keeps its config under `%LOCALAPPDATA%\Packages\Claude_*`, which is not
+  searched; a PowerShell-only shim (`.ps1`) and a Windows app execution alias are not started by this module (the file is edited
+  instead); JSON with comments (VS Code accepts it) is refused rather than rewritten.
+
 ### 3.14 Wave 2 hardening (review findings, oracle `verify:hardening-2`)
 
 Eleven findings from the wave 1 adversarial review, each reproduced before it was closed. The contract:
