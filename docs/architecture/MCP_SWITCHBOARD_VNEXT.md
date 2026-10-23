@@ -131,11 +131,18 @@ share it). Record:
   if still pending return `isError` with code `SB_APPROVAL_PENDING`, the id, the expiry and the exact owner
   instruction. The client repeats the identical call after approval.
 - Statuses: pending, approved, denied, consumed, expired. TTL default 900 s, configurable 60 to 86400 s.
-- CLI: `switchboard approvals list|show <id>|approve <id>|deny <id>`. `approve` requires owner presence:
-  `--presence hello` (default on Windows when available), `--presence tty` (type the last 4 characters of
-  the id at an interactive terminal), `--presence none` only with `SWITCHBOARD_INSECURE_APPROVAL=1`.
-- Dashboard: an Approvals page lists pending records with the argument preview; approve and deny require an
-  owner session and CSRF header.
+- Presence is performed by the GATEWAY process, never trusted from a caller. Files under SWITCHBOARD_HOME are
+  writable by any process of the same OS user, so a record an agent can write proves nothing. The gateway
+  holds a random HMAC key in memory only (new on every start); an approval counts only when its decision
+  carries a valid HMAC from that key, which the gateway writes after its own presence check succeeded. A
+  forged or pre-restart record is ignored (approvals expire within minutes anyway).
+- Approve channels both end in the same gateway-side check: the dashboard (owner session plus CSRF) and the
+  CLI `switchboard approvals approve <id>` (which asks the running gateway over its loopback admin API). The
+  gateway then shows Windows Hello with the exact action ("Approve <tool> on <server> for <client>: <short
+  argument summary>"). Hello unavailable: TTY challenge on the gateway console when one is attached, else
+  refuse. `--presence none` only with `SWITCHBOARD_INSECURE_APPROVAL=1` (test harnesses).
+- CLI: `switchboard approvals list|show <id>|approve <id>|deny <id>`. Deny needs no presence check.
+- Dashboard: an Approvals page lists pending records with the argument preview and a live countdown.
 - Until this store lands, the interactive TTY gate (`approval.ts`) is the only human channel and is serialised:
   every pending call waits in one queue behind one readline interface, only the head prompt is shown, and it
   is approved only by typing that prompt's own random 4 character code. A bare `y`, a wrong code, type-ahead
@@ -200,7 +207,13 @@ resource template owns the URI; templates are chosen by the upstream and URIs by
 linear NFA run (`uritemplate.ts`, no RegExp built from upstream text) with caps on template and URI length and one
 work budget per lookup. An out-of-bounds template is a non-match, never an error.
 
-### 3.11 Composio source
+### 3.11 Composio source (superseded)
+
+Superseded on 2026-10-23 by the owner's decision: the goal is a local equivalent of Composio, not a client of
+it. The method Composio uses per platform (auth definition plus actions that wrap the platform's own API,
+connected accounts, search, MCP exposure) is re-implemented locally as Switchboard toolkits; the architecture
+is recorded in docs/architecture/LOCAL_TOOLKITS.md once its research ADR is ruled. The text below is kept only
+as the record of the rejected option and is not built on main.
 
 ```yaml
 - id: social
