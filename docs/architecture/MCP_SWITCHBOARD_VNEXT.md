@@ -136,6 +136,11 @@ share it). Record:
   the id at an interactive terminal), `--presence none` only with `SWITCHBOARD_INSECURE_APPROVAL=1`.
 - Dashboard: an Approvals page lists pending records with the argument preview; approve and deny require an
   owner session and CSRF header.
+- Until this store lands, the interactive TTY gate (`approval.ts`) is the only human channel and is serialised:
+  every pending call waits in one queue behind one readline interface, only the head prompt is shown, and it
+  is approved only by typing that prompt's own random 4 character code. A bare `y`, a wrong code, type-ahead
+  and EOF deny, so one typed line can resolve at most one call (0.1.0: one `y` approved a whole `batch_call`).
+  At most 16 calls may wait; the rest are refused at once. Superseded by the out-of-band flow above.
 - `SWITCHBOARD_AUTO_APPROVE=1` stays for test harnesses and is recorded as `decided_via: "env-auto"` in the
   audit row, with a startup warning.
 - Every create and decision writes an audit row (`approval_required`, `approved`, `denied`, `expired`).
