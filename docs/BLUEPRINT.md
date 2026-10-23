@@ -153,14 +153,24 @@ single server live when you flip its toggle, without restarting the gateway.
 The governance core. Two responsibilities: **infer** a scope for a tool, then **decide** whether a
 call may proceed.
 
-**Scope inference** (`inferScope`) classifies a tool by its name against ordered ranks
-`read(0) < write(1) < full(2)`:
+**Scope inference** (`inferScope`) tokenizes the tool name (split on `_ - . /` and camelCase, lowercased)
+and classifies it against ordered ranks `read(0) < write(1) < full(2)` (design vNext 3.5):
 
-- **read** — names starting with `get / list / read / search / fetch / find / query / describe /
-  show / view / count / head / lookup / browse / inspect`.
-- **full** — names containing `delete / destroy / drop / remove / purge / wipe / revoke /
-  terminate / deactivate / admin / grant / sudo`.
+- **full**: any token is a destructive verb: `delete / destroy / drop / remove / purge / wipe / revoke /
+  terminate / deactivate / admin / grant / sudo` (whole tokens with their inflections; a name glued
+  together with no separator, such as `deletefile`, is still caught for the stems that have no benign
+  collision).
+- **read**: the FIRST token is one of `get / list / read / search / fetch / find / query / describe /
+  show / view / count / head / lookup / browse / inspect` AND no token is a write or exec verb (`run exec
+  execute eval evaluate click type press upload send post publish create update set write put patch mutate
+  apply deploy push replace generate clone design remix convert transfer pay buy order submit schedule invite
+  share import install start stop restart kill and then`).
 - **write** — everything else (the safe-but-not-trivial default for an unrecognized verb).
+
+`inferScope(name, annotations)` and `evaluate(..., annotations)` take the upstream tool's annotations, which
+may only tighten the result: `destructiveHint: true` raises to `full`, `readOnlyHint` never lowers, and
+anything but an explicit boolean `true` is ignored. A per-tool `policy` override wins over everything.
+`resolveToolScope` is the one function the router, the dashboard and `switchboard list` share.
 
 **The decision** (`evaluate`) is deliberately small and total:
 

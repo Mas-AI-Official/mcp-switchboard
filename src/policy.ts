@@ -6,25 +6,102 @@
  *   2. the server's scope ceiling -> deny if the tool needs more than the server allows
  *   3. approval gates             -> require a human confirm for the configured scopes
  *
- * Scope is inferred from the tool name by verb heuristic, overridable per tool. The
- * inference is deliberately conservative: anything that isn't clearly a read and isn't
- * clearly destructive is treated as `write`.
+ * Scope is inferred from the tool name (design vNext 3.5), overridable per tool. The classifier is
+ * token based, not a prefix match: a name is `read` only when its FIRST token is a read verb and NO
+ * token is a write or exec verb, so `browser_run_code`, `fetch_and_execute` and `count_and_send_email`
+ * are never mistaken for reads. Anything with a destructive token is `full`; everything else is `write`.
+ * Upstream annotations can only TIGHTEN the result (`destructiveHint: true` raises to `full`); a
+ * `readOnlyHint` is a claim by the upstream and never lowers a scope.
  */
 
-import type { Scope, ServerConfig, SwitchboardConfig } from "./types.js";
+import type { Scope, ServerConfig, SwitchboardConfig, ToolOverride } from "./types.js";
 
 const SCOPE_RANK: Record<Scope, number> = { read: 0, write: 1, full: 2 };
 
-/** Names that clearly only read. */
-const READ_RE = /^(get|list|read|search|fetch|find|query|describe|show|view|count|head|lookup|browse|inspect)[_A-Z]?/i;
-/** Names that are destructive / privileged -> demand the top scope. */
-const FULL_RE = /(delete|destroy|drop|remove|purge|wipe|revoke|terminate|deactivate|admin|grant|sudo)/i;
+/**
+ * Tool annotations as an upstream reports them (MCP `Tool.annotations`). Structural on purpose, so a
+ * hostile or sloppy upstream can send anything: only an explicit boolean `true` is ever honoured.
+ */
+export type ToolAnnotationsLike = { readonly [key: string]: unknown } | null | undefined;
 
-/** Infer the scope a tool needs from its name. Overridable via config. */
-export function inferScope(toolName: string): Scope {
-  if (FULL_RE.test(toolName)) return "full";
-  if (READ_RE.test(toolName)) return "read";
+/** First-token verbs that mark a tool as a pure read. */
+const READ_VERBS: ReadonlySet<string> = new Set([
+  "get", "list", "read", "search", "fetch", "find", "query", "describe", "show", "view", "count", "head", "lookup", "browse", "inspect",
+]);
+
+/** Any token in this set removes a name from `read`, wherever it sits (design 3.5). */
+const WRITE_EXEC_VERBS: ReadonlySet<string> = new Set([
+  "run", "exec", "execute", "eval", "evaluate", "click", "type", "press", "upload", "send", "post", "publish", "create", "update",
+  "set", "write", "put", "patch", "mutate", "apply", "deploy", "push", "replace", "generate", "clone", "design", "remix", "convert",
+  "transfer", "pay", "buy", "order", "submit", "schedule", "invite", "share", "import", "install", "start", "stop", "restart", "kill",
+  "and", "then",
+]);
+
+/**
+ * Destructive or privileged verbs (the 0.1.0 list), matched as whole tokens with their common
+ * inflections. Whole-token matching means `dropdown`, `dropbox` and `swipe` are no longer full.
+ */
+const DESTRUCTIVE_TOKEN =
+  /^(?:delet(?:e|es|ed|ing|ion)|destroy(?:s|ed|ing)?|drop(?:s|ped|ping)?|remov(?:e|es|ed|ing|al)|purg(?:e|es|ed|ing)|wip(?:e|es|ed|ing)|revok(?:e|es|ed|ing)|terminat(?:e|es|ed|ing|ion)|deactivat(?:e|es|ed|ing|ion)|admin(?:s|istrators?|istration)?|grant(?:s|ed|ing)?|sudo)$/;
+
+/**
+ * Names glued together without a separator (`deletefile`, `removeall`) have no token boundary to
+ * match. The 0.1.0 substring rule caught them, so keep it for the stems that have no benign
+ * collision. `drop`, `wipe`, `grant` and `admin` are excluded here: they collide with `dropdown`,
+ * `swipe`, `migrant` and `badminton`.
+ */
+const GLUED_DESTRUCTIVE = /delete|destroy|purge|revoke|terminate|deactivate|remove/;
+
+/**
+ * Split a tool name into lowercase tokens on every non letter/digit (`_ - . /` and friends) and on
+ * camelCase boundaries (`getUserProfile` -> get, user, profile; `getHTTPResponse` -> get, http, response).
+ */
+export function tokenizeToolName(name: string): string[] {
+  return name
+    .replace(/(\p{Ll}|\p{N})(\p{Lu})/gu, "$1 $2")
+    .replace(/(\p{Lu}+)(\p{Lu}\p{Ll})/gu, "$1 $2")
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean)
+    .map((t) => t.toLowerCase());
+}
+
+/** Name-only classification (no annotations): `full` > `read` > `write`, per design 3.5. */
+function classifyName(toolName: string): Scope {
+  const tokens = tokenizeToolName(toolName);
+  if (tokens.some((t) => DESTRUCTIVE_TOKEN.test(t) || GLUED_DESTRUCTIVE.test(t))) return "full";
+  if (tokens.length > 0 && READ_VERBS.has(tokens[0]!) && !tokens.some((t) => WRITE_EXEC_VERBS.has(t))) return "read";
   return "write";
+}
+
+/**
+ * Apply upstream annotations to a scope. They may only tighten: an explicit `destructiveHint: true`
+ * raises the scope to `full`. `readOnlyHint` is deliberately ignored, because an upstream (or a
+ * compromised one) must not be able to talk its own `delete_*` down to a read.
+ */
+export function tightenWithAnnotations(scope: Scope, annotations: ToolAnnotationsLike): Scope {
+  if (annotations && typeof annotations === "object" && annotations.destructiveHint === true) return "full";
+  return scope;
+}
+
+/** Infer the scope a tool needs from its name, tightened by its annotations. Overridable via config. */
+export function inferScope(toolName: string, annotations?: ToolAnnotationsLike): Scope {
+  return tightenWithAnnotations(classifyName(toolName), annotations);
+}
+
+/**
+ * The scope a tool call runs at. Precedence: explicit per-tool `policy` override (the operator always
+ * wins, in both directions) > generator-supplied verb hint (app2mcp / http-tool) > name inference;
+ * annotations then tighten whatever the hint or the name produced. Shared by `evaluate`, the dashboard
+ * and `switchboard list` so what is displayed is what is enforced.
+ */
+export function resolveToolScope(
+  toolName: string,
+  override?: ToolOverride,
+  scopeHint?: Scope,
+  annotations?: ToolAnnotationsLike,
+): Scope {
+  if (override?.policy) return override.policy;
+  return tightenWithAnnotations(scopeHint ?? classifyName(toolName), annotations);
 }
 
 export interface PolicyDecision {
@@ -39,6 +116,7 @@ export function evaluate(
   cfg: SwitchboardConfig,
   scopeHint?: Scope,
   profileCeiling?: Scope,
+  annotations?: ToolAnnotationsLike,
 ): PolicyDecision {
   const override = server.tools?.[toolName];
 
@@ -47,9 +125,9 @@ export function evaluate(
   }
 
   // Precedence: explicit per-tool override > generator-supplied verb→scope hint (app2mcp) >
-  // name-based inference. The hint lets OpenAPI HTTP verbs drive scope when the tool name alone
-  // (e.g. `findPetsByStatus`) would otherwise be misread.
-  const scope: Scope = override?.policy ?? scopeHint ?? inferScope(toolName);
+  // name-based inference, then upstream annotations tighten (never loosen) the result. The hint lets
+  // OpenAPI HTTP verbs drive scope when the tool name alone (e.g. `findPetsByStatus`) would be misread.
+  const scope: Scope = resolveToolScope(toolName, override, scopeHint, annotations);
   // The effective ceiling is the TIGHTEST of the server/gateway cap and the active profile's cap.
   // A profile can only ever LOWER the ceiling (read < write < full), never raise it — so a
   // `read` profile forces read-only even on a server configured for `full`.

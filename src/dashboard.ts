@@ -24,7 +24,8 @@ import type { SwitchboardConfig, SettingsConfig, ServerConfig, CouncilConfig } f
 import type { BreakerHealth, BreakerState } from "./breaker.js";
 import { writeConfig, parseTriggersConfig } from "./config.js";
 import { recentAudit, usageStats } from "./audit.js";
-import { inferScope } from "./policy.js";
+import { resolveToolScope } from "./policy.js";
+import { killStatus } from "./killswitch.js";
 import { activeProfileName, describeProfile } from "./profiles.js";
 import { ApiKeyStore } from "./apikeys.js";
 import { loadCatalog, queryCatalog, type CatalogSnapshot, type Toolkit } from "./catalog.js";
@@ -465,7 +466,15 @@ export async function startDashboard(
   // k8s readiness. Reveals only the service name + version + process uptime: no config, no server
   // ids. Registered before the SPA catch-all so the exact path wins over the fallback handler. ---
   app.get("/healthz", (_req: Request, res: Response) => {
-    res.json({ status: "ok", service: "switchboard", version: VERSION, uptime_s: Math.round(process.uptime()) });
+    res.json({
+      status: "ok",
+      service: "switchboard",
+      version: VERSION,
+      uptime_s: Math.round(process.uptime()),
+      // Liveness is unaffected by the kill switch (the process is up); the flag tells a monitor that
+      // every tool call, resource read and prompt get is currently refused.
+      kill_switch: killStatus(cfg).active,
+    });
   });
 
   // --- Readiness/health: per-server mount + circuit-breaker roll-up with one ok/degraded verdict.
@@ -482,7 +491,9 @@ export async function startDashboard(
     const report = buildHealthReport(configured, mounted, gateway.router.serverHealth());
     // 200 when ready, 503 when degraded, so a monitor polling /api/health gets an honest HTTP signal,
     // not a green 200 hiding an unmounted/tripped upstream.
-    res.status(report.status === "ok" ? 200 : 503).json(report);
+    // The kill switch is an operator decision, not a fault, so like a disabled server it does not
+    // degrade the verdict; it is reported beside it so a monitor can alert on it deliberately.
+    res.status(report.status === "ok" ? 200 : 503).json({ ...report, kill_switch: killStatus(cfg) });
   });
 
   // Exchange a one-time login code (minted by `switchboard dashboard login`) for the owner session.
@@ -533,7 +544,7 @@ export async function startDashboard(
       const tools = (mounted?.tools ?? []).map((t) => ({
         name: t.name,
         enabled: s.tools?.[t.name]?.enabled !== false,
-        scope: s.tools?.[t.name]?.policy ?? inferScope(t.name),
+        scope: resolveToolScope(t.name, s.tools?.[t.name], mounted?.scopeHints?.[t.name], t.annotations),
       }));
       return {
         id: s.id,
@@ -562,6 +573,7 @@ export async function startDashboard(
       tool_exposure: cfg.gateway.tool_exposure,
       default_policy: cfg.gateway.default_policy,
       active_profile: activeProfileName(cfg) ?? null,
+      kill_switch: killStatus(cfg),
       profiles,
       servers,
     });

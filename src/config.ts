@@ -11,6 +11,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { parse, stringify } from "yaml";
 import { z } from "zod";
 import type { SwitchboardConfig, TriggersConfig } from "./types.js";
+import { passthroughProblem } from "./childenv.js";
 
 const scope = z.enum(["read", "write", "full"]);
 
@@ -126,6 +127,9 @@ const approval = z
   })
   .strict();
 
+// An environment variable name: no spaces, no `=`, no NUL (parentheses allowed, e.g. PROGRAMFILES(X86)).
+const envName = z.string().min(1).regex(/^[^=\s\x00]+$/, { message: "must be a plain environment variable name" });
+
 const serverConfig = z
   .object({
     id: z.string().min(1),
@@ -147,12 +151,18 @@ const serverConfig = z
     redact_response: responseRedaction.optional(),
     credentials: z.record(z.string(), z.string()).optional(),
     env: z.record(z.string(), z.string()).optional(),
+    env_passthrough: z.array(envName).optional(),
+    env_passthrough_secrets: z.array(envName).optional(),
     tools: z.record(z.string(), toolOverride).optional(),
     approval: approval.optional(),
     limits: limitSpec.optional(),
     resilience: resilience.optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((s, ctx) => {
+    const problem = passthroughProblem(s.env_passthrough, s.env_passthrough_secrets);
+    if (problem) ctx.addIssue({ code: "custom", message: problem, path: ["env_passthrough"] });
+  });
 
 const gateway = z
   .object({
@@ -170,6 +180,9 @@ const gateway = z
       .default({ host: "127.0.0.1", port: 8088, require_auth: "auto" }),
     tool_exposure: z.enum(["namespaced", "flat", "search"]).default("namespaced"),
     default_policy: scope.default("read"),
+    // Kill switch: refuse every tool call, resource read and prompt get. Optional so an untouched
+    // config does not grow a `kill_switch: false` line when the dashboard writes it back.
+    kill_switch: z.boolean().optional(),
   })
   .strict()
   .default({

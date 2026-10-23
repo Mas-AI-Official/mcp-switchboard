@@ -27,6 +27,8 @@ gateway:
   #                 context window stays flat no matter how many servers you mount
   tool_exposure: namespaced
   default_policy: read     # read | write | full  (least privilege by default)
+  # kill_switch: true      # refuse every tool call, resource read and prompt get (SB_KILL_SWITCH).
+  #                        # `switchboard kill on|off` does the same with no restart ($SWITCHBOARD_HOME/KILL).
 
 vault:
   # encrypted-file -> AES-256-GCM blob in ~/.switchboard (portable, zero native deps)

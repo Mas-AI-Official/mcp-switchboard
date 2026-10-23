@@ -12,9 +12,9 @@
 //                           so a read of that URI resolves to the FIRST owner (never silently shadowed).
 //   read routing + audit  — readResource(uri) routes to the owning server and writes a `resources/read`
 //                           audit row at read scope.
-//   template-expanded read — a URI that was never listed (expanded from a template) resolves via the
-//                           try-each fallback, which SKIPS a server that throws and lands on the one
-//                           that can serve it.
+//   template-expanded read: a URI that was never listed but fits a resource template a server DECLARED
+//                           resolves to that server only (design 3.10: no broadcast to every server).
+//   unlisted read          : a URI nobody listed or declared is unknown; no upstream is asked.
 //   unknown resource      — an unresolvable URI throws McpError(InvalidParams) (result-or-error surface).
 //   prompts aggregate     — prompts are namespaced `serverId__name` (a prompt name is short + collision
 //                           -prone), so two upstreams' `summarize` coexist as distinct exposed names.
@@ -67,6 +67,16 @@ async function throwsInvalidParams(fn) {
     return false;
   } catch (err) {
     return err instanceof McpError && err.code === ErrorCode.InvalidParams;
+  }
+}
+
+/** Did `fn()` throw an McpError refused by governance, carrying `data.code` === `code`? */
+async function throwsRefused(fn, code) {
+  try {
+    await fn();
+    return false;
+  } catch (err) {
+    return err instanceof McpError && err.data?.code === code;
   }
 }
 
@@ -188,8 +198,11 @@ try {
   // --- C. readResource routing + URI-collision first-wins + audit ---------------------------------
   assert("readResource alpha://doc/1 routes to ALPHA (collision winner, not BETA-SHADOW)", text(await router.readResource("alpha://doc/1")) === "ALPHA-DOC-1");
   assert("readResource beta://file/a routes to BETA", text(await router.readResource("beta://file/a")) === "BETA-FILE-A");
-  assert("readResource template-expanded alpha://doc/99 resolves via try-each", text(await router.readResource("alpha://doc/99")) === "ALPHA-DOC-99");
-  assert("readResource unlisted beta://gen/xyz: fallback SKIPS alpha's throw, lands on beta", text(await router.readResource("beta://gen/xyz")) === "BETA-GEN-XYZ");
+  assert("readResource template-expanded alpha://doc/99 resolves via the declaring server's template (renamed: was try-each)", text(await router.readResource("alpha://doc/99")) === "ALPHA-DOC-99");
+  // ADAPTED for design 3.10 (vNext step 3): 0.1.0 broadcast an unlisted URI to every server and took the first
+  // that answered. Now the owner is resolved from what servers LIST (or declared as a template), so a URI nobody
+  // listed is unknown and no upstream is asked. (The template-expanded alpha://doc/99 check above is unchanged.)
+  assert("readResource unlisted beta://gen/xyz is NOT broadcast to every server: unknown resource", await throwsInvalidParams(() => router.readResource("beta://gen/xyz")));
   assert("readResource unknown URI throws McpError(InvalidParams)", await throwsInvalidParams(() => router.readResource("nope://x")));
 
   let audit = recentAudit(200);
@@ -232,7 +245,10 @@ try {
   const pPrompts = (await profRouter.listPrompts()).map((p) => p.name);
   assert("profile hides beta prompts (only alpha visible)", !pPrompts.includes("beta__summarize") && pPrompts.includes("alpha__summarize"), pPrompts.join(", "));
   assert("profile-hidden beta resource cannot be read even by exact URI", await throwsInvalidParams(() => profRouter.readResource("beta://file/a")));
-  assert("profile-hidden beta prompt cannot be read even by namespaced name", await throwsInvalidParams(() => profRouter.getPrompt("beta__summarize")));
+  // ADAPTED for design 3.10: a prompt read now runs through policy, so naming a profile-hidden server's prompt is an
+  // explicit audited refusal (McpError InvalidRequest, data.code SB_POLICY_DENY), not a silent "unknown prompt".
+  // The behavioural assertion (it cannot be read by namespaced name) is unchanged.
+  assert("profile-hidden beta prompt cannot be read even by namespaced name (refused, SB_POLICY_DENY)", await throwsRefused(() => profRouter.getPrompt("beta__summarize"), "SB_POLICY_DENY"));
 
   // --- G. gateway wiring — buildServer registers all 5 handlers (cap declaration is load-bearing) --
   let built = null;

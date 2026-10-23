@@ -15,6 +15,7 @@
  *   switchboard local-llm wire       wire a detected local server into the council
  *   switchboard toolkits sync        rebuild the integration catalog from open indexes
  *   switchboard toolkits stats       print catalog counts
+ *   switchboard kill on|off|status   refuse every tool call, resource read and prompt get (kill switch)
  *   switchboard vault set <name>     store a secret (value read from stdin)
  *   switchboard vault list|rm <name> manage secrets
  *
@@ -44,6 +45,7 @@ import { Vault, HOME_DIR } from "./vault.js";
 import { OAuthStore } from "./oauth.js";
 import { ApiKeyStore } from "./apikeys.js";
 import { inferScope } from "./policy.js";
+import { killFilePath, killStatus, setKillFile } from "./killswitch.js";
 import { buildDoctorReport } from "./doctor.js";
 import {
   ingestCatalogVerbose,
@@ -275,7 +277,7 @@ program
     const tools = gateway.router.listTools();
     out(`\n${tools.length} tools exposed:\n`);
     for (const t of tools) {
-      const scope = inferScope(t.name.split("__").pop() ?? t.name);
+      const scope = inferScope(t.name.split("__").pop() ?? t.name, t.annotations);
       out(`  ${t.name.padEnd(42)} [${scope}]  ${t.description?.split("\n")[0] ?? ""}`);
     }
     await gateway.shutdown();
@@ -637,6 +639,50 @@ llmCmd
       for (const line of advice) out(`  → ${line}`);
     },
   );
+
+program
+  .command("kill <action>")
+  .description("kill switch: refuse every tool call, resource read and prompt get until cleared (on | off | status)")
+  .action((action: string) => {
+    if (action !== "on" && action !== "off" && action !== "status") {
+      log.error(`unknown action '${action}': use 'switchboard kill on', 'off' or 'status'`);
+      process.exitCode = 1;
+      return;
+    }
+    // The config is optional here: the file switch must work even when the config is missing or broken.
+    let cfg: SwitchboardConfig | undefined;
+    try {
+      cfg = loadConfig(configPath());
+    } catch {
+      cfg = undefined;
+    }
+    const report = () => {
+      const st = killStatus(cfg);
+      out(`kill switch: ${st.active ? "ON" : "OFF"}`);
+      out(`  file:   ${killFilePath()} (${st.file ? `present${st.since ? `, since ${st.since}` : ""}` : "absent"})`);
+      out(`  config: gateway.kill_switch is ${st.config ? "true" : cfg ? "not set" : "unknown (no readable config)"}`);
+      return st;
+    };
+    if (action === "status") {
+      report();
+      return;
+    }
+    if (action === "on") {
+      const { changed } = setKillFile(true);
+      log.warn(changed ? "kill switch ON: every tool call, resource read and prompt get is now refused" : "kill switch was already on");
+      out("a running gateway sees the file on its next call; no restart needed. Clear it with 'switchboard kill off'.");
+      report();
+      return;
+    }
+    const { changed } = setKillFile(false);
+    const st = report();
+    if (st.active) {
+      log.error("the KILL file is cleared but gateway.kill_switch is still true in the config: set it to false and restart the gateway");
+      process.exitCode = 1;
+      return;
+    }
+    log.ok(changed ? "kill switch OFF: calls are allowed again" : "kill switch was already off");
+  });
 
 const profileCmd = program
   .command("profile")

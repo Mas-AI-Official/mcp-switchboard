@@ -55,7 +55,9 @@ mount time. **Credentials never go over the network to us — there is no "us."*
 ### 4. Policy Engine (`src/policy.ts`) — the governance layer
 Every tool call is classified and checked:
 - **Scope:** `read` < `write` < `full`. Default = least privilege (`default_policy`, starter = `read`).
-- **Scope inference:** tool names map to a scope by verb (`get/list/read…`→read, `delete/drop/revoke…`→full, else write).
+- **Scope inference:** the tool name is tokenized; `read` only when the first token is a read verb and no token is a write or exec verb, `full` when any token is destructive (`delete/drop/revoke…`), else `write`. Upstream annotations only tighten (`destructiveHint: true` raises to `full`). Design vNext 3.5.
+- **Kill switch:** the `$SWITCHBOARD_HOME/KILL` file or `gateway.kill_switch` refuses every tool call, resource read and prompt get (`SB_KILL_SWITCH`). Design vNext 3.8.
+- **Resources and prompts** run through the same policy, profile, kill-switch and governor gates at read scope. Design vNext 3.10.
 - **Per-tool overrides:** block `delete_repo`, allow `create_issue`, etc.
 - **Approval gates:** `write`/`full` calls can require an interactive human confirm
   (`src/approval.ts`, fail-closed — the same CMD-vs-EXE separation idea applied to MCP tools).

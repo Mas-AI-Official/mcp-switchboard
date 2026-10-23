@@ -218,6 +218,18 @@ export interface ServerConfig {
   credentials?: Record<string, string>;
   /** Plain env vars injected into the upstream process (also supports refs). */
   env?: Record<string, string>;
+  /**
+   * Names of variables to copy from the gateway's own environment into a stdio child. A stdio
+   * upstream gets only the SDK safe defaults plus a platform allowlist (PATH, SYSTEMROOT, ...), its own
+   * `env` and `credentials`, and the names listed here. Nothing else crosses.
+   */
+  env_passthrough?: string[];
+  /**
+   * Acknowledgement list for `env_passthrough`: a passthrough name that looks like a secret (KEY,
+   * TOKEN, SECRET, PASSWORD, ...) is refused unless it is also listed here. Every entry must also
+   * appear in `env_passthrough`. Prefer `credentials` with a `${vault:..}` reference for secrets.
+   */
+  env_passthrough_secrets?: string[];
   /** Per-tool enable/scope overrides keyed by the upstream tool name. */
   tools?: Record<string, ToolOverride>;
   /** Approval gates for this server. */
@@ -248,6 +260,13 @@ export interface GatewayConfig {
   tool_exposure: "namespaced" | "flat" | "search";
   /** Scope ceiling applied to any server that omits its own `policy`. */
   default_policy: Scope;
+  /**
+   * Kill switch: when true, every tools/call, resources/read and prompts/get is refused with
+   * `SB_KILL_SWITCH`. The file `<SWITCHBOARD_HOME>/KILL` (`switchboard kill on|off`) does the same
+   * without a restart; this flag is the declarative form, checked against the in-memory config on every
+   * call (the YAML itself is read at startup, so editing the file needs a restart).
+   */
+  kill_switch?: boolean;
 }
 
 export interface VaultConfig {

@@ -24,6 +24,8 @@ export const SB_ERR = {
   BAD_REQUEST: "SB_BAD_REQUEST",
   /** The call hit a configured rate limit or spend budget (global/server/tool). Fails closed. */
   RATE_LIMITED: "SB_RATE_LIMITED",
+  /** The kill switch is on: every tool call, resource read and prompt get is refused until it is cleared. */
+  KILL_SWITCH: "SB_KILL_SWITCH",
 } as const;
 
 export type SbErrorCode = (typeof SB_ERR)[keyof typeof SB_ERR];
@@ -46,4 +48,6 @@ export const SB_HINTS: Record<SbErrorCode, string> = {
     "The request was malformed. Check the tool's input schema and that all required arguments are present.",
   [SB_ERR.RATE_LIMITED]:
     "This call hit a configured rate limit or spend budget (settings.limits / server.limits / tool.limits). Wait for the window to refill, raise the limit, or lower the tool's `cost`. Limits fail closed to cap runaway loops and API spend.",
+  [SB_ERR.KILL_SWITCH]:
+    "The operator turned the kill switch on (the SWITCHBOARD_HOME/KILL file or gateway.kill_switch). Every tool call, resource read and prompt get is refused until it is cleared: run `switchboard kill off` and make sure gateway.kill_switch is not true. The file takes effect on the next call; the config flag is read at startup.",
 };

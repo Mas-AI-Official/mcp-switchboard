@@ -30,8 +30,9 @@ import type {
   GetPromptResult,
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Registry, MountedServer } from "./registry.js";
-import type { SwitchboardConfig } from "./types.js";
-import { evaluate } from "./policy.js";
+import type { Scope, SwitchboardConfig } from "./types.js";
+import { evaluate, resolveToolScope } from "./policy.js";
+import { isKilled, killStatus } from "./killswitch.js";
 import {
   getActiveProfile,
   profileAllowsServer,
@@ -82,6 +83,46 @@ const DEFAULT_SEARCH_LIMIT = 10;
 const MAX_SEARCH_LIMIT = 50;
 /** Cap on tool calls per `batch_call` request — a runaway guard, not a quota. */
 const MAX_BATCH_CALLS = 20;
+/** URIs longer than this are never matched against a resource template (a ReDoS and cost guard). */
+const MAX_TEMPLATE_URI_LEN = 8192;
+/** The two read-scope content surfaces that run through policy like a tool call (design 3.10). */
+type ReadSurface = "resources/read" | "prompts/get";
+
+/**
+ * Does `uri` fit an RFC 6570 URI template? Used only to find which server DECLARED a template for a
+ * URI nobody listed; the match never reaches a second server. Deliberately conservative: an operator
+ * form this does not model matches as a single path segment, so an odd template fails closed.
+ */
+function templateMatches(template: string, uri: string): boolean {
+  // A client chooses the URI and the declaring server chooses the template: bound the work either way.
+  if (uri.length > MAX_TEMPLATE_URI_LEN) return false;
+  let pattern = "^";
+  let last = 0;
+  for (const m of template.matchAll(/\{([^}]*)\}/g)) {
+    const at = m.index ?? 0;
+    pattern += template.slice(last, at).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const op = (m[1] ?? "")[0];
+    pattern +=
+      op === "+" || op === "#"
+        ? ".+"
+        : op === "/"
+          ? "(?:/[^/?#]+)+"
+          : op === "."
+            ? "(?:\\.[^/?#.]+)+"
+            : op === ";"
+              ? "(?:;[^/?#;]+)+"
+              : op === "?" || op === "&"
+                ? "(?:[?&][^#]*)?"
+                : "[^/?#]+";
+    last = at + m[0].length;
+  }
+  pattern += template.slice(last).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$";
+  try {
+    return new RegExp(pattern).test(uri);
+  } catch {
+    return false;
+  }
+}
 /** The four MCP annotation hints that can be used as `find_tools` tag filters. */
 const ANNOTATION_TAGS = ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"] as const;
 
@@ -347,6 +388,9 @@ export class Router {
   /** Entry point for a downstream tool call. In `search` mode this also services the
    *  `find_tools` / `call_tool` meta-tools; otherwise it forwards directly. */
   async callTool(exposedName: string, args: Record<string, unknown>): Promise<CallToolResult> {
+    // Kill switch first (design 3.8): it stops the discovery meta-tools too, not just upstream calls.
+    const killed = this.refuseIfKilled(exposedName);
+    if (killed) return killed;
     if (this.mode === "search") {
       if (exposedName === FIND_TOOLS) return this.handleFind(args);
       if (exposedName === CALL_TOOL) return this.handleCall(args);
@@ -417,13 +461,26 @@ export class Router {
 
   /** Govern, then forward, a real tool call to its upstream server. */
   private async forward(exposedName: string, args: Record<string, unknown>): Promise<CallToolResult> {
+    // Checked again here, not only in callTool(): each entry of a batch_call is its own call, and the
+    // switch can be thrown between two of them.
+    const killed = this.refuseIfKilled(exposedName);
+    if (killed) return killed;
+
     const target = this.resolve(exposedName);
     if (!target) return this.error(`unknown tool '${exposedName}'`, SB_ERR.UNKNOWN_TOOL);
 
     const { server, toolName } = target;
     const override = server.config.tools?.[toolName];
     const active = getActiveProfile(this.cfg)?.profile;
-    const verdict = evaluate(server.config, toolName, this.cfg, server.scopeHints?.[toolName], profileScopeCeiling(active));
+    // The upstream's own annotations ride along: they can only tighten the scope (design 3.5).
+    const verdict = evaluate(
+      server.config,
+      toolName,
+      this.cfg,
+      server.scopeHints?.[toolName],
+      profileScopeCeiling(active),
+      this.annotationsOf(server, toolName),
+    );
 
     // Defense in depth: a tool hidden by the active profile must also be UNCALLABLE, not merely
     // absent from the listing. resolve() works off raw upstream names, so a client that names a
@@ -611,37 +668,60 @@ export class Router {
     return out;
   }
 
-  /** Read a resource by URI, routing to the server that listed it. A cold/stale owner map is
-   *  rebuilt once via listResources(); a URI that was never listed (e.g. expanded from a template)
-   *  is tried against every visible resource-capable server. Audited at read scope. An unresolved
-   *  URI throws McpError(InvalidParams) so the SDK emits a proper JSON-RPC error (resources/read
-   *  is result-or-error, unlike tools which return an isError result). */
+  /**
+   * Read a resource by URI, routing to the server that listed it. The owner is resolved from what
+   * servers LIST: the exact-URI map first (rebuilt once when cold or stale), then the resource
+   * templates a server declared. A URI nobody listed or declared is NOT tried against every server
+   * (0.1.0 broadcast it): it is "unknown", an McpError(InvalidParams). The owner then goes through the
+   * same gates as a tool call, at read scope: kill switch, visibility (enabled + active profile),
+   * policy, the governor and the approval gate (see governRead). resources/read is result-or-error,
+   * so every refusal is a thrown McpError carrying the SB_* code in `data.code`.
+   */
   async readResource(uri: string): Promise<ReadResourceResult> {
+    this.assertNotKilled("resources/read", uri);
     let ownerId = this.resourceOwner.get(uri);
     if (!ownerId) {
       await this.listResources();
       ownerId = this.resourceOwner.get(uri);
     }
-    if (ownerId) {
-      const server = this.registry.get(ownerId);
-      if (server && this.isVisible(server)) {
-        const result = (await server.client.readResource({ uri })) as ReadResourceResult;
-        this.record({ server: server.id, tool: "resources/read", scope: "read", decision: "allow", reason: uri });
-        return result;
-      }
+    ownerId ??= await this.templateOwner(uri);
+    const server = ownerId ? this.registry.get(ownerId) : undefined;
+    if (!server) throw new McpError(ErrorCode.InvalidParams, `[switchboard] unknown resource '${uri}'`);
+
+    await this.governRead(server, "resources/read", uri);
+    const start = Date.now();
+    try {
+      const result = (await server.client.readResource({ uri })) as ReadResourceResult;
+      this.record({ server: server.id, tool: "resources/read", scope: "read", decision: "allow", reason: uri, duration_ms: Date.now() - start });
+      return result;
+    } catch (err) {
+      this.record({
+        server: server.id,
+        tool: "resources/read",
+        scope: "read",
+        decision: "allow",
+        reason: uri,
+        duration_ms: Date.now() - start,
+        error: err instanceof Error ? err.message : String(err),
+        error_code: SB_ERR.UPSTREAM_ERROR,
+      });
+      throw err;
     }
-    // Try-each fallback for a URI that was never listed (template-expanded, or owner since gone).
+  }
+
+  /** The visible server that DECLARED a resource template matching `uri`, if any (first wins). Only
+   *  the declaring server is ever asked to read it. */
+  private async templateOwner(uri: string): Promise<string | undefined> {
     for (const server of this.visibleServers()) {
       if (!server.client.getServerCapabilities()?.resources) continue;
       try {
-        const result = (await server.client.readResource({ uri })) as ReadResourceResult;
-        this.record({ server: server.id, tool: "resources/read", scope: "read", decision: "allow", reason: uri });
-        return result;
-      } catch {
-        /* not this server — keep trying */
+        const { resourceTemplates } = await server.client.listResourceTemplates();
+        if ((resourceTemplates ?? []).some((t) => templateMatches(t.uriTemplate, uri))) return server.id;
+      } catch (err) {
+        log.warn(`listResourceTemplates failed for '${server.id}': ${err instanceof Error ? err.message : String(err)}`);
       }
     }
-    throw new McpError(ErrorCode.InvalidParams, `[switchboard] unknown resource '${uri}'`);
+    return undefined;
   }
 
   /** Aggregate prompts across every visible, prompt-capable server, namespaced `serverId__name`.
@@ -664,40 +744,142 @@ export class Router {
   }
 
   /** Get a prompt by its exposed (namespaced) name, stripping the `serverId__` prefix before
-   *  routing. A bare (un-prefixed) name is matched against every visible prompt-capable server.
-   *  Audited at read scope; an unresolved name throws McpError(InvalidParams). */
+   *  routing. A bare (un-prefixed) name is matched against the prompts each visible server LISTS and
+   *  only the server that lists it is asked. Same gates as resources/read (see governRead); an
+   *  unresolved name throws McpError(InvalidParams), a refused one McpError(InvalidRequest). */
   async getPrompt(name: string, args?: Record<string, string>): Promise<GetPromptResult> {
+    this.assertNotKilled("prompts/get", name);
     const idx = name.indexOf(SEP);
     if (idx !== -1) {
       const serverId = name.slice(0, idx);
       const promptName = name.slice(idx + SEP.length);
       const server = this.registry.get(serverId);
-      if (server && this.isVisible(server) && server.client.getServerCapabilities()?.prompts) {
-        const result = (await server.client.getPrompt({
-          name: promptName,
-          ...(args ? { arguments: args } : {}),
-        })) as GetPromptResult;
-        this.record({ server: server.id, tool: "prompts/get", scope: "read", decision: "allow", reason: promptName });
-        return result;
+      if (server && server.client.getServerCapabilities()?.prompts) {
+        await this.governRead(server, "prompts/get", promptName);
+        return this.fetchPrompt(server, promptName, args);
       }
     }
-    // Fallback: treat `name` as a bare prompt name and find the first visible server that has it.
+    // Fallback: treat `name` as a bare prompt name and find the first visible server that lists it.
     for (const server of this.visibleServers()) {
       if (!server.client.getServerCapabilities()?.prompts) continue;
+      let listed: string[];
       try {
         const { prompts } = await server.client.listPrompts();
-        if (!prompts?.some((p) => p.name === name)) continue;
-        const result = (await server.client.getPrompt({
-          name,
-          ...(args ? { arguments: args } : {}),
-        })) as GetPromptResult;
-        this.record({ server: server.id, tool: "prompts/get", scope: "read", decision: "allow", reason: name });
-        return result;
+        listed = (prompts ?? []).map((p) => p.name);
       } catch {
-        /* not this server — keep trying */
+        continue; // not this server
       }
+      if (!listed.includes(name)) continue;
+      await this.governRead(server, "prompts/get", name);
+      return this.fetchPrompt(server, name, args);
     }
     throw new McpError(ErrorCode.InvalidParams, `[switchboard] unknown prompt '${name}'`);
+  }
+
+  /** The upstream half of prompts/get: call it, audit the outcome, rethrow an upstream failure. */
+  private async fetchPrompt(server: MountedServer, promptName: string, args?: Record<string, string>): Promise<GetPromptResult> {
+    const start = Date.now();
+    try {
+      const result = (await server.client.getPrompt({
+        name: promptName,
+        ...(args ? { arguments: args } : {}),
+      })) as GetPromptResult;
+      this.record({ server: server.id, tool: "prompts/get", scope: "read", decision: "allow", reason: promptName, duration_ms: Date.now() - start });
+      return result;
+    } catch (err) {
+      this.record({
+        server: server.id,
+        tool: "prompts/get",
+        scope: "read",
+        decision: "allow",
+        reason: promptName,
+        duration_ms: Date.now() - start,
+        error: err instanceof Error ? err.message : String(err),
+        error_code: SB_ERR.UPSTREAM_ERROR,
+      });
+      throw err;
+    }
+  }
+
+  /**
+   * Settle every gate a resources/read or prompts/get must pass before it reaches an upstream, in the
+   * order a tool call meets them: visibility (a disabled server, or one the active profile hides),
+   * policy via evaluate() at READ scope (so a per-tool `enabled: false` on "resources/read" or
+   * "prompts/get" and the profile ceiling apply), the governor (the same global, server and tool
+   * buckets a tool call draws from), then the approval gate. Every refusal is audited and thrown as an
+   * McpError(InvalidRequest) with the SB_* code in `data.code`.
+   */
+  private async governRead(server: MountedServer, tool: ReadSurface, detail: string): Promise<void> {
+    const deny = (code: SbErrorCode, why: string, message: string): never => {
+      this.record({ server: server.id, tool, scope: "read", decision: "deny", reason: `${why}: ${detail}`, error_code: code });
+      throw this.refusal(code, message);
+    };
+    const active = getActiveProfile(this.cfg)?.profile;
+    if (server.config.enabled === false) {
+      return deny(SB_ERR.POLICY_DENY, "server is disabled", `denied by policy: server '${server.id}' is disabled`);
+    }
+    if (!profileAllowsServer(active, server.id)) {
+      return deny(SB_ERR.POLICY_DENY, "hidden by active profile", `denied by policy: '${server.id}' is not available in the active profile`);
+    }
+    const verdict = evaluate(server.config, tool, this.cfg, "read", profileScopeCeiling(active));
+    if (verdict.decision === "deny") {
+      return deny(SB_ERR.POLICY_DENY, verdict.reason, `denied by policy: ${verdict.reason}`);
+    }
+    const gov = this.governor.consume(server.id, tool, Date.now());
+    if (!gov.ok) {
+      const retry = gov.retryAfterMs && isFinite(gov.retryAfterMs) ? ` (retry after ~${Math.ceil(gov.retryAfterMs / 1000)}s)` : "";
+      return deny(SB_ERR.RATE_LIMITED, gov.reason ?? "limit exceeded", `rate limited: ${gov.reason ?? "limit exceeded"}${retry}`);
+    }
+    if (verdict.decision === "approval_required") {
+      this.fireWebhook({ decision: "approval_required", server: server.id, tool, scope: "read", reason: verdict.reason });
+      if (!(await approve(server.id, tool, "read", verdict.reason))) {
+        return deny(SB_ERR.APPROVAL_DENIED, "approval denied/unavailable", `approval required and not granted for ${tool} on '${server.id}'`);
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Kill switch (design 3.8). Checked on every tools/call, resources/read and prompts/get.
+  // ---------------------------------------------------------------------------------------------
+
+  /** If the kill switch is on, audit a deny row and return the refusal result for a tool call. */
+  private refuseIfKilled(exposedName: string): CallToolResult | undefined {
+    if (!isKilled(this.cfg)) return undefined;
+    const reason = `kill switch is on (${killStatus(this.cfg).source})`;
+    // Attribution only: the target is resolved to name the server in the audit row, never called.
+    const target = this.resolve(exposedName);
+    this.record({
+      server: target?.server.id ?? "switchboard",
+      tool: target?.toolName ?? exposedName,
+      scope: target ? this.scopeOf(target.server, target.toolName) : "read",
+      decision: "deny",
+      reason,
+      error_code: SB_ERR.KILL_SWITCH,
+    });
+    return this.error(`${reason}: refusing '${exposedName}'`, SB_ERR.KILL_SWITCH);
+  }
+
+  /** The resources/read and prompts/get form of the kill switch: audit, then throw. */
+  private assertNotKilled(tool: ReadSurface, detail: string): void {
+    if (!isKilled(this.cfg)) return;
+    const reason = `kill switch is on (${killStatus(this.cfg).source})`;
+    this.record({ server: "switchboard", tool, scope: "read", decision: "deny", reason: `${reason}: ${detail}`, error_code: SB_ERR.KILL_SWITCH });
+    throw this.refusal(SB_ERR.KILL_SWITCH, `${reason}: refusing ${tool}`);
+  }
+
+  /** A governed refusal on a result-or-error surface: the code travels in the message and in `data`. */
+  private refusal(code: SbErrorCode, message: string): McpError {
+    return new McpError(ErrorCode.InvalidRequest, `[switchboard] ${code}: ${message}`, { code, hint: SB_HINTS[code] });
+  }
+
+  /** The upstream's annotations for a tool, from the tool list the registry cached at mount. */
+  private annotationsOf(server: MountedServer, toolName: string): Tool["annotations"] {
+    return server.tools.find((t) => t.name === toolName)?.annotations;
+  }
+
+  /** The scope a tool resolves to (override, hint, name, annotations), for audit attribution. */
+  private scopeOf(server: MountedServer, toolName: string): Scope {
+    return resolveToolScope(toolName, server.config.tools?.[toolName], server.scopeHints?.[toolName], this.annotationsOf(server, toolName));
   }
 
   /** Write one finalized verdict to the audit log AND notify the webhook. Every terminal

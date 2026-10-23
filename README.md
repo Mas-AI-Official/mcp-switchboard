@@ -242,6 +242,41 @@ servers:
       delete_repo: { enabled: false }     # hard-block the destructive one
 ```
 
+### How a tool gets its scope, the kill switch, and what an upstream can see
+
+**Scope from the name.** The tool name is split into words (`_ - . /` and camelCase). A tool is **read**
+only when its first word is a read verb (`get list read search fetch find query describe show view count
+head lookup browse inspect`) and no word is a write or exec verb (`run execute eval click upload send post
+publish create update set write apply deploy replace ...`, and the joiners `and` / `then`). Any destructive
+word (`delete remove drop purge wipe revoke terminate deactivate admin grant sudo`) makes it **full**;
+everything else is **write**. So `browser_run_code`, `fetch_and_execute` and `count_and_send_email` are
+writes, not reads. Upstream annotations can only tighten this: `destructiveHint: true` raises a tool to
+**full**, `readOnlyHint` never lowers one. A per-tool `policy:` in your config always wins.
+
+**Kill switch.** One command stops all governed traffic, with no restart:
+
+```bash
+node dist/cli.js kill on        # every tool call, resource read and prompt get is refused (SB_KILL_SWITCH)
+node dist/cli.js kill status
+node dist/cli.js kill off
+```
+
+It works by creating `~/.switchboard/KILL` (or `$SWITCHBOARD_HOME/KILL`), which the gateway checks on every
+call. `gateway.kill_switch: true` in the config does the same from startup. `/healthz` and `/api/health`
+report it as `kill_switch`. Listing tools, resources and prompts still works; calling them does not.
+
+**Child environment.** A stdio server you launch (`npx` or `binary`) no longer inherits your shell's
+environment. It gets the MCP SDK's safe defaults, the variables a process needs to start on your OS
+(`PATH`, `SYSTEMROOT`, `TEMP`, ...), its own `env` and `credentials`, and any names you list in
+`env_passthrough`. A passthrough name that looks like a secret (`KEY`, `TOKEN`, `SECRET`, `PASSWORD`)
+must also be listed in `env_passthrough_secrets`, or the config is rejected. Prefer `credentials` with a
+`${vault:...}` reference for secrets.
+
+**Resources and prompts** go through the same gates as tool calls, at read scope: the kill switch, the
+active profile, the server's enabled flag, per-tool `enabled: false` (use the names `resources/read` and
+`prompts/get`), rate limits and the approval gate. A resource URI that no server listed (or declared in a resource template) is
+"not found"; it is no longer tried against every server.
+
 ### Connecting an OAuth provider (Phase 3)
 
 For the five managed providers you don't paste a token — you authorize once and MCP Switchboard seals
@@ -693,6 +728,7 @@ npm run verify     # build + npm audit + 26 oracles = 1171 checks, all green
 | MCP Registry metadata | `verify:registry` | 17 |
 | BM25F `find_tools` search | `verify:search` | 21 |
 | Resources + prompts pass-through | `verify:resources-prompts` | 34 |
+| Classifier, child env, kill switch, resources and prompts through policy | `verify:policy-hardening` | 203 |
 | One-command `install` | `verify:install` | 57 |
 | Offline local-LLM detect + wire | `verify:local-llm` | 107 |
 | Local AES-256-GCM vault | `verify:vault` | 43 |

@@ -30,6 +30,7 @@ import type { OAuthStore } from "./oauth.js";
 import { buildOpenApiServer } from "./openapi.js";
 import { buildHttpToolServer } from "./httptool.js";
 import { authSchemeEnv, authSchemeHeaders } from "./authscheme.js";
+import { baseChildEnv, passthroughEnv } from "./childenv.js";
 import { log } from "./logger.js";
 
 /** `${oauth:provider}` reference — resolved to a bare access token at mount time. */
@@ -170,12 +171,17 @@ export class Registry {
     return new StdioClientTransport({ command, args, env, stderr: "inherit" });
   }
 
-  /** Inherit the parent env (PATH etc.) and layer resolved env + credentials on top. */
+  /**
+   * Build a stdio child's environment (design 3.6): the SDK safe defaults plus a platform allowlist,
+   * then the operator's `env_passthrough` names, then the server's resolved `env` and `credentials`.
+   * The gateway's own environment is NOT inherited wholesale: provider keys and tokens in the
+   * operator's shell never reach an upstream unless the config says so by name.
+   */
   private async childEnv(config: ServerConfig): Promise<Record<string, string>> {
-    const env: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (typeof v === "string") env[k] = v;
-    }
+    const env: Record<string, string> = {
+      ...baseChildEnv(),
+      ...passthroughEnv(config.id, config.env_passthrough, config.env_passthrough_secrets),
+    };
     for (const [k, v] of Object.entries(config.env ?? {})) env[k] = this.vault.resolve(v);
     for (const [k, v] of Object.entries(config.credentials ?? {})) env[k] = await this.resolveRef(v);
     if (config.auth_scheme) {
