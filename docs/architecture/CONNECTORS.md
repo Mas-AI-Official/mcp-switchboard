@@ -1,10 +1,11 @@
-# Connectors: provider auth, connected accounts, connect flows (phase P1)
+# Connectors: provider auth, accounts, toolkits, execution (phases P1 and P2)
 
-Status: implemented on `vnext/connectors`. Architecture and phases: the local-Composio ADR (section 6 to 9);
-this page records what P1 built and where it lives. Phase P2 (execution pipeline, importers, exposure, file
-handling) and later are not built here.
+Status: implemented on `vnext/connectors`. Architecture and phases: the local-Composio ADR (sections 6 to 9).
+This page records what P1 (auth, accounts, connect flows) and P2 (execution, importers, exposure, files) built
+and where it lives. Principals, approvals and risk tiers (the parallel wave), dashboard pages and the daily
+canary are not built here.
 
-## What exists
+## What exists, P1
 
 | Piece | File | Notes |
 |---|---|---|
@@ -18,25 +19,70 @@ handling) and later are not built here.
 | CLI | `src/connectors/cli.ts` | `connect`, `accounts`, `authconfig`, `providers`. |
 | Gateway handle | `src/oauth.ts` | Keeps `beginAuth`, `completeAuth`, `accessToken`, `catalog`, `disconnect`; delegates to the engine. `${oauth:provider}` resolves to the provider's default account, `${oauth:provider/label}` to another. |
 
+## What exists, P2
+
+| Piece | File | Notes |
+|---|---|---|
+| Toolkits | `src/connectors/toolkits.ts` | An action is a spec operation or a recipe, with `scope` (read, write, full), `risk` (low, medium, high), `outward`, `idempotent`, an Ajv checked input schema and an optional upload or download spec. `ToolkitStore` reads the generated versions under `<SWITCHBOARD_HOME>/toolkits/<slug>/<YYYYMMDD_NN>/actions.json` plus the overlay and recipes shipped in `src/connectors/toolkits/<slug>/`. |
+| Overlays | `src/connectors/toolkits/*/overlay.json` | Data only: spec source URL, `important` list, renames, `hide`, tags, `outward`, reconcile hints. Safety can only tighten (an overlay that would loosen a derived scope or risk is ignored and reported in `overlay_issues`). The owner can add `<SWITCHBOARD_HOME>/toolkits/<slug>/overlay.json`, including `unhide`. Shipped: youtube, gmail, drive, x, slack, notion. |
+| Discovery importer | `src/connectors/importers/discovery.ts` | Google Discovery documents (YouTube v3, Gmail v1, Drive v3). One action per method, `$ref` kept as `$defs`, repeated parameters accept a string or an array, media upload and download recorded. |
+| OpenAPI importer | `src/connectors/importers/openapi.ts` | OpenAPI 3.x and Swagger 2.0 (X, Slack, Notion). Reuses the operation builder in `src/openapi.ts`, repairs vendor schema defects (duplicate enum entries, invalid unicode patterns) so the schema compiles. |
+| Sync | `src/connectors/sync.ts` | `toolkits sync <provider\|toolkit\|all> [--check]`. Fetch through the SSRF guard with bulk caps, import, require 100% Ajv compile, unique names within 64 characters and an API host that is one of the provider's `api_hosts`; otherwise nothing is written. `--check` writes nothing and reports `unchanged`, `drift` or `unsynced` (exit 1 on drift). Generated files never go in git (`.gitignore` rules and an oracle check). |
+| Recipes | `src/connectors/recipes.ts` | Declarative multi-step actions: `http`, `poll`, `upload_resumable`, `foreach`, `map`, `assert`. Templates are `{{path \| fn:arg}}` over an own-property lookup with a closed filter set; there is no code evaluation. Limits: 200 steps, 100 requests, 50 foreach items, depth 3. Shipped: `youtube/upload_video`. |
+| Execution | `src/connectors/exec.ts` | One pipeline, stage order fixed by the ADR: kill switch, client filter, toolkit and account, validate, policy, approval, limits, token, build, files, fetch, normalize, output files, redact, audit. Provider errors map to `SB_PROVIDER_*`. A 429 with Retry-After pauses that account. Idempotent reads retry on 502, 503, 504 and pre-send failures; anything that can change data is never retried, and a failure after the request left is `SB_OUTCOME_UNKNOWN` with the action's reconcile hint. |
+| Files | `src/connectors/files.ts` | Uploads: absolute path inside `settings.connectors.upload_allowlist` (by realpath), https URL through the guard, `file:///`, or `staged:<run_id>/<name>`. Sensitive path segments are never uploadable, whatever the allowlist. Downloads land in `<SWITCHBOARD_HOME>/files/<run_id>/` and come back as `{uri, bytes, sha256, mimeType}`, never inline. |
+| Media stage | `src/connectors/mediastage.ts` | `GET\|HEAD /media/<id>` for platforms that fetch media themselves. 192 bit ids, at most 15 minutes, 3 fetches by default (at most 10), the file is deleted after the last. An unknown id is an identical 404. `s3` is an interface that refuses until built. Mounted on the dashboard and tunnel listeners; `/media/` is a public route path for the host guard, nothing else is. |
+| Per-toolkit MCP server | `src/connectors/mcpserver.ts` | `source: connector` in the config. Fail closed: a toolkit mounts only when its provider has an ACTIVE account that passed the identity probe. Lists at most 28 important actions plus `manage_connections` and `proxy_request` (30). The rest are reachable through `find_tools` and `call_tool`, which the router lists while any toolkit has unlisted actions. |
+| Client links | `src/connectors/links.ts` | `connectors/links.json`. Open until the first link; then a named client sees and may call only the toolkits it is linked to, within its `max_scope` and `max_risk`, and uses the account bound to it. |
+| Coverage | `src/connectors/coverage.ts` | Reads the R1 checklists (12 CSVs, 1,740 rows, 31 named deprecated). `mapped` means a reviewed endpoint mapping; only an account-stamped `live_verified` line in `connectors/verification.ndjson` makes a row `working`. |
+| CLI | `src/connectors/cli-kit.ts` | `toolkits list\|show\|enable\|disable\|sync <target>`, `link`, `unlink`, `links`, `coverage [toolkit] [--import dir] [--mark id --state s --account a] [--json]`. `toolkits sync` with no argument is the older browse catalog sync and is unchanged. |
+
 ## Behaviour worth knowing
 
 - Refresh is single flight per account, proactive (a margin before expiry, never more than half the token's
   lifetime) and reactive (one 401). A rotated refresh token is written atomically before the new access token is
   returned. `invalid_grant` marks the account EXPIRED in the same call, writes one `account_expired` audit row and
   returns `SB_ACCOUNT_EXPIRED` with the reconnect command. Nothing retries on its own.
-- `AccountStore.authFetch` is the authenticated-call primitive P2 builds on: the credential is injected per the
-  definition's `inject` block, the URL host must be in the provider's `api_hosts`, and a redirect to another origin
-  never carries the credential.
+- `AccountStore.authFetch` is the authenticated-call primitive: the credential is injected per the definition's
+  `inject` block, the URL host must be in the provider's `api_hosts`, and a redirect to another origin never
+  carries the credential. The execution pipeline sends every provider request through it.
 - Seam for the principals work: `AccountStore.setBindingResolver(({ provider, client }) => accountRef)` picks the
-  account per client; the default is the provider's default account.
+  account per client; the connector kit installs a resolver backed by `links.json`. The client name reaches the
+  per-toolkit server in the request `_meta` key `io.mcpswitchboard/client`; the router does not yet derive it from
+  an authenticated principal (that is the parallel wave).
+- Every connector call writes one audit row with `toolkit`, `toolkit_version`, `account`, `client`, `risk`,
+  `outward` and `run_id`. The router adds these fields only from a `source: connector` server and only in a strict
+  shape, so another upstream cannot write them. No row carries a credential.
+- Approval seam: only actions marked `approval: "always"` (`proxy_request`) ask today, through the gateway's
+  existing approval path, bound to a hash of the arguments with every file replaced by its content hash. With no
+  approval path installed such an action is refused. Approval tiers per risk are the parallel wave's.
+- A 429 pause is per account and lives in memory; `breaker.ts` stays per-server transport health.
 - Lifecycle events (`account_connected`, `account_expired`, `account_disabled`, `account_enabled`,
-  `account_revoked`) are rows in the hash-chained audit log under server `connectors`. No row carries a credential.
+  `account_revoked`) are rows in the hash-chained audit log under server `connectors`.
 - A migration of an existing `oauth.json` runs once (marker in `accounts.json`) and leaves the file untouched.
+
+## Using it
+
+```bash
+node dist/cli.js connect google                   # prints an authorize URL; the account is probed on connect
+node dist/cli.js toolkits sync google            # fetch the YouTube, Gmail and Drive specs into SWITCHBOARD_HOME
+node dist/cli.js toolkits sync all --check       # exit 1 when a vendor spec drifted since the last sync
+node dist/cli.js toolkits enable gmail           # adds a `source: connector` server to the config
+node dist/cli.js link claude-code gmail --max-scope write --account google/me
+node dist/cli.js coverage --import D:/agents/wiki/reference/mcp-switchboard-rea/checklists
+```
+
+`settings.connectors` (all optional): `upload_allowlist`, `upload_deny_segments`, `max_upload_bytes`,
+`max_download_bytes`, and `media` (`public_base_url` from `switchboard expose --tunnel`, `ttl_seconds`,
+`max_fetches`). See `switchboard.config.example.yaml`.
 
 ## Not here
 
-Dashboard pages for accounts and auth configs, the execution pipeline, spec importers, recipes, file staging,
-per-client account binding in config, daily canary probes, OAuth 1.0a and `custom` auth modes (the schema names
-them; the engine refuses them), and the provider breadth beyond these 13.
+Dashboard pages for accounts, toolkits and links; the principals, approval tiers and per-client risk ceilings of
+the parallel wave; daily canary probes and the `live_verified` ledger writes they would make; the S3 media
+backend; OAuth 1.0a and `custom` auth modes (the schema names them; the engine refuses them); provider breadth
+beyond these 13 and toolkit breadth beyond the six overlays.
 
-Oracle: `npm run verify:connectors-core`.
+Oracles: `npm run verify:connectors-core` (P1) and `npm run verify:connectors-exec` (P2, offline, fixture specs
+and a loopback mock provider). `node scripts/live-sync-check.mjs` measures the importers against the real public
+YouTube, Gmail, Drive, X, Slack and Notion documents and needs the network; it is not part of the chain.

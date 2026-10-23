@@ -55,6 +55,7 @@ import { Governor } from "./governor.js";
 import { Breaker } from "./breaker.js";
 import { DEFAULT_STEP_BUDGET, templateMatches, type StepBudget } from "./uritemplate.js";
 import { log } from "./logger.js";
+import { AUDIT_META_KEY, TOOL_META_KEY } from "./connectors/mcpserver.js";
 
 const SEP = "__";
 
@@ -148,7 +149,16 @@ export class Router {
   /** Build the governed tool list exposed to downstream clients. */
   listTools(): Tool[] {
     if (this.mode === "search") return this.metaTools();
-    return this.exposed().map(({ exposedName, tool }) => ({ ...tool, name: exposedName }));
+    const tools = this.exposed().map(({ exposedName, tool }) => ({ ...tool, name: exposedName }));
+    // A connector toolkit lists only its important set. While any toolkit holds unlisted actions, the two
+    // discovery tools are listed too, so the rest are reachable (ADR local-composio 6.7).
+    if (this.hasUnlisted()) tools.push(...this.metaTools().filter((t) => t.name === FIND_TOOLS || t.name === CALL_TOOL));
+    return tools;
+  }
+
+  /** True while an enabled server holds callable-but-unlisted tools (a connector toolkit's long tail). */
+  private hasUnlisted(): boolean {
+    return this.registry.list().some((s) => s.config.enabled !== false && (s.unlisted?.length ?? 0) > 0);
   }
 
   /** The two meta-tools presented in `search` mode. */
@@ -239,7 +249,8 @@ export class Router {
     ];
   }
 
-  private exposed(): ExposedTool[] {
+  /** `includeUnlisted`: also the tools a server keeps out of its listing (search and calls use them; listing never does). */
+  private exposed(includeUnlisted = false): ExposedTool[] {
     // `search` mode still namespaces internally so `call_tool` / `find_tools` can resolve
     // a unique name back to its upstream; only `flat` collapses to bare tool names.
     const flat = this.mode === "flat";
@@ -253,7 +264,7 @@ export class Router {
       if (server.config.enabled === false) continue;
       // A profile's server allowlist hides whole servers before we ever shape their tools.
       if (!profileAllowsServer(active, server.config.id)) continue;
-      for (const tool of server.tools) {
+      for (const tool of includeUnlisted && server.unlisted?.length ? [...server.tools, ...server.unlisted] : server.tools) {
         const override = server.config.tools?.[tool.name];
         // A tool explicitly disabled in config is never exposed at all.
         if (override?.enabled === false) continue;
@@ -297,7 +308,7 @@ export class Router {
   ): Tool[] {
     const lcQuery = query.trim().toLowerCase();
 
-    let pool = this.exposed();
+    let pool = this.exposed(true);
     if (serverFilter && serverFilter.size) pool = pool.filter((e) => serverFilter.has(e.server.id));
     if (tagFilter && tagFilter.size) {
       pool = pool.filter((e) => {
@@ -309,13 +320,17 @@ export class Router {
     // Build one BM25F document per exposed tool: name / tags / input-property names / description.
     const docs: RankDoc[] = pool.map(({ exposedName, server, tool }) => {
       const override = server.config.tools?.[tool.name];
+      // A connector action carries its own tags. Its `important` flag decides what is LISTED, not how it ranks:
+      // find_tools exists to reach the long tail, so the listed set gets no boost over it.
+      const meta = server.config.source === "connector" ? (tool._meta?.[TOOL_META_KEY] as { tags?: unknown } | undefined) : undefined;
+      const metaTags = Array.isArray(meta?.tags) ? (meta!.tags as unknown[]).filter((t): t is string => typeof t === "string") : [];
       return {
         id: exposedName,
         boost: override?.important ? IMPORTANT_BOOST : 1,
         exact: exposedName.toLowerCase() === lcQuery,
         fields: [
           { key: "name", text: exposedName, weight: SEARCH_FIELDS.name.weight, b: SEARCH_FIELDS.name.b },
-          { key: "tags", text: (override?.tags ?? []).join(" "), weight: SEARCH_FIELDS.tags.weight, b: SEARCH_FIELDS.tags.b },
+          { key: "tags", text: [...(override?.tags ?? []), ...metaTags].join(" "), weight: SEARCH_FIELDS.tags.weight, b: SEARCH_FIELDS.tags.b },
           { key: "props", text: this.schemaPropNames(tool).join(" "), weight: SEARCH_FIELDS.props.weight, b: SEARCH_FIELDS.props.b },
           { key: "description", text: tool.description ?? "", weight: SEARCH_FIELDS.description.weight, b: SEARCH_FIELDS.description.b },
         ],
@@ -344,7 +359,7 @@ export class Router {
     }
     // flat mode: find the first server that owns this tool name.
     for (const server of this.registry.list()) {
-      if (server.tools.some((t) => t.name === exposedName)) return { server, toolName: exposedName };
+      if (server.tools.some((t) => t.name === exposedName) || server.unlisted?.some((t) => t.name === exposedName)) return { server, toolName: exposedName };
     }
     return undefined;
   }
@@ -360,6 +375,8 @@ export class Router {
       if (exposedName === CALL_TOOL) return this.handleCall(args);
       if (exposedName === BATCH_CALL) return this.handleBatch(args);
       // Direct call by namespaced name still works as a convenience.
+    } else if ((exposedName === FIND_TOOLS || exposedName === CALL_TOOL) && this.hasUnlisted()) {
+      return exposedName === FIND_TOOLS ? this.handleFind(args) : this.handleCall(args);
     }
     return this.forward(exposedName, args);
   }
@@ -538,6 +555,7 @@ export class Router {
         duration_ms: Date.now() - start,
         ...(capture ? { request: sanitizeForAudit(finalArgs, injectedKeys), response: sanitizeForAudit(result) } : {}),
         ...(result.isError ? { error: this.resultErrorText(result), error_code: SB_ERR.UPSTREAM_ERROR } : {}),
+        ...this.connectorAudit(server, raw),
       });
       return result;
     } catch (err) {
@@ -884,6 +902,37 @@ export class Router {
   /** Fire-and-forget webhook delivery — never blocks, never throws into the call path. */
   private fireWebhook(event: WebhookEvent): void {
     deliverWebhook(this.cfg, event, this.resolveSecret);
+  }
+
+  /**
+   * The connector fields of an audit row (ADR local-composio 6.4): toolkit, its version, the account id, the
+   * client, the risk. They come from the connector server's own result `_meta`, and ONLY from a server whose
+   * source is `connector`: any other upstream could otherwise write whatever it liked into the audit log.
+   * Every value is checked against a strict shape; a call the connector refused before sending is a `deny`.
+   */
+  private connectorAudit(server: MountedServer, result: CallToolResult): Partial<AuditInput> {
+    if (server.config.source !== "connector") return {};
+    const m = (result._meta as Record<string, unknown> | undefined)?.[AUDIT_META_KEY];
+    if (!m || typeof m !== "object") return {};
+    const a = m as Record<string, unknown>;
+    const str = (v: unknown, re: RegExp, max: number): string | undefined => (typeof v === "string" && v.length <= max && re.test(v) ? v : undefined);
+    const out: Partial<AuditInput> = {};
+    const toolkit = str(a.toolkit, /^[a-z][a-z0-9-]*$/, 40);
+    const version = str(a.toolkit_version, /^[A-Za-z0-9_.-]+$/, 24);
+    const account = str(a.account, /^ca_[A-Za-z0-9]+$/, 40);
+    const client = str(a.client, /^[A-Za-z0-9][A-Za-z0-9._-]*$/, 48);
+    const runId = str(a.run_id, /^[A-Za-z0-9_-]+$/, 64);
+    const code = str(a.error_code, /^SB_[A-Z_]+$/, 48);
+    if (toolkit) out.toolkit = toolkit;
+    if (version) out.toolkit_version = version;
+    if (account) out.account = account;
+    if (client) out.client = client;
+    if (runId) out.run_id = runId;
+    if (a.risk === "low" || a.risk === "medium" || a.risk === "high") out.risk = a.risk;
+    if (typeof a.outward === "boolean") out.outward = a.outward;
+    if (code && result.isError) out.error_code = code;
+    if (a.decision === "deny" && result.isError) out.decision = "deny";
+    return out;
   }
 
   /** Best-effort extraction of an upstream error-result's text content for the audit row. */

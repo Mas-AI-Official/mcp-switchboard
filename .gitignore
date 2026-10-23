@@ -49,3 +49,8 @@ docs/STATUS-*
 /toolkits/
 **/toolkits/generated/
 *.generated.json
+# a synced toolkit version directory (YYYYMMDD_NN) and its pointer, wherever a SWITCHBOARD_HOME lands
+**/toolkits/*/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9]/
+**/toolkits/*/current.json
+# honest-count snapshot rows imported from the R1 checklists (local only)
+**/connectors/coverage-rows.json

@@ -162,6 +162,7 @@ export type ServerSource =
   | "remote"
   | "app2mcp"
   | "http-tool"
+  | "connector"
   | "council";
 
 /** One mounted (or mountable) upstream MCP server. */
@@ -197,6 +198,12 @@ export interface ServerConfig {
   // --- http-tool source ---
   /** Hand-declared HTTP endpoints exposed as governed MCP tools (source: http-tool). */
   http_tools?: HttpToolDef[];
+
+  // --- connector source (ADR local-composio, section 6.7) ---
+  /** The toolkit this server exposes (`youtube`, `gmail`, ...). Required for `source: connector`; the server id is its on/off switch. */
+  toolkit?: string;
+  /** Connected account this server uses by default (`ca_...`, `provider/label` or a label). A tool argument or a client binding wins over it. */
+  account?: string;
 
   // --- auth + schema shaping (any source) ---
   /**
@@ -328,6 +335,8 @@ export interface SettingsConfig {
   };
   /** Cross-provider "council" relay tools (`council_consult` / `council_debate`). Off by default. */
   council?: CouncilConfig;
+  /** Connector kit: file upload rules and media staging (ADR local-composio, sections 6.5 and 6.6). */
+  connectors?: ConnectorSettings;
   /**
    * Built-in OAuth 2.1 + PKCE Authorization Server for the `/mcp` endpoint. Off by default.
    * Required for hosted MCP clients (e.g. claude.ai web) that can only reach MCP Switchboard
@@ -379,6 +388,34 @@ export interface SettingsConfig {
    * `enabled: false` to disable, or tune the schedule. See `MountRetryConfig`.
    */
   mount_retry?: MountRetryConfig;
+}
+
+/** Settings for the connector kit (`settings.connectors`). Everything defaults closed. */
+export interface ConnectorSettings {
+  /**
+   * Folders a local file may be uploaded from. Empty or absent: no local path is accepted (staged files and
+   * https URLs still are). A path must resolve, by realpath, inside one of them.
+   */
+  upload_allowlist?: string[];
+  /** Extra path segments that are never uploadable. The built-in list (`.ssh`, `.aws`, browser profiles, ...) cannot be shortened. */
+  upload_deny_segments?: string[];
+  /** Largest file an action may upload, bytes. Default 268435456 (256 MiB). */
+  max_upload_bytes?: number;
+  /** Largest file a download may save, bytes. Default 268435456 (256 MiB). */
+  max_download_bytes?: number;
+  /** Ephemeral public URLs for platforms that fetch media themselves (Instagram, TikTok PULL_FROM_URL). */
+  media?: {
+    /** `expose` (default): serve `/media/<id>` from this gateway through a tunnel. `s3`: not implemented in this build; it refuses. */
+    backend?: "expose" | "s3";
+    /** The https URL the tunnel gives this gateway. Required for `expose`. */
+    public_base_url?: string;
+    /** URL lifetime in seconds. Capped at 900 (15 minutes). */
+    ttl_seconds?: number;
+    /** GETs one URL serves before it is deleted. Default 3, at most 10. */
+    max_fetches?: number;
+    /** Tests only: serve the URL on the local listener address and accept an http base. */
+    allow_local?: boolean;
+  };
 }
 
 /**

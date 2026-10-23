@@ -49,6 +49,7 @@ import { ensureDir } from "./atomicfile.js";
 import { Vault, HOME_DIR } from "./vault.js";
 import { OAuthStore } from "./oauth.js";
 import { registerConnectorCommands } from "./connectors/cli.js";
+import { registerKitCommands, runToolkitSync } from "./connectors/cli-kit.js";
 import { ApiKeyStore } from "./apikeys.js";
 import { inferScope } from "./policy.js";
 import { killFilePath, killStatus, setKillFile } from "./killswitch.js";
@@ -371,9 +372,28 @@ const toolkitsCmd = program
   .description("manage the browsable integration catalog (the dashboard's toolkit grid)");
 
 toolkitsCmd
-  .command("sync")
-  .description("rebuild data/catalog.json from the open MCP Registry + APIs.guru indexes")
-  .action(async () => {
+  .command("sync [target]")
+  .description("no argument: rebuild data/catalog.json from the open MCP Registry + APIs.guru indexes. With a provider, a toolkit or `all`: fetch the provider's public spec through the SSRF guard and write the connector toolkit")
+  .option("--check", "with a target: fetch and compare the spec hash with the synced version, write nothing, exit 1 on drift")
+  .action(async (target: string | undefined, opts: { check?: boolean }) => {
+    if (target) {
+      await runToolkitSync(
+        {
+          vaultBackend: () => {
+            try {
+              return loadConfig(configPath()).vault.backend;
+            } catch {
+              return "encrypted-file";
+            }
+          },
+          network: () => networkFromConfig(),
+          configPath: () => configPath(),
+        },
+        target,
+        opts,
+      );
+      return;
+    }
     out("Syncing catalog from the MCP Registry and APIs.guru…");
     const { snapshot, errors, enrichment } = await ingestCatalogVerbose(networkFromConfig());
     snapshot.generated_at = new Date().toISOString();
@@ -485,6 +505,18 @@ registerConnectorCommands(program, {
       return { host: "127.0.0.1", port: 8088 };
     }
   },
+});
+
+registerKitCommands(program, toolkitsCmd, {
+  vaultBackend: () => {
+    try {
+      return loadConfig(configPath()).vault.backend;
+    } catch {
+      return "encrypted-file";
+    }
+  },
+  network: () => networkFromConfig(),
+  configPath: () => configPath(),
 });
 
 program

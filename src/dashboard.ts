@@ -18,6 +18,7 @@ import { createHmac } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import express, { type Request, type Response } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { mountMediaRoutes } from "./connectors/mediastage.js";
 import type { Gateway } from "./gateway.js";
 import { VERSION } from "./gateway.js";
 import type { SwitchboardConfig, SettingsConfig, ServerConfig, CouncilConfig } from "./types.js";
@@ -344,8 +345,13 @@ export async function startDashboard(
   app.use(urlLengthGuard());
   // Host and Origin are checked before any body is parsed and before any route runs.
   const guard = new HostGuard({ port });
+  // The media base URL a tunnel gives this gateway is accepted on public routes (only `/media/<id>` among them).
+  const mediaPublic = cfg.settings?.connectors?.media?.public_base_url;
+  if (mediaPublic) guard.addPublicUrl(mediaPublic);
   app.use(guard.handler());
   app.use(express.json());
+  // Ephemeral single-file media URLs for platforms that fetch media themselves (connectors/mediastage.ts).
+  mountMediaRoutes(app, gateway.oauth.connectors.kit.media, `http://${host}:${port}`);
 
   const sessions = new OwnerSessions({
     clock,

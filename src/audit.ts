@@ -50,6 +50,12 @@ export interface AuditEntry {
   risk?: "low" | "medium" | "high";
   /** Approval record this call consumed or created (design 3.3). Optional until approvals land. */
   approval_id?: string;
+  /** Connector calls (ADR local-composio 6.4): the toolkit, the exact definition version, the connected account (`ca_...`, never a token), whether the call is visible to others, and the run id that names any files it saved. */
+  toolkit?: string;
+  toolkit_version?: string;
+  account?: string;
+  outward?: boolean;
+  run_id?: string;
   /** Wall-clock duration of the upstream call, milliseconds. Allowed executions only. */
   duration_ms?: number;
   /** Captured call arguments (opt-in via settings.logs.capture_io, redacted + size-capped). */

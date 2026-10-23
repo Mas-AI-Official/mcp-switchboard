@@ -13,6 +13,7 @@ import { AccountStore, type ConnectorContext } from "./accounts.js";
 import { AuthConfigStore } from "./authconfigs.js";
 import { ConnectFlows } from "./oauthflow.js";
 import { ProviderRegistry } from "./providers.js";
+import { ConnectorKit, type KitConfig } from "./kit.js";
 
 export interface ConnectorsOptions {
   vault: Vault;
@@ -27,6 +28,8 @@ export interface ConnectorsOptions {
   skewMs?: number;
   /** Replace the bundled provider directory (tests only). */
   bundledProviderDir?: string;
+  /** Initial settings for the connector kit (live settings, kill switch, approvals, bundled toolkit directory). */
+  kit?: KitConfig;
 }
 
 export class Connectors {
@@ -35,9 +38,17 @@ export class Connectors {
   readonly authConfigs: AuthConfigStore;
   readonly accounts: AccountStore;
   readonly flows: ConnectFlows;
+  private kitInstance: ConnectorKit | undefined;
+  private readonly kitConfig: KitConfig | undefined;
+
+  /** The phase P2 layer (toolkits, links, files, media, execution, coverage), built on first use. */
+  get kit(): ConnectorKit {
+    return (this.kitInstance ??= new ConnectorKit(this, this.kitConfig));
+  }
 
   constructor(opts: ConnectorsOptions) {
     const home = opts.home ?? HOME_DIR;
+    this.kitConfig = opts.kit;
     const now = opts.clock ?? Date.now;
     const providers = ProviderRegistry.load({ home, ...(opts.bundledProviderDir ? { bundledDir: opts.bundledProviderDir } : {}) });
     const authConfigs = new AuthConfigStore(home, providers, opts.vault, now);
@@ -66,4 +77,6 @@ export { AuthConfigStore } from "./authconfigs.js";
 export { ConnectFlows, PENDING_TTL_MS } from "./oauthflow.js";
 export { ProviderRegistry, validateProviderDef } from "./providers.js";
 export { CONNECTOR_ERR, ConnectorError, isConnectorError } from "./errors.js";
+export { ConnectorKit } from "./kit.js";
+export type { KitConfig } from "./kit.js";
 export type * from "./types.js";

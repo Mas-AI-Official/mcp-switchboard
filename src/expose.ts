@@ -23,6 +23,7 @@ import type { Gateway } from "./gateway.js";
 import type { SwitchboardConfig } from "./types.js";
 import { ApiKeyStore } from "./apikeys.js";
 import { mountMcpEndpoint } from "./dashboard.js";
+import { mountMediaRoutes } from "./connectors/mediastage.js";
 import { HostGuard, assertPortFree, jsonErrorHandler, securityHeaders, urlLengthGuard } from "./httpsec.js";
 import { log, out } from "./logger.js";
 
@@ -94,6 +95,8 @@ export async function startMcpListener(
   app.use(express.json());
   // Auth is unconditionally required here — this listener is, by definition, public.
   mountMcpEndpoint(app, gateway, { requireAuth: () => true, apiKeys, enableJsonResponse: true });
+  // The one other thing a tunnel may reach: ephemeral single-file media URLs (an unknown id is a 404).
+  mountMediaRoutes(app, gateway.oauth.connectors.kit.media, `http://${host}:${port}`);
   app.use((_req, res) => res.status(404).json({ error: "not found — only /mcp is exposed" }));
   app.use(jsonErrorHandler());
 

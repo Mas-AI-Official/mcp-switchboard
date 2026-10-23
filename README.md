@@ -386,6 +386,24 @@ cancelled, expires after 10 minutes, is refused, or fails its identity probe sto
 sealed with the vault key; an `invalid_grant` marks the account `EXPIRED` and the error names the exact
 reconnect command.
 
+### Toolkits: call a connected account's API
+
+A **toolkit** is one provider API as agent tools (YouTube, Gmail, Drive, X, Slack, Notion ship as overlays). The
+vendor's public spec is fetched into your own `SWITCHBOARD_HOME` at sync time and never committed. Each toolkit lists
+at most 28 curated actions plus `manage_connections` and `proxy_request`; the rest of the API is reachable through
+`find_tools` and `call_tool`. Scope and risk come from the HTTP verb and the action's name, and an overlay can only
+tighten them.
+
+```bash
+node dist/cli.js toolkits sync google            # YouTube, Gmail and Drive specs (add --check to detect drift)
+node dist/cli.js toolkits enable gmail           # mounts it as a `source: connector` server
+node dist/cli.js link claude-code gmail --max-scope write
+node dist/cli.js coverage                        # honest count: only account-verified rows are "working"
+```
+
+Uploads need `settings.connectors.upload_allowlist`; downloads are saved under `SWITCHBOARD_HOME/files/<run_id>/`.
+Details: `docs/architecture/CONNECTORS.md`.
+
 Or click **Connect** in the dashboard's catalog card. The browser bounces through the provider and
 back to `127.0.0.1`, the token is sealed, and the row flips to **connected** — no token ever leaves
 your machine.

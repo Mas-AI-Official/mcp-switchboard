@@ -30,6 +30,7 @@ import type { OAuthStore } from "./oauth.js";
 import type { NetworkSource } from "./netguard.js";
 import { buildOpenApiServer } from "./openapi.js";
 import { buildHttpToolServer } from "./httptool.js";
+import { buildConnectorServer } from "./connectors/mcpserver.js";
 import { authSchemeEnv, authSchemeHeaders } from "./authscheme.js";
 import { baseChildEnv, passthroughEnv } from "./childenv.js";
 import { log } from "./logger.js";
@@ -44,6 +45,11 @@ export interface MountedServer {
   tools: Tool[];
   /** Per-tool scope hints for app2mcp-generated tools (verb→scope). */
   scopeHints?: Record<string, Scope>;
+  /**
+   * Tools that are callable and searchable but not listed (a connector toolkit lists only its `important`
+   * set; the rest are found with `find_tools` and called with `call_tool`).
+   */
+  unlisted?: Tool[];
 }
 
 export class Registry {
@@ -75,8 +81,20 @@ export class Registry {
 
     const client = new Client({ name: `switchboard:${config.id}`, version: "0.1.0" });
     let scopeHints: Record<string, Scope> | undefined;
+    let unlisted: Tool[] | undefined;
 
-    if (config.source === "app2mcp") {
+    if (config.source === "connector") {
+      // A toolkit of the connector kit (YouTube, Gmail, ...): an in-process MCP server over the toolkit's
+      // actions, calling the provider with a connected account. Refuses to mount until the provider has an
+      // ACTIVE, probed account (fail closed).
+      if (!this.oauth) throw new Error(`server '${config.id}': source 'connector' needs the connector layer, which this registry was built without`);
+      const built = await buildConnectorServer(this.oauth.connectors.kit, config);
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      await built.server.connect(serverTransport);
+      await client.connect(clientTransport);
+      scopeHints = built.scopeHints;
+      unlisted = built.unlisted;
+    } else if (config.source === "app2mcp") {
       // Generate an in-process MCP server from the OpenAPI/Swagger spec and link it to
       // our client over an in-memory transport. Credentials become request headers,
       // resolved lazily (per call) so OAuth tokens can refresh between invocations.
@@ -99,9 +117,9 @@ export class Registry {
 
     const { tools } = await client.listTools();
 
-    const mounted: MountedServer = { id: config.id, config, client, tools, scopeHints };
+    const mounted: MountedServer = { id: config.id, config, client, tools, scopeHints, ...(unlisted ? { unlisted } : {}) };
     this.mounted.set(config.id, mounted);
-    log.ok(`mounted '${config.id}' — ${tools.length} tool${tools.length === 1 ? "" : "s"}`);
+    log.ok(`mounted '${config.id}': ${tools.length} tool${tools.length === 1 ? "" : "s"}${unlisted?.length ? ` (+${unlisted.length} searchable)` : ""}`);
     return mounted;
   }
 

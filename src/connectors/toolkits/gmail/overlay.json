@@ -1,0 +1,84 @@
+{
+  "toolkit": "gmail",
+  "provider": "google",
+  "source": {
+    "kind": "discovery",
+    "url": "https://www.googleapis.com/discovery/v1/apis/gmail/v1/rest",
+    "note": "Gmail API v1 Discovery document. Fetched by `toolkits sync`, never committed."
+  },
+  "description_trim": 300,
+  "rename": {
+    "users_get_profile": "get_profile",
+    "users_messages_list": "list_messages",
+    "users_messages_get": "get_message",
+    "users_messages_send": "send_message",
+    "users_messages_modify": "modify_message",
+    "users_messages_trash": "trash_message",
+    "users_drafts_create": "create_draft",
+    "users_drafts_list": "list_drafts",
+    "users_drafts_get": "get_draft",
+    "users_drafts_update": "update_draft",
+    "users_drafts_send": "send_draft",
+    "users_drafts_delete": "delete_draft",
+    "users_labels_list": "list_labels",
+    "users_labels_create": "create_label",
+    "users_threads_list": "list_threads",
+    "users_threads_get": "get_thread",
+    "users_messages_attachments_get": "get_attachment",
+    "users_history_list": "list_history"
+  },
+  "important": [
+    "users_get_profile",
+    "users_messages_list",
+    "users_messages_get",
+    "users_messages_send",
+    "users_messages_modify",
+    "users_messages_trash",
+    "users_messages_attachments_get",
+    "users_drafts_create",
+    "users_drafts_list",
+    "users_drafts_get",
+    "users_drafts_update",
+    "users_drafts_send",
+    "users_drafts_delete",
+    "users_labels_list",
+    "users_labels_create",
+    "users_threads_list",
+    "users_threads_get",
+    "users_history_list"
+  ],
+  "hide": [
+    "users_settings_update_auto_forwarding",
+    "users_settings_forwarding_addresses_create",
+    "users_settings_delegates_create",
+    "users_settings_cse_keypairs_obliterate"
+  ],
+  "tags": {
+    "users_messages_send": [
+      "email",
+      "mail",
+      "compose"
+    ],
+    "users_drafts_create": [
+      "email",
+      "mail",
+      "draft",
+      "compose"
+    ],
+    "users_messages_list": [
+      "email",
+      "inbox",
+      "search",
+      "mail"
+    ],
+    "users_messages_get": [
+      "email",
+      "read",
+      "mail"
+    ]
+  },
+  "reconcile": {
+    "users_messages_send": "The message may have been sent. List messages in the SENT label (list_messages with labelIds SENT) and look for the subject before sending again.",
+    "users_drafts_send": "The draft may have been sent. List messages in the SENT label and check whether the draft still exists before sending again."
+  }
+}

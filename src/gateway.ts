@@ -30,7 +30,8 @@ import { OAuthStore } from "./oauth.js";
 import { Registry } from "./registry.js";
 import { Router } from "./router.js";
 import { TriggerManager } from "./triggers.js";
-import { setStdioActive } from "./approval.js";
+import { approve, setStdioActive } from "./approval.js";
+import { isKilled } from "./killswitch.js";
 import { buildCouncilServer, COUNCIL_SERVER_ID } from "./council.js";
 import { retryDelay, resolveMountRetry } from "./retry.js";
 import { log } from "./logger.js";
@@ -56,6 +57,15 @@ export class Gateway {
     // The network guard reads the live config object, so a settings change is picked up without a restart.
     this.oauth = new OAuthStore(this.vault, () => cfg.settings?.network);
     this.registry = new Registry(this.vault, this.oauth, () => cfg.settings?.network);
+    // The connector kit (toolkits, files, media, execution): live settings and kill switch from this config; the
+    // router writes the audit row from the connector server's result, so the kit does not write a second one;
+    // an action that needs a human decision (proxy_request) goes through the same approval path as any gated call.
+    this.oauth.connectors.kit.configure({
+      settings: () => cfg.settings?.connectors,
+      killed: () => isKilled(cfg),
+      approve: (req) => approve(req.server, req.tool, req.scope, req.reason),
+      ownAudit: false,
+    });
     this.router = new Router(this.registry, cfg, (ref) => this.vault.resolve(ref));
     // Polls run through this.router, so every trigger poll is governed + audited like any call.
     this.triggers = new TriggerManager(this.router, cfg, (ref) => this.vault.resolve(ref));

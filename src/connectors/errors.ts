@@ -26,6 +26,44 @@ export const CONNECTOR_ERR = {
   CONNECT_FAILED: "SB_CONNECT_FAILED",
   /** The connector configuration is unusable (unknown provider, missing auth config, bad definition). */
   CONNECTOR_CONFIG: "SB_CONNECTOR_CONFIG",
+
+  // ── execution (phase P2) ──────────────────────────────────────────────────────────────────────────
+  /** No such toolkit, or it has not been synced and has no recipes. */
+  TOOLKIT_NOT_FOUND: "SB_TOOLKIT_NOT_FOUND",
+  /** The toolkit exists but has no such action. */
+  ACTION_NOT_FOUND: "SB_ACTION_NOT_FOUND",
+  /** The calling client is not linked to this toolkit. */
+  CLIENT_NOT_LINKED: "SB_CLIENT_NOT_LINKED",
+  /** The call needs more scope or risk than the client's link allows. */
+  POLICY_DENY: "SB_POLICY_DENY",
+  /** The arguments do not match the action's input schema. */
+  BAD_REQUEST: "SB_BAD_REQUEST",
+  /** A human decision was required and not given. */
+  APPROVAL_DENIED: "SB_APPROVAL_DENIED",
+  /** The kill switch is on. */
+  KILL_SWITCH: "SB_KILL_SWITCH",
+  /** An upload was refused: outside the allowlist, a sensitive path, a symlink escape, not a file. */
+  FILE_REFUSED: "SB_FILE_REFUSED",
+  /** A file or response is over its size cap. */
+  FILE_TOO_LARGE: "SB_FILE_TOO_LARGE",
+  /** Media staging is not configured, so a platform that must fetch the file cannot be served. */
+  MEDIA_NOT_CONFIGURED: "SB_MEDIA_NOT_CONFIGURED",
+  /** The request left and the connection failed before an answer: it may or may not have taken effect. Never retried. */
+  OUTCOME_UNKNOWN: "SB_OUTCOME_UNKNOWN",
+  /** The provider could not be reached before the request was sent (refused, DNS), so nothing happened. */
+  PROVIDER_UNREACHABLE: "SB_PROVIDER_UNREACHABLE",
+  PROVIDER_BAD_REQUEST: "SB_PROVIDER_BAD_REQUEST",
+  PROVIDER_UNAUTHORIZED: "SB_PROVIDER_UNAUTHORIZED",
+  PROVIDER_FORBIDDEN: "SB_PROVIDER_FORBIDDEN",
+  PROVIDER_NOT_FOUND: "SB_PROVIDER_NOT_FOUND",
+  PROVIDER_CONFLICT: "SB_PROVIDER_CONFLICT",
+  /** HTTP 429. The account is paused until the provider's Retry-After passes. */
+  PROVIDER_RATE_LIMITED: "SB_PROVIDER_RATE_LIMITED",
+  PROVIDER_UNAVAILABLE: "SB_PROVIDER_UNAVAILABLE",
+  /** Any other provider failure. */
+  PROVIDER_FAILED: "SB_PROVIDER_FAILED",
+  /** A recipe stopped: an assert failed, a poll timed out, a step was refused, a limit was hit. */
+  RECIPE_FAILED: "SB_RECIPE_FAILED",
 } as const;
 
 export type ConnectorErrorCode = (typeof CONNECTOR_ERR)[keyof typeof CONNECTOR_ERR];

@@ -83,6 +83,15 @@ settings:
     # timeout_ms: 15000            # per request, DNS through last body byte
     # max_response_bytes: 5242880  # decoded body cap enforced while streaming (5 MiB)
 
+  # Toolkit file handling and media staging (connectors; see docs/architecture/CONNECTORS.md).
+  # connectors:
+  #   upload_allowlist: ["D:/Ideas/creative"]   # local folders an action may upload from (empty = no local path)
+  #   max_upload_bytes: 268435456
+  #   media:                                     # for platforms that fetch media themselves (Instagram, TikTok)
+  #     public_base_url: https://your-tunnel.example   # from `switchboard expose --tunnel cloudflared`
+  #     ttl_seconds: 900                         # at most 900
+  #     max_fetches: 3                           # at most 10
+
   # Cross-provider "council" relay tools. Lets an agent connected to MCP Switchboard broker a
   # PEER model: council_consult (one prompt -> the other provider) and council_debate (a
   # bounded multi-round exchange between providers + a synthesized conclusion). The headline
@@ -303,3 +312,10 @@ servers:
             lat: { type: number }
             lon: { type: number }
           required: [lat, lon]
+
+  # A connector toolkit (needs an ACTIVE connected account first: `switchboard connect google`, then
+  # `switchboard toolkits sync google`). `switchboard toolkits enable gmail` writes this entry for you.
+  # - id: gmail
+  #   source: connector
+  #   toolkit: gmail
+  #   # account: google/work                # optional: pin one connected account instead of the provider default

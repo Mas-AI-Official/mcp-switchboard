@@ -1,0 +1,626 @@
+{
+  "kind": "discovery#restDescription",
+  "discoveryVersion": "v1",
+  "id": "minivid:v3",
+  "name": "minivid",
+  "version": "v3",
+  "revision": "20261001",
+  "title": "Mini Video API (fixture, shaped like YouTube Data API v3)",
+  "rootUrl": "https://minivid.fixture.test/",
+  "servicePath": "",
+  "baseUrl": "https://minivid.fixture.test/",
+  "basePath": "",
+  "auth": {
+    "oauth2": {
+      "scopes": {
+        "https://www.googleapis.com/auth/minivid": {
+          "description": "Manage your videos"
+        }
+      }
+    }
+  },
+  "parameters": {
+    "fields": {
+      "type": "string",
+      "location": "query",
+      "description": "Selector specifying which fields to include in a partial response."
+    },
+    "alt": {
+      "type": "string",
+      "location": "query",
+      "enum": [
+        "json",
+        "media",
+        "proto"
+      ],
+      "default": "json",
+      "description": "Data format for response."
+    },
+    "key": {
+      "type": "string",
+      "location": "query",
+      "description": "API key."
+    },
+    "access_token": {
+      "type": "string",
+      "location": "query",
+      "description": "OAuth access token."
+    },
+    "uploadType": {
+      "type": "string",
+      "location": "query",
+      "description": "Legacy upload protocol for media."
+    }
+  },
+  "schemas": {
+    "Video": {
+      "id": "Video",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The video id.",
+          "annotations": {
+            "required": [
+              "minivid.videos.update"
+            ]
+          }
+        },
+        "etag": {
+          "type": "string",
+          "readOnly": true
+        },
+        "snippet": {
+          "$ref": "VideoSnippet",
+          "description": "Basic details."
+        },
+        "status": {
+          "$ref": "VideoStatus"
+        },
+        "replies": {
+          "type": "array",
+          "items": {
+            "$ref": "Video"
+          },
+          "description": "Related videos (recursive on purpose)."
+        }
+      }
+    },
+    "VideoSnippet": {
+      "id": "VideoSnippet",
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "annotations": {
+            "required": [
+              "minivid.videos.insert",
+              "minivid.videos.update"
+            ]
+          }
+        },
+        "description": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "categoryId": {
+          "type": "string"
+        },
+        "publishedAt": {
+          "type": "string",
+          "format": "date-time",
+          "readOnly": true
+        }
+      }
+    },
+    "VideoStatus": {
+      "id": "VideoStatus",
+      "type": "object",
+      "properties": {
+        "privacyStatus": {
+          "type": "string",
+          "enum": [
+            "private",
+            "public",
+            "unlisted"
+          ],
+          "enumDescriptions": [
+            "",
+            "",
+            ""
+          ]
+        },
+        "selfDeclaredMadeForKids": {
+          "type": "boolean"
+        },
+        "viewCount": {
+          "type": "string",
+          "format": "uint64",
+          "readOnly": true
+        }
+      }
+    },
+    "Playlist": {
+      "id": "Playlist",
+      "type": "object",
+      "properties": {
+        "snippet": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            }
+          }
+        },
+        "status": {
+          "$ref": "VideoStatus"
+        },
+        "id": {
+          "type": "string"
+        }
+      }
+    },
+    "CommentThread": {
+      "id": "CommentThread",
+      "type": "object",
+      "properties": {
+        "snippet": {
+          "type": "object",
+          "properties": {
+            "videoId": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            }
+          }
+        },
+        "replies": {
+          "type": "array",
+          "items": {
+            "$ref": "CommentThread"
+          }
+        },
+        "anything": {
+          "type": "any",
+          "description": "free form"
+        },
+        "labels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "VideoListResponse": {
+      "id": "VideoListResponse",
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "Video"
+          }
+        }
+      }
+    }
+  },
+  "resources": {
+    "videos": {
+      "methods": {
+        "list": {
+          "id": "minivid.videos.list",
+          "path": "minivid/v3/videos",
+          "flatPath": "minivid/v3/videos",
+          "httpMethod": "GET",
+          "description": "Returns a list of videos that match the API request parameters.",
+          "parameterOrder": [
+            "part"
+          ],
+          "response": {
+            "$ref": "VideoListResponse"
+          },
+          "scopes": [
+            "https://www.googleapis.com/auth/minivid"
+          ],
+          "parameters": {
+            "part": {
+              "type": "string",
+              "location": "query",
+              "required": true,
+              "repeated": true,
+              "description": "Comma separated list of resource parts to include."
+            },
+            "id": {
+              "type": "string",
+              "location": "query",
+              "repeated": true
+            },
+            "maxResults": {
+              "type": "integer",
+              "format": "uint32",
+              "location": "query",
+              "minimum": "1",
+              "maximum": "50",
+              "default": "5"
+            },
+            "pageToken": {
+              "type": "string",
+              "location": "query"
+            },
+            "mine": {
+              "type": "boolean",
+              "location": "query"
+            }
+          }
+        },
+        "insert": {
+          "id": "minivid.videos.insert",
+          "path": "minivid/v3/videos",
+          "flatPath": "minivid/v3/videos",
+          "httpMethod": "POST",
+          "description": "Uploads a video to the channel.",
+          "parameterOrder": [
+            "part"
+          ],
+          "request": {
+            "$ref": "Video"
+          },
+          "response": {
+            "$ref": "Video"
+          },
+          "scopes": [
+            "https://www.googleapis.com/auth/minivid"
+          ],
+          "supportsMediaUpload": true,
+          "mediaUpload": {
+            "accept": [
+              "video/*",
+              "application/octet-stream"
+            ],
+            "maxSize": "274877906944",
+            "protocols": {
+              "simple": {
+                "multipart": true,
+                "path": "/upload/minivid/v3/videos"
+              },
+              "resumable": {
+                "multipart": true,
+                "path": "/resumable/upload/minivid/v3/videos"
+              }
+            }
+          },
+          "parameters": {
+            "part": {
+              "type": "string",
+              "location": "query",
+              "required": true,
+              "repeated": true
+            },
+            "notifySubscribers": {
+              "type": "boolean",
+              "location": "query",
+              "default": "true"
+            }
+          }
+        },
+        "update": {
+          "id": "minivid.videos.update",
+          "path": "minivid/v3/videos",
+          "flatPath": "minivid/v3/videos",
+          "httpMethod": "PUT",
+          "description": "Updates a video's metadata.",
+          "request": {
+            "$ref": "Video"
+          },
+          "response": {
+            "$ref": "Video"
+          },
+          "scopes": [
+            "https://www.googleapis.com/auth/minivid"
+          ],
+          "parameters": {
+            "part": {
+              "type": "string",
+              "location": "query",
+              "required": true,
+              "repeated": true
+            }
+          }
+        },
+        "delete": {
+          "id": "minivid.videos.delete",
+          "path": "minivid/v3/videos",
+          "flatPath": "minivid/v3/videos",
+          "httpMethod": "DELETE",
+          "description": "Deletes a resource.",
+          "parameterOrder": [
+            "id"
+          ],
+          "scopes": [
+            "https://www.googleapis.com/auth/minivid"
+          ],
+          "parameters": {
+            "id": {
+              "type": "string",
+              "location": "query",
+              "required": true
+            }
+          }
+        },
+        "batchDelete": {
+          "id": "minivid.videos.batchDelete",
+          "path": "minivid/v3/videos/batchDelete",
+          "flatPath": "minivid/v3/videos/batchDelete",
+          "httpMethod": "POST",
+          "description": "Deletes many videos (a POST that destroys data).",
+          "request": {
+            "$ref": "Video"
+          },
+          "scopes": [
+            "https://www.googleapis.com/auth/minivid"
+          ],
+          "parameters": {}
+        },
+        "batch_delete": {
+          "id": "minivid.videos.batch_delete",
+          "path": "minivid/v3/videos/batch_delete",
+          "flatPath": "minivid/v3/videos/batch_delete",
+          "httpMethod": "POST",
+          "description": "Same words, different method: its action name collides with batchDelete after snake casing.",
+          "scopes": [
+            "https://www.googleapis.com/auth/minivid"
+          ],
+          "parameters": {}
+        },
+        "rate": {
+          "id": "minivid.videos.rate",
+          "path": "minivid/v3/videos/rate",
+          "flatPath": "minivid/v3/videos/rate",
+          "httpMethod": "POST",
+          "description": "Add a like or dislike rating to a video.",
+          "parameterOrder": [
+            "id",
+            "rating"
+          ],
+          "scopes": [
+            "https://www.googleapis.com/auth/minivid"
+          ],
+          "parameters": {
+            "id": {
+              "type": "string",
+              "location": "query",
+              "required": true
+            },
+            "rating": {
+              "type": "string",
+              "location": "query",
+              "required": true,
+              "enum": [
+                "like",
+                "dislike",
+                "none"
+              ]
+            }
+          }
+        },
+        "legacyReport": {
+          "id": "minivid.videos.legacyReport",
+          "path": "minivid/v3/videos/legacyReport",
+          "flatPath": "minivid/v3/videos/legacyReport",
+          "httpMethod": "POST",
+          "description": "A deprecated method.",
+          "deprecated": true,
+          "scopes": [],
+          "parameters": {}
+        }
+      }
+    },
+    "playlists": {
+      "methods": {
+        "insert": {
+          "id": "minivid.playlists.insert",
+          "path": "minivid/v3/playlists",
+          "flatPath": "minivid/v3/playlists",
+          "httpMethod": "POST",
+          "description": "Creates a playlist.",
+          "request": {
+            "$ref": "Playlist"
+          },
+          "response": {
+            "$ref": "Playlist"
+          },
+          "scopes": [
+            "https://www.googleapis.com/auth/minivid"
+          ],
+          "parameters": {
+            "part": {
+              "type": "string",
+              "location": "query",
+              "required": true,
+              "repeated": true
+            }
+          }
+        },
+        "list": {
+          "id": "minivid.playlists.list",
+          "path": "minivid/v3/playlists",
+          "flatPath": "minivid/v3/playlists",
+          "httpMethod": "GET",
+          "description": "Returns playlists.",
+          "scopes": [
+            "https://www.googleapis.com/auth/minivid"
+          ],
+          "parameters": {
+            "part": {
+              "type": "string",
+              "location": "query",
+              "required": true,
+              "repeated": true
+            },
+            "channelId": {
+              "type": "string",
+              "location": "query"
+            }
+          }
+        }
+      }
+    },
+    "comments": {
+      "methods": {
+        "markAsSpam": {
+          "id": "minivid.comments.markAsSpam",
+          "path": "minivid/v3/comments/markAsSpam",
+          "flatPath": "minivid/v3/comments/markAsSpam",
+          "httpMethod": "POST",
+          "description": "Marks a comment as spam.",
+          "scopes": [],
+          "parameters": {
+            "id": {
+              "type": "string",
+              "location": "query",
+              "required": true,
+              "repeated": true
+            }
+          }
+        }
+      },
+      "resources": {
+        "threads": {
+          "methods": {
+            "insert": {
+              "id": "minivid.comments.threads.insert",
+              "path": "minivid/v3/commentThreads",
+              "flatPath": "minivid/v3/commentThreads",
+              "httpMethod": "POST",
+              "description": "Creates a new top-level comment.",
+              "request": {
+                "$ref": "CommentThread"
+              },
+              "response": {
+                "$ref": "CommentThread"
+              },
+              "scopes": [
+                "https://www.googleapis.com/auth/minivid"
+              ],
+              "parameters": {
+                "part": {
+                  "type": "string",
+                  "location": "query",
+                  "required": true,
+                  "repeated": true
+                }
+              }
+            },
+            "list": {
+              "id": "minivid.comments.threads.list",
+              "path": "minivid/v3/commentThreads",
+              "flatPath": "minivid/v3/commentThreads",
+              "httpMethod": "GET",
+              "description": "Returns comment threads.",
+              "scopes": [
+                "https://www.googleapis.com/auth/minivid"
+              ],
+              "parameters": {
+                "part": {
+                  "type": "string",
+                  "location": "query",
+                  "required": true,
+                  "repeated": true
+                },
+                "videoId": {
+                  "type": "string",
+                  "location": "query"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "files": {
+      "methods": {
+        "get": {
+          "id": "minivid.files.get",
+          "path": "minivid/v3/files/{fileId}",
+          "flatPath": "minivid/v3/files/{fileId}",
+          "httpMethod": "GET",
+          "description": "Gets a file's metadata, or with alt=media its content.",
+          "supportsMediaDownload": true,
+          "useMediaDownloadService": true,
+          "parameterOrder": [
+            "fileId"
+          ],
+          "scopes": [
+            "https://www.googleapis.com/auth/minivid"
+          ],
+          "parameters": {
+            "fileId": {
+              "type": "string",
+              "location": "path",
+              "required": true
+            }
+          }
+        },
+        "export": {
+          "id": "minivid.files.export",
+          "path": "minivid/v3/files/{fileId}/export",
+          "flatPath": "minivid/v3/files/{fileId}/export",
+          "httpMethod": "GET",
+          "description": "Exports a file to the given mime type.",
+          "supportsMediaDownload": true,
+          "parameterOrder": [
+            "fileId",
+            "mimeType"
+          ],
+          "scopes": [
+            "https://www.googleapis.com/auth/minivid"
+          ],
+          "parameters": {
+            "fileId": {
+              "type": "string",
+              "location": "path",
+              "required": true
+            },
+            "mimeType": {
+              "type": "string",
+              "location": "query",
+              "required": true
+            }
+          }
+        }
+      }
+    },
+    "reallyLongResourceNameForTheTruncationCheck": {
+      "methods": {
+        "aVeryLongMethodNameThatKeepsGoingAndGoingToExceedTheBudgetOfActionSlugCharacters": {
+          "id": "minivid.reallyLongResourceNameForTheTruncationCheck.aVeryLongMethodNameThatKeepsGoingAndGoingToExceedTheBudgetOfActionSlugCharacters",
+          "path": "minivid/v3/long",
+          "flatPath": "minivid/v3/long",
+          "httpMethod": "GET",
+          "description": "A name longer than any tool name may be.",
+          "scopes": [],
+          "parameters": {}
+        },
+        "anotherVeryLongMethodNameThatKeepsGoingAndGoingToExceedTheBudgetOfActionSlugs": {
+          "id": "minivid.reallyLongResourceNameForTheTruncationCheck.anotherVeryLongMethodNameThatKeepsGoingAndGoingToExceedTheBudgetOfActionSlugs",
+          "path": "minivid/v3/long2",
+          "flatPath": "minivid/v3/long2",
+          "httpMethod": "GET",
+          "description": "A second long name sharing the same prefix.",
+          "scopes": [],
+          "parameters": {}
+        }
+      }
+    }
+  }
+}

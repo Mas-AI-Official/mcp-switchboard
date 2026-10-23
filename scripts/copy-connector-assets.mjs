@@ -24,4 +24,14 @@ for (const sub of ["providers", "schemas"]) {
     copied++;
   }
 }
+// Bundled toolkit overlays and recipes: src/connectors/toolkits/<slug>/{overlay.json,recipes/*.json}. Vendor
+// specs are never here: `toolkits sync` writes them to SWITCHBOARD_HOME on the operator's machine.
+const toolkitsSrc = join(root, "src", "connectors", "toolkits");
+const toolkitsDst = join(root, "dist", "connectors", "toolkits");
+rmSync(toolkitsDst, { recursive: true, force: true });
+if (existsSync(toolkitsSrc)) {
+  cpSync(toolkitsSrc, toolkitsDst, { recursive: true, filter: (p) => !p.endsWith(".md") });
+  const count = (d) => readdirSync(d, { withFileTypes: true }).reduce((n, e) => n + (e.isDirectory() ? count(join(d, e.name)) : 1), 0);
+  copied += count(toolkitsDst);
+}
 console.log(`copy-connector-assets: ${copied} files -> dist/connectors/`);
