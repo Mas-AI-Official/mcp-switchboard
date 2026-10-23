@@ -22,9 +22,9 @@
  * `fetch` (Node ≥18.18). **Zero native dependencies.**
  */
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
 import { join } from "node:path";
+import { WatchedJsonFile } from "./atomicfile.js";
 import { HOME_DIR, loadVaultKey, seal, unseal, type SealedSecret } from "./vault.js";
 import type { Vault } from "./vault.js";
 import { log } from "./logger.js";
@@ -36,6 +36,10 @@ const STATE_TTL_MS = 10 * 60 * 1000;
 const EXPIRY_SKEW_MS = 60 * 1000;
 
 type StoreFile = Record<string, SealedSecret>;
+
+function storeShape(value: unknown): string | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? null : "expected a JSON object of sealed tokens";
+}
 
 /** Per-provider OAuth quirks, encoded from each provider's primary-source docs. */
 interface ProviderConfig {
@@ -189,11 +193,14 @@ function randomState(): string {
  */
 export class OAuthStore {
   private readonly key: Buffer;
+  private readonly store: WatchedJsonFile<StoreFile>;
   private readonly pending = new Map<string, PendingAuth>();
   private static readonly OAUTH_REF = /\$\{oauth:([^}]+)\}/g;
 
+  /** Throws `StoreCorruptError` when oauth.json exists but is unusable (never starts with an empty store). */
   constructor(private readonly vault: Vault) {
     this.key = loadVaultKey();
+    this.store = new WatchedJsonFile<StoreFile>(STORE_PATH, () => ({}), { validate: storeShape, mode: 0o600 });
   }
 
   /** Provider ids this store knows how to drive. */
@@ -315,7 +322,7 @@ export class OAuthStore {
 
   /** Provider list + connection status for the dashboard catalog. */
   catalog(): ProviderStatus[] {
-    const store = this.readStore();
+    const store = this.store.get();
     return Object.entries(PROVIDERS).map(([id, p]) => {
       let record: TokenRecord | undefined;
       const sealed = store[id];
@@ -341,11 +348,12 @@ export class OAuthStore {
 
   /** Forget a provider's token (the client id/secret stay in the vault). */
   disconnect(providerId: string): void {
-    const store = this.readStore();
-    if (store[providerId]) {
-      delete store[providerId];
-      this.writeStore(store);
-    }
+    this.store.update((cur) => {
+      if (!cur[providerId]) return undefined;
+      const rest = { ...cur };
+      delete rest[providerId];
+      return rest;
+    });
   }
 
   // --- token exchange plumbing ---------------------------------------------
@@ -464,7 +472,7 @@ export class OAuthStore {
   // --- sealed token persistence --------------------------------------------
 
   private loadRecord(providerId: string): TokenRecord | undefined {
-    const sealed = this.readStore()[providerId];
+    const sealed = this.store.get()[providerId];
     if (!sealed) return undefined;
     try {
       return JSON.parse(unseal(this.key, sealed)) as TokenRecord;
@@ -474,27 +482,7 @@ export class OAuthStore {
   }
 
   private saveRecord(providerId: string, record: TokenRecord): void {
-    const store = this.readStore();
-    store[providerId] = seal(this.key, JSON.stringify(record));
-    this.writeStore(store);
-  }
-
-  private readStore(): StoreFile {
-    if (!existsSync(STORE_PATH)) return {};
-    try {
-      return JSON.parse(readFileSync(STORE_PATH, "utf8")) as StoreFile;
-    } catch {
-      return {};
-    }
-  }
-
-  private writeStore(store: StoreFile): void {
-    if (!existsSync(HOME_DIR)) mkdirSync(HOME_DIR, { recursive: true });
-    writeFileSync(STORE_PATH, JSON.stringify(store, null, 2));
-    try {
-      chmodSync(STORE_PATH, 0o600);
-    } catch {
-      /* chmod is a no-op on Windows; best-effort */
-    }
+    const sealed = seal(this.key, JSON.stringify(record));
+    this.store.update((cur) => ({ ...cur, [providerId]: sealed }));
   }
 }

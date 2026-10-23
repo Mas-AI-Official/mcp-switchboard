@@ -11,8 +11,11 @@ switchboard.config.yaml
 .switchboard/
 vault.json
 vault.key
+vault.key.dpapi
 *.key
 audit.log
+audit.log.*
+*.json.bak
 .env
 .env.*
 

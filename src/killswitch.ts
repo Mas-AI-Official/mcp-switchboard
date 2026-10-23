@@ -13,8 +13,9 @@
  * switch is treated as on.
  */
 
-import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { ensureDir } from "./atomicfile.js";
 import { HOME_DIR } from "./vault.js";
 
 export const KILL_FILE_NAME = "KILL";
@@ -88,7 +89,7 @@ export function setKillFile(on: boolean, home: string = HOME_DIR): { changed: bo
   const before = killFileExists(home);
   if (on) {
     if (before) return { changed: false }; // already on: keep the original `since` note
-    mkdirSync(home, { recursive: true });
+    ensureDir(home);
     const tmp = `${path}.${process.pid}.tmp`;
     writeFileSync(tmp, JSON.stringify({ since: new Date().toISOString(), by: "switchboard kill on" }) + "\n");
     renameSync(tmp, path);

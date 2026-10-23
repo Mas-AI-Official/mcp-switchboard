@@ -38,7 +38,8 @@ upstream is a real MCP server with no credentials — ideal for testing the full
 | `src/policy.ts` | Scope inference + the read/write/full governance engine |
 | `src/router.ts` | One governed tool surface; namespaced / flat / search modes |
 | `src/approval.ts` | Fail-closed human approval gate |
-| `src/audit.ts` | Append-only JSON audit log |
+| `src/audit.ts` | Append-only, hash-chained JSON audit log (`audit verify`) |
+| `src/atomicfile.ts` | Atomic writes, `.bak`, corrupt-file errors, cross-process lock for every durable store |
 | `src/gateway.ts` | The downstream-facing MCP server (stdio + HTTP) |
 | `src/dashboard.ts` + `src/console.ts` | HTTP endpoint + embedded web console |
 | `src/cli.ts` | The `switchboard` command |

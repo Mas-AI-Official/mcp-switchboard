@@ -13,7 +13,7 @@
 //   injectedArgKeys                   — server∪tool inject_args key union (tool merged in), name-agnostic.
 //   end-to-end leak path              — applyArgTransforms → injectedArgKeys → sanitizeForAudit, the
 //                                       exact wiring router.forward() uses, proven secret-free.
-//   depth/size/uncapturable guards    — depth>6 cap, 4096-byte truncation marker, circular → "[uncapturable]".
+//   depth/size/uncapturable guards: secrets beyond depth 6 are still masked (design 3.7), 4096-byte truncation marker, circular → "[uncapturable]".
 //   audit/recentAudit/usageStats      — append-only write under an isolated SWITCHBOARD_HOME, newest-first
 //                                       read, and allow/deny/approval + by_day/top_tools/by_server aggregation.
 //   classifyOutcome + outcome tally   — OUTCOME (what happened) is kept distinct from DECISION (did we
@@ -140,17 +140,18 @@ const SECRET = "SUPERSECRET-7f3a";
   assert("sibling non-injected value preserved", out.ok === 1);
 }
 
-// --- 6. depth guard: recursion is bounded at depth 6 (a DoS/size guard, documented) ----------------
+// --- 6. depth guard: ADAPTED for design vNext 3.7 ("depth beyond 6 still redacted") ------------------
 {
-  // Build an object whose innermost `token` sits at depth 7 (beyond the cap). The cap returns it
-  // as-is — this documents the BOUND. Injected secrets are never affected: they are top-level keys.
+  // Build an object whose innermost `token` sits at depth 7. The 0.1.0 guard returned everything past
+  // depth 6 as-is, so this secret reached the log; the contract is now that depth never exempts a value
+  // from redaction (the walk is bounded far deeper, and anything beyond that is replaced, never copied).
   let deep = { token: "deep-and-uncapped" };
   for (let i = 0; i < 7; i++) deep = { a: deep };
   const out = sanitizeForAudit(deep);
   // Walk down to the innermost object.
   let cur = out;
   for (let i = 0; i < 7; i++) cur = cur.a;
-  assert("depth guard stops descending past 6 (bound documented)", cur.token === "deep-and-uncapped");
+  assert("a secret beyond depth 6 is masked too (the old depth-6 bound leaked it)", cur.token === "[redacted]");
 
   // A secret WITHIN the cap is still masked.
   const shallow = sanitizeForAudit({ a: { b: { token: SECRET } } });

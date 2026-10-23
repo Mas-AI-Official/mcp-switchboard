@@ -16,18 +16,11 @@
  */
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import {
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  renameSync,
-  statSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { readFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { connect } from "node:net";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import type { ErrorRequestHandler, Request, RequestHandler, Response } from "express";
+import { atomicWriteFileSync, ensureDir, readJsonFileSync, writeJsonAtomic } from "./atomicfile.js";
 import { HOME_DIR } from "./vault.js";
 import { log } from "./logger.js";
 
@@ -218,11 +211,12 @@ export class LoginCodeStore {
 
   /** Mint a code valid for the TTL. Returns the plaintext code; only its hash is stored. */
   mint(): string {
-    mkdirSync(this.dir, { recursive: true });
+    ensureDir(this.dir);
     this.purge();
     const code = randomBytes(32).toString("base64url");
     const rec = { created: this.now(), expires: this.now() + this.ttlMs };
-    writeFileSync(this.fileFor(code), JSON.stringify(rec), { flag: "wx", mode: 0o600 });
+    // Temp file + fsync + rename: a redeemer never sees a half-written code. No .bak: a code is one use.
+    atomicWriteFileSync(this.fileFor(code), JSON.stringify(rec), { mode: 0o600 });
     return code;
   }
 
@@ -378,7 +372,7 @@ export class OwnerSessions {
     if (mtime === this.diskMtime) return;
     this.diskMtime = mtime;
     try {
-      const parsed = JSON.parse(readFileSync(this.path, "utf8")) as { sessions?: { h?: unknown; expires?: unknown }[] };
+      const parsed = readJsonFileSync<{ sessions?: { h?: unknown; expires?: unknown }[] }>(this.path) ?? {};
       const t = this.now();
       for (const s of parsed.sessions ?? []) {
         if (typeof s.h === "string" && typeof s.expires === "number" && s.expires > t && !this.live.has(s.h)) {
@@ -392,11 +386,9 @@ export class OwnerSessions {
 
   private persist(): void {
     try {
-      mkdirSync(dirname(this.path), { recursive: true });
-      const body = JSON.stringify({ sessions: [...this.live].map(([h, expires]) => ({ h, expires })) });
-      const tmp = `${this.path}.tmp-${process.pid}`;
-      writeFileSync(tmp, body, { mode: 0o600 });
-      renameSync(tmp, this.path);
+      // Atomic replace (temp, fsync, rename). No .bak: a lost session only means logging in again, and a
+      // backup would keep revoked session hashes on disk.
+      writeJsonAtomic(this.path, { sessions: [...this.live].map(([h, expires]) => ({ h, expires })) }, { mode: 0o600, backup: false, space: 0 });
       this.diskMtime = statSync(this.path).mtimeMs;
     } catch (err) {
       log.warn(`could not persist owner sessions: ${err instanceof Error ? err.message : String(err)}`);

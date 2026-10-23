@@ -27,7 +27,6 @@
  * recorded and advertised, not enforced per-call.
  */
 
-import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import type { Request, Response } from "express";
@@ -49,6 +48,7 @@ import {
   InvalidTargetError,
   InvalidTokenError,
 } from "@modelcontextprotocol/sdk/server/auth/errors.js";
+import { readJsonFileSync, writeJsonAtomic } from "./atomicfile.js";
 import { HOME_DIR, loadVaultKey, seal, unseal, type SealedSecret } from "./vault.js";
 import type { SwitchboardConfig, SettingsConfig } from "./types.js";
 import { log } from "./logger.js";
@@ -207,26 +207,29 @@ export class SwitchboardAuthProvider implements OAuthServerProvider {
 
   // ── persistence (sealed JSON, mirrors vault.ts file conventions) ────────────────────
   private load(): AuthServerState {
-    if (!existsSync(STATE_PATH)) return emptyState();
+    // Absent file: first run. Present but unusable: an error, never an empty state (an empty state
+    // would silently revoke every registered client and issued token).
+    const sealed = readJsonFileSync<SealedSecret>(STATE_PATH, {
+      validate: (v) => {
+        const s = v as Partial<SealedSecret> | null;
+        return s && typeof s.iv === "string" && typeof s.tag === "string" && typeof s.data === "string" ? null : "not a sealed state";
+      },
+    });
+    if (!sealed) return emptyState();
     try {
-      const sealed = JSON.parse(readFileSync(STATE_PATH, "utf8")) as SealedSecret;
       const parsed = JSON.parse(unseal(this.key, sealed)) as AuthServerState;
       return { ...emptyState(), ...parsed };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      log.error(`could not read ${STATE_PATH} (${msg}); starting with an empty OAuth store`);
-      return emptyState();
+      throw new Error(
+        `could not open ${STATE_PATH} (${msg}). It was NOT replaced with an empty OAuth store. ` +
+          `The vault key may have changed or the file is damaged: restore ${STATE_PATH}.bak or delete both to start empty (this revokes every registered client and issued token).`,
+      );
     }
   }
 
   private save(): void {
-    const sealed = seal(this.key, JSON.stringify(this.state));
-    writeFileSync(STATE_PATH, JSON.stringify(sealed));
-    try {
-      chmodSync(STATE_PATH, 0o600);
-    } catch {
-      /* best-effort; no-op on Windows */
-    }
+    writeJsonAtomic(STATE_PATH, seal(this.key, JSON.stringify(this.state)), { mode: 0o600, space: 0 });
   }
 
   /** Drop expired in-memory codes + pending-consent entries. Called on every lookup path. */

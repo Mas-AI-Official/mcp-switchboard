@@ -110,7 +110,9 @@ that `switchboard init` writes to disk.
 Local-first, zero-custody. This is the structural differentiator, so it gets the most care.
 
 - **Home:** `~/.switchboard` (override with `SWITCHBOARD_HOME`). Holds `vault.json` (the
-  encrypted blob), `vault.key` (the key), and `audit.log`.
+  encrypted blob), the key (`vault.key.dpapi` on Windows, DPAPI-wrapped; `vault.key` mode 0600 elsewhere), and
+  `audit.log`. Files are replaced atomically with a `.bak`; a store file that does not parse is an error, and
+  the vault re-reads when `vault.json` changes (`atomicfile.ts`).
 - **Cipher:** **AES-256-GCM** via Node's built-in `crypto`. Each secret is sealed with its own IV
   and auth tag — no native module, no external service, no network call ever.
 - **Backends:** `encrypted-file` (the portable default) or `env` (read secrets straight from the
@@ -203,8 +205,11 @@ must not try to read from that pipe.
 ## 8. The audit log (`audit.ts`)
 
 Every governance verdict — allow, deny, approval outcome — is appended as one JSON line to
-`~/.switchboard/audit.log`. An `AuditEntry` is `{ ts, server, tool, scope, decision, reason? }`.
-The log is **append-only**; `recentAudit(limit)` reads it back newest-first for the dashboard.
+`~/.switchboard/audit.log`. An `AuditEntry` is `{ ts, seq, prev_hash, hash, server, tool, scope, decision,
+reason?, principal?, client?, risk?, approval_id? }`; `hash` is SHA-256 over the canonical JSON of the row
+without `hash`, so the log is a hash chain (`switchboard audit verify [--all]` walks it). It rotates at 20 MB
+to `audit.log.<timestamp>` and the chain carries over. The log is **append-only**; `recentAudit(limit)` reads
+it back newest-first for the dashboard.
 This is the accountability surface: what did agents try, what was allowed, what was blocked, and why.
 
 ---

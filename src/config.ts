@@ -7,9 +7,10 @@
  * readable error rather than silently mounting a half-configured server.
  */
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { parse, stringify } from "yaml";
 import { z } from "zod";
+import { atomicWriteFileSync } from "./atomicfile.js";
 import type { SwitchboardConfig, TriggersConfig } from "./types.js";
 import { passthroughProblem } from "./childenv.js";
 
@@ -370,9 +371,21 @@ export function loadConfig(path: string): SwitchboardConfig {
   return result.data as SwitchboardConfig;
 }
 
-/** Serialize a config back to YAML on disk. */
+/**
+ * Serialize a config back to YAML on disk: atomic (temp file, fsync, rename), keeping the previous
+ * version as `<path>.bak` when it parses, so a crash mid-write can never leave a half-written config.
+ */
 export function writeConfig(path: string, cfg: SwitchboardConfig): void {
-  writeFileSync(path, stringify(cfg));
+  atomicWriteFileSync(path, stringify(cfg), {
+    backup: (current) => {
+      try {
+        parse(current.toString("utf8"));
+        return true;
+      } catch {
+        return false;
+      }
+    },
+  });
 }
 
 /**

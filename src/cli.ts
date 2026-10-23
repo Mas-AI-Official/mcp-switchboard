@@ -16,6 +16,7 @@
  *   switchboard toolkits sync        rebuild the integration catalog from open indexes
  *   switchboard toolkits stats       print catalog counts
  *   switchboard kill on|off|status   refuse every tool call, resource read and prompt get (kill switch)
+ *   switchboard audit verify [--all] walk the audit log's hash chain; report the first break with its seq
  *   switchboard vault set <name>     store a secret (value read from stdin)
  *   switchboard vault list|rm <name> manage secrets
  *
@@ -41,11 +42,13 @@ import { startDashboard, type DashboardHandle } from "./dashboard.js";
 import { LoginCodeStore, assertPortFree } from "./httpsec.js";
 import { randomChallenge, verifyOwnerPresence, type PresenceMethod } from "./presence.js";
 import { runExpose, TUNNEL_KINDS, type TunnelKind } from "./expose.js";
+import { ensureDir } from "./atomicfile.js";
 import { Vault, HOME_DIR } from "./vault.js";
 import { OAuthStore } from "./oauth.js";
 import { ApiKeyStore } from "./apikeys.js";
 import { inferScope } from "./policy.js";
 import { killFilePath, killStatus, setKillFile } from "./killswitch.js";
+import { verifyAudit } from "./audit.js";
 import { buildDoctorReport } from "./doctor.js";
 import {
   ingestCatalogVerbose,
@@ -127,6 +130,7 @@ program
       log.warn(`config already exists at ${path} — leaving it untouched`);
       return;
     }
+    ensureDir(HOME_DIR);
     writeConfig(path, starterConfig());
     log.ok(`wrote ${path}`);
     out(`Home: ${HOME_DIR}`);
@@ -682,6 +686,40 @@ program
       return;
     }
     log.ok(changed ? "kill switch OFF: calls are allowed again" : "kill switch was already off");
+  });
+
+const auditCmd = program.command("audit").description("inspect the tamper-evident audit log");
+
+auditCmd
+  .command("verify")
+  .description("walk the audit log's hash chain and report the first break (exit 1 on a break); --all includes rotated segments")
+  .option("--all", "verify every rotated segment too, not only the current audit.log")
+  .action((opts: { all?: boolean }) => {
+    let res;
+    try {
+      res = verifyAudit({ all: opts.all === true });
+    } catch (err) {
+      log.error(`could not read the audit log: ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 1;
+      return;
+    }
+    for (const n of res.notes) log.warn(n);
+    if (res.ok) {
+      if (res.rows === 0 && res.legacy_rows === 0) {
+        out(`audit chain: no rows to verify (${res.files.length ? res.files.join(", ") : "no audit.log"})`);
+        return;
+      }
+      out(`audit chain OK: ${res.rows} row(s)${res.rows ? `, seq ${res.first_seq}..${res.last_seq}` : ""} in ${res.files.join(", ")}`);
+      if (res.last_hash) out(`  last hash: ${res.last_hash}`);
+      return;
+    }
+    const b = res.break!;
+    log.error(`audit chain BROKEN at seq ${b.seq} (${b.file}, line ${b.line}): ${b.reason}`);
+    out(`audit chain BROKEN at seq ${b.seq}`);
+    out(`  file:   ${b.file} line ${b.line}`);
+    out(`  reason: ${b.reason}`);
+    out(`  ${res.rows} row(s) before the break verified`);
+    process.exitCode = 1;
   });
 
 const profileCmd = program

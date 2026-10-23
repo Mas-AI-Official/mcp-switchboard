@@ -40,7 +40,7 @@ import {
   profileScopeCeiling,
 } from "./profiles.js";
 import { approve } from "./approval.js";
-import { audit, sanitizeForAudit, type AuditEntry } from "./audit.js";
+import { audit, sanitizeForAudit, type AuditInput } from "./audit.js";
 import { deliverWebhook, type SecretResolver, type WebhookEvent } from "./webhook.js";
 import {
   shapeExposedTool,
@@ -414,7 +414,7 @@ export class Router {
       description: t.description ?? "",
       inputSchema: t.inputSchema,
     }));
-    audit({ server: "switchboard", tool: FIND_TOOLS, scope: "read", decision: "allow", reason: `query=${query}` });
+    this.safeAudit({ server: "switchboard", tool: FIND_TOOLS, scope: "read", decision: "allow", reason: `query=${query}` });
     return { content: [{ type: "text", text: JSON.stringify({ matches }, null, 2) }] };
   }
 
@@ -882,12 +882,23 @@ export class Router {
     return resolveToolScope(toolName, server.config.tools?.[toolName], server.scopeHints?.[toolName], this.annotationsOf(server, toolName));
   }
 
+  /** Append an audit row without ever throwing: by the time most rows are written the upstream call has
+   *  already happened, so a full disk, a locked file or a read-only home must cost the audit row (logged
+   *  loudly), never the result the caller is about to receive. */
+  private safeAudit(entry: AuditInput): void {
+    try {
+      audit(entry);
+    } catch (err) {
+      log.error(`audit write failed for ${entry.server}/${entry.tool} (${entry.decision}): ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   /** Write one finalized verdict to the audit log AND notify the webhook. Every terminal
    *  decision in forward() goes through here so a delivered event always mirrors an audited
    *  row. The webhook carries decision metadata only — `record` never forwards request/response
    *  to it, even when `capture_io` stored them on the audit row. */
-  private record(entry: Omit<AuditEntry, "ts">): void {
-    audit(entry);
+  private record(entry: AuditInput): void {
+    this.safeAudit(entry);
     this.fireWebhook({
       decision: entry.decision,
       server: entry.server,

@@ -1,9 +1,13 @@
 /**
  * Local credential vault.
  *
- * Backend: AES-256-GCM encrypted JSON in `~/.switchboard/vault.json`, with the 32-byte
- * key in `~/.switchboard/vault.key` (file perms restricted where the OS allows it).
- * Zero native dependencies on purpose — `npm install` must not need build tools.
+ * Backend: AES-256-GCM encrypted JSON in `~/.switchboard/vault.json`. The 32-byte key lives beside
+ * it, protected for the OS user: on Windows as `vault.key.dpapi` (DPAPI, CurrentUser scope, see
+ * oscrypt.ts; a raw `vault.key` from an older install is wrapped, verified and removed), elsewhere as
+ * `vault.key` with mode 0600 inside a 0700 home. The unwrapped key is cached for the process lifetime,
+ * so DPAPI is called once. Writes are atomic (atomicfile.ts) and the store re-reads when the file
+ * changes, so `switchboard vault set` reaches a running gateway. Zero native dependencies on purpose:
+ * `npm install` must not need build tools.
  *
  * The vault never makes a network call. Secrets are injected into upstream MCP server
  * processes as environment variables at mount time and never travel anywhere else.
@@ -14,15 +18,14 @@
  */
 
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { WatchedJsonFile, atomicWriteFileSync, ensureDir, withFileLock } from "./atomicfile.js";
+import { isOsProtected, protectForUser, unprotectForUser } from "./oscrypt.js";
 
 /** MCP Switchboard's home dir. Override with SWITCHBOARD_HOME (used in tests). */
 export const HOME_DIR = process.env.SWITCHBOARD_HOME ?? join(homedir(), ".switchboard");
-
-const KEY_PATH = join(HOME_DIR, "vault.key");
-const VAULT_PATH = join(HOME_DIR, "vault.json");
 
 const REF_RE = /\$\{(vault|env):([^}]+)\}/g;
 
@@ -54,80 +57,177 @@ export function unseal(key: Buffer, sealed: SealedSecret): string {
   return dec.toString("utf8");
 }
 
-function ensureHome(): void {
-  if (!existsSync(HOME_DIR)) mkdirSync(HOME_DIR, { recursive: true });
-}
+const KEY_BYTES = 32;
 
-function restrict(path: string): void {
-  // chmod is a no-op on Windows; swallow any platform error.
-  try {
-    chmodSync(path, 0o600);
-  } catch {
-    /* best-effort */
+/** Unwrapped vault keys by home directory, for the process lifetime (DPAPI runs once per home). */
+const keyCache = new Map<string, Buffer>();
+
+function readRawKey(path: string): Buffer {
+  const key = readFileSync(path);
+  if (key.length !== KEY_BYTES) {
+    throw new Error(`vault key file ${path} is ${key.length} bytes, expected ${KEY_BYTES}: refusing to guess; restore it from a backup`);
   }
-}
-
-/**
- * Load the vault key, creating it on first use. Exported because the OAuth token
- * store (`src/oauth.ts`) seals its tokens with the same key + `seal`/`unseal`.
- */
-export function loadVaultKey(): Buffer {
-  ensureHome();
-  if (existsSync(KEY_PATH)) return readFileSync(KEY_PATH);
-  const key = randomBytes(32);
-  writeFileSync(KEY_PATH, key);
-  restrict(KEY_PATH);
   return key;
 }
 
-function readStore(): VaultFile {
-  if (!existsSync(VAULT_PATH)) return {};
+/** Wrap `key` for the OS user, write it atomically, and read it back: the raw key is only ever
+ *  discarded after the wrapped copy is proven to unwrap to the same bytes. */
+function writeWrappedKey(path: string, key: Buffer): void {
+  atomicWriteFileSync(path, protectForUser(key), { mode: 0o600 });
+  let back: Buffer;
   try {
-    return JSON.parse(readFileSync(VAULT_PATH, "utf8")) as VaultFile;
-  } catch {
-    return {};
+    back = unprotectForUser(readFileSync(path));
+  } catch (err) {
+    try {
+      unlinkSync(path);
+    } catch {
+      /* leave nothing half-trusted behind */
+    }
+    throw new Error(`could not verify the DPAPI-wrapped vault key (${err instanceof Error ? err.message : String(err)}); the existing key file was left untouched`);
+  }
+  if (!back.equals(key)) {
+    try {
+      unlinkSync(path);
+    } catch {
+      /* see above */
+    }
+    throw new Error("the DPAPI-wrapped vault key did not round-trip; the existing key file was left untouched");
   }
 }
 
-function writeStore(store: VaultFile): void {
-  ensureHome();
-  writeFileSync(VAULT_PATH, JSON.stringify(store, null, 2));
-  restrict(VAULT_PATH);
+/** Remove the raw key once the wrapped copy is proven; another process may have got there first. */
+function removeRawKey(path: string): void {
+  try {
+    unlinkSync(path);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+}
+
+/** Windows: `vault.key.dpapi`. Creates, migrates a raw `vault.key`, or unwraps; never silently makes a
+ *  new key when one exists (that would orphan every sealed secret). Serialised across processes: the
+ *  gateway and a CLI command starting together must not both mint or migrate (DPAPI can take seconds). */
+function loadWindowsKey(home: string): Buffer {
+  return withFileLock(join(home, "vault.key.dpapi"), () => loadWindowsKeyLocked(home), { timeoutMs: 60_000, staleMs: 120_000 });
+}
+
+function loadWindowsKeyLocked(home: string): Buffer {
+  const rawPath = join(home, "vault.key");
+  const wrappedPath = join(home, "vault.key.dpapi");
+  const hasRaw = existsSync(rawPath);
+  if (existsSync(wrappedPath)) {
+    let key: Buffer;
+    try {
+      key = unprotectForUser(readFileSync(wrappedPath));
+    } catch (err) {
+      throw new Error(
+        `cannot unwrap ${wrappedPath} (${err instanceof Error ? err.message : String(err)}). It is protected for the Windows user that created it; ` +
+          "a different user, a different machine or a damaged file cannot open it. No new key was created, so the vault is untouched.",
+      );
+    }
+    if (hasRaw) {
+      // An interrupted migration (wrapped copy written, raw not yet deleted) or a stray copy.
+      if (!readRawKey(rawPath).equals(key)) {
+        throw new Error(`both ${wrappedPath} and ${rawPath} exist and hold different keys: decide which one sealed the vault and remove the other`);
+      }
+      removeRawKey(rawPath);
+    }
+    return key;
+  }
+  if (hasRaw) {
+    const key = readRawKey(rawPath);
+    writeWrappedKey(wrappedPath, key);
+    removeRawKey(rawPath);
+    return key;
+  }
+  const key = randomBytes(32);
+  writeWrappedKey(wrappedPath, key);
+  return key;
+}
+
+/** Elsewhere: a raw `vault.key` (mode 0600) in the 0700 home. */
+function loadPortableKey(home: string): Buffer {
+  const rawPath = join(home, "vault.key");
+  if (existsSync(rawPath)) return readRawKey(rawPath);
+  const key = randomBytes(32);
+  atomicWriteFileSync(rawPath, key, { mode: 0o600 });
+  return key;
+}
+
+/**
+ * Load the vault key, creating it on first use. Exported because the OAuth token store
+ * (`src/oauth.ts`) and the OAuth Authorization Server seal their state with the same key.
+ * Cached per home directory for the process lifetime.
+ */
+export function loadVaultKey(home: string = HOME_DIR): Buffer {
+  const cached = keyCache.get(home);
+  if (cached) return Buffer.from(cached);
+  ensureDir(home);
+  const key = isOsProtected() ? loadWindowsKey(home) : loadPortableKey(home);
+  keyCache.set(home, key);
+  return Buffer.from(key);
+}
+
+function vaultShape(value: unknown): string | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return "expected a JSON object of sealed secrets";
+  for (const [name, v] of Object.entries(value as Record<string, unknown>)) {
+    const s = v as Partial<SealedSecret> | null;
+    if (!s || typeof s.iv !== "string" || typeof s.tag !== "string" || typeof s.data !== "string") {
+      return `entry '${name}' is not a sealed secret`;
+    }
+  }
+  return null;
+}
+
+export interface VaultOptions {
+  /** Home directory holding vault.json and the key. Default: the process-wide HOME_DIR. */
+  home?: string;
 }
 
 export class Vault {
   private readonly key: Buffer;
-  private store: VaultFile;
+  private readonly file: WatchedJsonFile<VaultFile> | null;
 
-  constructor(private readonly backend: "encrypted-file" | "env" = "encrypted-file") {
-    this.key = backend === "encrypted-file" ? loadVaultKey() : Buffer.alloc(0);
-    this.store = backend === "encrypted-file" ? readStore() : {};
+  constructor(
+    private readonly backend: "encrypted-file" | "env" = "encrypted-file",
+    opts: VaultOptions = {},
+  ) {
+    const home = opts.home ?? HOME_DIR;
+    this.key = backend === "encrypted-file" ? loadVaultKey(home) : Buffer.alloc(0);
+    this.file =
+      backend === "encrypted-file"
+        ? new WatchedJsonFile<VaultFile>(join(home, "vault.json"), () => ({}), { validate: vaultShape, mode: 0o600 })
+        : null;
   }
 
-  /** Store (or replace) a secret. */
+  /** Store (or replace) a secret. Merges into the current file, so a gateway never overwrites a newer vault. */
   set(name: string, secret: string): void {
-    if (this.backend !== "encrypted-file") {
+    if (!this.file) {
       throw new Error(`vault backend '${this.backend}' is read-only; secrets come from the environment`);
     }
-    this.store[name] = seal(this.key, secret);
-    writeStore(this.store);
+    const sealed = seal(this.key, secret);
+    this.file.update((cur) => ({ ...cur, [name]: sealed }));
   }
 
   /** Decrypt and return a secret, or undefined if absent. */
   get(name: string): string | undefined {
-    const sealed = this.store[name];
+    const sealed = this.file?.get()[name];
     if (!sealed) return undefined;
     return unseal(this.key, sealed);
   }
 
   remove(name: string): void {
-    delete this.store[name];
-    writeStore(this.store);
+    this.file?.update((cur) => {
+      if (!(name in cur)) return undefined;
+      const rest = { ...cur };
+      delete rest[name];
+      return rest;
+    });
   }
 
   /** Secret names (never values). */
   list(): string[] {
-    return Object.keys(this.store);
+    return Object.keys(this.file?.get() ?? {});
   }
 
   /**

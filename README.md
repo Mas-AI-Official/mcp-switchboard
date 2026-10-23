@@ -277,6 +277,43 @@ active profile, the server's enabled flag, per-tool `enabled: false` (use the na
 `prompts/get`), rate limits and the approval gate. A resource URI that no server listed (or declared in a resource template) is
 "not found"; it is no longer tried against every server.
 
+### Storage, and the tamper-evident audit log
+
+**Storage.** Every durable file (`vault.json`, `apikeys.json`, `oauth.json`, `authserver.json`,
+`triggers-state.json`, owner sessions, and your config when MCP Switchboard rewrites it) is written to a
+temp file, fsynced and renamed over the original, and the previous version is kept as `<file>.bak`. A file
+that exists but does not parse is an **error that names the file and its backup**, never an empty store:
+a torn `apikeys.json` can no longer silently drop a revocation or switch loopback authentication off. The
+API key store and the vault re-read their file when it changes, so `switchboard apikey rm <id>` revokes on
+a running gateway and `apikey new` works without a restart; `last_used` updates merge into the current file
+under a lock and are never written back from stale memory. `SWITCHBOARD_HOME` is created owner-only (0700)
+where the OS supports modes.
+
+**Vault key.** On Windows the key is stored as `vault.key.dpapi`, wrapped with DPAPI for your Windows user:
+another local account that can read the file cannot unwrap it. An existing raw `vault.key` is wrapped,
+verified by a round trip and only then deleted. Elsewhere the key is `vault.key` (mode 0600) in the 0700
+home. The unwrapped key is held in memory for the process lifetime.
+
+**Audit chain.** Every row in `audit.log` has `seq`, `prev_hash` and `hash` (SHA-256 over the row's
+canonical JSON, keys sorted, without `hash`), so an edited, removed, inserted or reordered row is detectable:
+
+```bash
+node dist/cli.js audit verify          # the current audit.log
+node dist/cli.js audit verify --all    # every rotated segment too; exit 1 and the first broken seq on a break
+```
+
+At 20 MB `audit.log` is renamed `audit.log.<timestamp>` and the chain continues in the new file. The chain
+has no secret, so it does not stop someone who can rewrite the whole file and recompute every later hash,
+and cutting rows off the end is not detectable: keep the latest `hash` somewhere the log writer cannot reach
+if that matters. A failed audit write is logged loudly and never fails the tool call that was already made.
+
+**`logs.capture_io`** is off by default (no request or response is stored). When on, every string value in
+the request and response is scanned for secret shapes (`sk-` / `sk-proj-` keys, `AIza` keys, `ghp_` `gho_`
+`github_pat_`, `xox[abpr]-`, `hf_`, Bearer tokens, JWTs, PEM blocks, AWS `AKIA` keys, and 32+ character hex
+or base64url tokens next to the words key / token / secret) at any depth and replaced with
+`[redacted:<kind>]`; values under secret-looking key names are masked as before. Upstream error text is
+scrubbed the same way even when capture is off.
+
 ### Connecting an OAuth provider (Phase 3)
 
 For the five managed providers you don't paste a token — you authorize once and MCP Switchboard seals
@@ -734,6 +771,8 @@ npm run verify     # build + npm audit + 26 oracles = 1171 checks, all green
 | Local AES-256-GCM vault | `verify:vault` | 43 |
 | Dashboard API | `verify:dashboard` | 73 |
 | Logs + I/O capture / redaction | `verify:audit` | 61 |
+| Atomic stores, live key/vault reload, DPAPI vault key | `verify:storage` | 102 |
+| Hash-chained audit log, rotation, secret-shape redaction | `verify:audit-chain` | 117 |
 | Governed call path (router) | `verify:router` | 29 |
 | Profiles (narrow-only) | `verify:profiles` | 61 |
 | Rate limits + spend budgets | `verify:limits` | 61 |
@@ -756,8 +795,9 @@ npm run verify     # build + npm audit + 26 oracles = 1171 checks, all green
 
 ## Security
 
-- Credentials live only in `~/.switchboard/vault.json`, **AES-256-GCM** encrypted with a key in
-  `~/.switchboard/vault.key`. Nothing is transmitted off the machine; the vault makes no network calls.
+- Credentials live only in `~/.switchboard/vault.json`, **AES-256-GCM** encrypted with a key beside it:
+  DPAPI-wrapped (`vault.key.dpapi`) on Windows, a mode-0600 `vault.key` elsewhere. Nothing is transmitted
+  off the machine; the vault makes no network calls.
 - The HTTP endpoint binds to **127.0.0.1** by default — local-first, not exposed to the network.
 - Governance **fails closed**: a disabled server, an over-ceiling scope, or an unverifiable approval
   context all result in *deny*, not a silent allow.
