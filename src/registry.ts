@@ -27,6 +27,7 @@ import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { Scope, ServerConfig } from "./types.js";
 import type { Vault } from "./vault.js";
 import type { OAuthStore } from "./oauth.js";
+import type { NetworkSource } from "./netguard.js";
 import { buildOpenApiServer } from "./openapi.js";
 import { buildHttpToolServer } from "./httptool.js";
 import { authSchemeEnv, authSchemeHeaders } from "./authscheme.js";
@@ -51,6 +52,8 @@ export class Registry {
   constructor(
     private readonly vault: Vault,
     private readonly oauth?: OAuthStore,
+    /** Live `settings.network` for the SSRF guard used by generated (app2mcp / http-tool) servers. */
+    private readonly network?: NetworkSource,
   ) {}
 
   list(): MountedServer[] {
@@ -77,7 +80,7 @@ export class Registry {
       // Generate an in-process MCP server from the OpenAPI/Swagger spec and link it to
       // our client over an in-memory transport. Credentials become request headers,
       // resolved lazily (per call) so OAuth tokens can refresh between invocations.
-      const generated = await buildOpenApiServer(config, () => this.resolveHeaders(config));
+      const generated = await buildOpenApiServer(config, () => this.resolveHeaders(config), this.network);
       const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
       await generated.server.connect(serverTransport);
       await client.connect(clientTransport);
@@ -85,7 +88,7 @@ export class Registry {
     } else if (config.source === "http-tool") {
       // Hand-declared HTTP endpoints → an in-process MCP server, linked over an in-memory
       // transport exactly like app2mcp. Auth headers resolve lazily per call (OAuth-refresh-safe).
-      const generated = await buildHttpToolServer(config, () => this.resolveHeaders(config));
+      const generated = await buildHttpToolServer(config, () => this.resolveHeaders(config), this.network);
       const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
       await generated.server.connect(serverTransport);
       await client.connect(clientTransport);

@@ -1040,6 +1040,8 @@ async function renderSettingsCouncil() {
 
   const exampleYaml =
 `settings:
+  network:
+    allow_private: [127.0.0.1]   # the outbound guard refuses local hosts unless the exact host is listed
   council:
     enabled: true
     require_approval: false   # outbound + metered; gate it if you like

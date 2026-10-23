@@ -67,6 +67,22 @@ settings:
     # Off by default — turn it on only when you need to inspect tool I/O.
     capture_io: false
 
+  # Outbound network guard (SSRF). Every request the gateway makes on behalf of config or tools
+  # (http-tool and app2mcp calls, OpenAPI spec fetches, webhooks, OAuth token calls, the council,
+  # catalog syncs) resolves DNS first and REFUSES loopback, private (RFC1918), CGNAT, link-local,
+  # unique-local, unspecified, multicast and cloud-metadata targets. Redirects are followed at most
+  # 3 times, every hop is re-checked, and credential headers are dropped when the origin changes.
+  # Each request has a deadline and a response-size cap. The defaults below are safe; this block
+  # only relaxes or tunes them.
+  network:
+    # Exact host names or IPs that may be non-public: local model servers, a LAN API. Exact means
+    # the host in the URL: 127.0.0.1 does not allow localhost and the reverse. No wildcards, CIDR
+    # ranges, ports or schemes. The council local provider below needs its host listed here
+    # (`switchboard local-llm wire` adds it for you).
+    allow_private: [127.0.0.1]
+    # timeout_ms: 15000            # per request, DNS through last body byte
+    # max_response_bytes: 5242880  # decoded body cap enforced while streaming (5 MiB)
+
   # Cross-provider "council" relay tools. Lets an agent connected to MCP Switchboard broker a
   # PEER model: council_consult (one prompt -> the other provider) and council_debate (a
   # bounded multi-round exchange between providers + a synthesized conclusion). The headline

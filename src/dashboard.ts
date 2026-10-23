@@ -51,6 +51,7 @@ import {
   type Clock,
 } from "./httpsec.js";
 import { log } from "./logger.js";
+import { guardedFetch } from "./netguard.js";
 
 export interface DashboardHandle {
   url: string;
@@ -818,16 +819,12 @@ export async function startDashboard(
         return;
       }
     }
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 8000);
     try {
-      const r = await fetch(wh.url, { method: "POST", headers, body: payload, signal: ctrl.signal });
+      const r = await guardedFetch(wh.url, { method: "POST", headers, body: payload, timeoutMs: 8000 }, () => cfg.settings?.network);
       res.json({ ok: r.ok, status: r.status, signed: Boolean(headers["x-switchboard-signature"]) });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       res.status(502).json({ error: `delivery failed: ${msg}` });
-    } finally {
-      clearTimeout(timer);
     }
   });
 

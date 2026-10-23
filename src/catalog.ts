@@ -14,12 +14,13 @@
  * Each toolkit carries a `mount` block that maps 1:1 onto a `ServerConfig`, so
  * "Add to MCP Switchboard" can turn a catalog entry into a real mounted server.
  *
- * Zero dependencies — global `fetch` (Node >=18.18) and the standard library only.
+ * Zero dependencies: every fetch goes through the SSRF guard (src/netguard.ts) and the standard library.
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { BULK_DOCUMENT_MAX_BYTES, BULK_DOCUMENT_TIMEOUT_MS, guardedFetch, type NetworkSource } from "./netguard.js";
 
 /** How a catalog entry can be mounted. Mirrors the relevant `ServerConfig` fields. */
 export type ToolkitMount =
@@ -132,8 +133,13 @@ function deriveMcpCategory(name: string, description: string): string {
 }
 
 /** Fetch JSON with a short timeout and a descriptive UA. Throws on non-2xx. */
-async function fetchJson<T>(url: string): Promise<T> {
-  const res = await fetch(url, { headers: { "user-agent": USER_AGENT, accept: "application/json" } });
+async function fetchJson<T>(url: string, network?: NetworkSource): Promise<T> {
+  // Public registries are bulk documents (apis.guru list.json is ~9 MB), so they get the bulk caps.
+  const res = await guardedFetch(
+    url,
+    { headers: { "user-agent": USER_AGENT, accept: "application/json" }, maxBytes: BULK_DOCUMENT_MAX_BYTES, timeoutMs: BULK_DOCUMENT_TIMEOUT_MS },
+    network,
+  );
   if (!res.ok) throw new Error(`${url} -> HTTP ${res.status}`);
   return (await res.json()) as T;
 }
@@ -224,7 +230,7 @@ function toolkitFromRegistry(srv: RegistryServer, taxonomy?: Map<string, string>
 }
 
 /** Page through the MCP Registry, dedupe to the latest version of each server. */
-async function ingestMcpRegistry(taxonomy?: Map<string, string>): Promise<Toolkit[]> {
+async function ingestMcpRegistry(taxonomy?: Map<string, string>, network?: NetworkSource): Promise<Toolkit[]> {
   const byName = new Map<string, Toolkit>();
   // Track which names we've seen a `isLatest: true` row for, so older rows can't overwrite it.
   const lockedLatest = new Set<string>();
@@ -233,7 +239,7 @@ async function ingestMcpRegistry(taxonomy?: Map<string, string>): Promise<Toolki
   const maxPages = 60; // safety cap (~6000 rows)
 
   while (url && pages < maxPages) {
-    const page: RegistryPage = await fetchJson<RegistryPage>(url);
+    const page: RegistryPage = await fetchJson<RegistryPage>(url, network);
     pages++;
     for (const row of page.servers ?? []) {
       const tk = toolkitFromRegistry(row.server, taxonomy);
@@ -269,8 +275,8 @@ interface ApisGuruEntry {
 }
 
 /** Convert the apis.guru list into Toolkits (one per API, using the preferred version). */
-async function ingestApisGuru(): Promise<Toolkit[]> {
-  const list = await fetchJson<Record<string, ApisGuruEntry>>(APIS_GURU_URL);
+async function ingestApisGuru(network?: NetworkSource): Promise<Toolkit[]> {
+  const list = await fetchJson<Record<string, ApisGuruEntry>>(APIS_GURU_URL, network);
   const out: Toolkit[] = [];
   for (const [key, entry] of Object.entries(list)) {
     const verKey = entry.preferred ?? Object.keys(entry.versions)[0];
@@ -417,8 +423,12 @@ export function parseAwesomeTaxonomy(markdown: string): Map<string, string> {
 }
 
 /** Fetch text (README markdown) with the same UA as the JSON adapters. Throws on non-2xx. */
-async function fetchText(url: string): Promise<string> {
-  const res = await fetch(url, { headers: { "user-agent": USER_AGENT } });
+async function fetchText(url: string, network?: NetworkSource): Promise<string> {
+  const res = await guardedFetch(
+    url,
+    { headers: { "user-agent": USER_AGENT }, maxBytes: BULK_DOCUMENT_MAX_BYTES, timeoutMs: BULK_DOCUMENT_TIMEOUT_MS },
+    network,
+  );
   if (!res.ok) throw new Error(`${url} -> HTTP ${res.status}`);
   return await res.text();
 }
@@ -427,9 +437,9 @@ async function fetchText(url: string): Promise<string> {
  * Live, best-effort fetch of awesome-mcp-servers' category taxonomy. Returns a repo→category map,
  * or an EMPTY map on any failure — category enrichment must never break or fail a catalog sync.
  */
-export async function fetchAwesomeTaxonomy(): Promise<Map<string, string>> {
+export async function fetchAwesomeTaxonomy(network?: NetworkSource): Promise<Map<string, string>> {
   try {
-    return parseAwesomeTaxonomy(await fetchText(AWESOME_MCP_README_URL));
+    return parseAwesomeTaxonomy(await fetchText(AWESOME_MCP_README_URL, network));
   } catch {
     return new Map();
   }
@@ -490,7 +500,7 @@ export function searchAwesomeServers(
  */
 export async function discoverToolkits(
   query: string,
-  opts: { limit?: number; catalog?: CatalogSnapshot } = {},
+  opts: { limit?: number; catalog?: CatalogSnapshot; network?: NetworkSource } = {},
 ): Promise<DiscoveryResult[]> {
   const snapshot = opts.catalog ?? loadCatalog();
   const exclude = new Set<string>();
@@ -498,7 +508,7 @@ export async function discoverToolkits(
     const n = normalizeRepoUrl(t.repository);
     if (n) exclude.add(n);
   }
-  const md = await fetchText(AWESOME_MCP_README_URL);
+  const md = await fetchText(AWESOME_MCP_README_URL, opts.network);
   return searchAwesomeServers(md, query, { exclude, limit: opts.limit });
 }
 
@@ -531,9 +541,9 @@ export function tallyCategories(toolkits: Toolkit[]): { name: string; count: num
  * Fetch both sources and assemble a snapshot. `generated_at` is left as an empty
  * string here (the script runtime forbids reading the clock); the CLI stamps it.
  */
-export async function ingestCatalog(): Promise<CatalogSnapshot> {
-  const taxonomy = await fetchAwesomeTaxonomy(); // best-effort; empty map on failure
-  const results = await Promise.allSettled([ingestMcpRegistry(taxonomy), ingestApisGuru()]);
+export async function ingestCatalog(network?: NetworkSource): Promise<CatalogSnapshot> {
+  const taxonomy = await fetchAwesomeTaxonomy(network); // best-effort; empty map on failure
+  const results = await Promise.allSettled([ingestMcpRegistry(taxonomy, network), ingestApisGuru(network)]);
   const mcp = results[0].status === "fulfilled" ? results[0].value : [];
   const apis = results[1].status === "fulfilled" ? results[1].value : [];
   if (results[0].status === "rejected" && results[1].status === "rejected") {
@@ -556,13 +566,13 @@ export async function ingestCatalog(): Promise<CatalogSnapshot> {
 }
 
 /** Per-source failure detail + taxonomy-enrichment stats, for callers that want to report syncs. */
-export async function ingestCatalogVerbose(): Promise<{
+export async function ingestCatalogVerbose(network?: NetworkSource): Promise<{
   snapshot: CatalogSnapshot;
   errors: { source: string; message: string }[];
   enrichment: { taxonomy_entries: number; reclassified: number };
 }> {
-  const taxonomy = await fetchAwesomeTaxonomy(); // best-effort; empty map on failure
-  const results = await Promise.allSettled([ingestMcpRegistry(taxonomy), ingestApisGuru()]);
+  const taxonomy = await fetchAwesomeTaxonomy(network); // best-effort; empty map on failure
+  const results = await Promise.allSettled([ingestMcpRegistry(taxonomy, network), ingestApisGuru(network)]);
   const errors: { source: string; message: string }[] = [];
   const mcp = results[0].status === "fulfilled" ? results[0].value : (errors.push({ source: "mcp-registry", message: String((results[0] as PromiseRejectedResult).reason) }), []);
   const apis = results[1].status === "fulfilled" ? results[1].value : (errors.push({ source: "apis-guru", message: String((results[1] as PromiseRejectedResult).reason) }), []);

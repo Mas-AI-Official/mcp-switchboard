@@ -28,6 +28,7 @@ import { join } from "node:path";
 import { buildOpenApiServer } from "../dist/openapi.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { useFetchStubForTests } from "../dist/netguard.js";
 
 const checks = [];
 const assert = (name, cond, detail = "") => {
@@ -54,6 +55,9 @@ globalThis.fetch = async (url, init) => {
   lastReq = { url: url instanceof URL ? url : new URL(String(url)), init: init ?? {} };
   return nextResponse();
 };
+// Outbound HTTP now goes through the SSRF guard (src/netguard.ts) instead of calling fetch directly:
+// route it to the capturing stub above and answer DNS with a public address, so no check here touches the network.
+const restoreNet = useFetchStubForTests(() => globalThis.fetch);
 
 const clients = [];
 /** Build a server from a spec object + config overrides and return a connected MCP client + metadata. */
@@ -382,6 +386,7 @@ const swagger2 = {
 
 // --- teardown -------------------------------------------------------------------------------------
 globalThis.fetch = realFetch;
+restoreNet();
 for (const c of clients) {
   try {
     await c.close();

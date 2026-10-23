@@ -13,6 +13,7 @@ import { z } from "zod";
 import { atomicWriteFileSync } from "./atomicfile.js";
 import type { SwitchboardConfig, TriggersConfig } from "./types.js";
 import { passthroughProblem } from "./childenv.js";
+import { parseAllowEntry } from "./netguard.js";
 
 const scope = z.enum(["read", "write", "full"]);
 
@@ -245,6 +246,21 @@ const council = z
   })
   .strict();
 
+// Outbound network guard (src/netguard.ts). Entries are exact hosts: a bad entry fails the config at
+// load rather than silently widening or narrowing the allowlist.
+const networkAllowEntry = z.string().superRefine((entry, ctx) => {
+  const parsed = parseAllowEntry(entry);
+  if ("error" in parsed) ctx.addIssue({ code: "custom", message: `allow_private entry ${JSON.stringify(entry)} ${parsed.error}` });
+});
+
+const network = z
+  .object({
+    allow_private: z.array(networkAllowEntry).optional(),
+    timeout_ms: z.number().int().positive().max(600000).optional(),
+    max_response_bytes: z.number().int().positive().max(512 * 1024 * 1024).optional(),
+  })
+  .strict();
+
 const triggerDefinition = z
   .object({
     id: z.string().min(1),
@@ -313,6 +329,7 @@ const settings = z
       .strict()
       .optional(),
     council: council.optional(),
+    network: network.optional(),
     oauth_server: z
       .object({
         enabled: z.boolean().default(false),

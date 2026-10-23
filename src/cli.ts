@@ -67,10 +67,12 @@ import {
   pickDefaultModel,
   buildLocalProvider,
   withLocalProvider,
+  withLocalAllowance,
   wireAdvice,
   installGuide,
 } from "./localllm.js";
 import { log, out } from "./logger.js";
+import { guardedFetch, type NetworkSettings } from "./netguard.js";
 
 const DEFAULT_CONFIG = "switchboard.config.yaml";
 const program = new Command();
@@ -94,6 +96,18 @@ function bootConfig(path: string): SwitchboardConfig {
   const { config, note } = applyProfileEnvOverride(loadConfig(path));
   if (note) log.warn(note);
   return config;
+}
+
+/**
+ * The `settings.network` of the config on disk, or undefined when there is no readable config. For
+ * commands that make outbound calls (catalog sync, local-llm probes) but must not require a valid config.
+ */
+function networkFromConfig(): NetworkSettings | undefined {
+  try {
+    return loadConfig(configPath()).settings?.network;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -216,7 +230,8 @@ dashboardCmd
     out(`  ${url}`);
     out("");
     try {
-      await fetch(`http://127.0.0.1:${cfg.gateway.http.port}/healthz`, { signal: AbortSignal.timeout(1500) });
+      // Explicit local probe of our own gateway: loopback is permitted for this one call, nothing else.
+      await guardedFetch(`http://127.0.0.1:${cfg.gateway.http.port}/healthz`, { timeoutMs: 1500, allowLoopback: true });
     } catch {
       log.warn(`no gateway answered on 127.0.0.1:${cfg.gateway.http.port}: start it with \`switchboard dashboard\` or \`switchboard serve\` before the code expires`);
     }
@@ -355,7 +370,7 @@ toolkitsCmd
   .description("rebuild data/catalog.json from the open MCP Registry + APIs.guru indexes")
   .action(async () => {
     out("Syncing catalog from the MCP Registry and APIs.guru…");
-    const { snapshot, errors, enrichment } = await ingestCatalogVerbose();
+    const { snapshot, errors, enrichment } = await ingestCatalogVerbose(networkFromConfig());
     snapshot.generated_at = new Date().toISOString();
     const path = defaultCatalogPath();
     writeCatalog(snapshot, path);
@@ -398,7 +413,7 @@ toolkitsCmd
     out(`Searching awesome-mcp-servers live for "${q}" (discovery only — nothing is written)…`);
     let results;
     try {
-      results = await discoverToolkits(q, { limit: Number(opts.limit) || 20 });
+      results = await discoverToolkits(q, { limit: Number(opts.limit) || 20, network: networkFromConfig() });
     } catch (err) {
       log.error(`discovery failed: ${err instanceof Error ? err.message : String(err)}`);
       process.exitCode = 1;
@@ -429,7 +444,7 @@ toolkitsCmd
     out("Fetching the awesome-mcp-servers category taxonomy (categories only — no server lists)…");
     let taxonomy: Map<string, string>;
     try {
-      taxonomy = await fetchAwesomeTaxonomy();
+      taxonomy = await fetchAwesomeTaxonomy(networkFromConfig());
     } catch (err) {
       log.error(`taxonomy fetch failed: ${err instanceof Error ? err.message : String(err)}`);
       process.exitCode = 1;
@@ -453,7 +468,7 @@ program
   .description("authorize an OAuth provider via the local loopback flow")
   .action(async (provider: string) => {
     const cfg = loadConfig(configPath());
-    const oauth = new OAuthStore(new Vault(cfg.vault.backend));
+    const oauth = new OAuthStore(new Vault(cfg.vault.backend), () => cfg.settings?.network);
     const { host, port } = cfg.gateway.http;
     const redirectUri = `http://${host}:${port}/oauth/callback`;
 
@@ -560,7 +575,7 @@ const llmCmd = program
   .description("detect a local OpenAI-compatible LLM server (Ollama/LM Studio/llama.cpp/vLLM) for the offline council")
   .action(async () => {
     out("\nProbing localhost for OpenAI-compatible model servers…");
-    const results = await probeAll();
+    const results = await probeAll(undefined, undefined, networkFromConfig());
     const live = results.filter((r) => r.reachable);
     if (live.length === 0) {
       log.warn("no local model server reachable on the usual ports.");
@@ -597,11 +612,11 @@ llmCmd
         baseUrl = opts.baseUrl;
         if (!model) {
           const trimmed = opts.baseUrl.replace(/\/$/, "");
-          const probe = await probeRuntime({ id: "custom", label: "custom", baseUrl: trimmed, modelsUrl: `${trimmed}/models` });
+          const probe = await probeRuntime({ id: "custom", label: "custom", baseUrl: trimmed, modelsUrl: `${trimmed}/models` }, undefined, cfg.settings?.network);
           model = pickDefaultModel(probe.models);
         }
       } else {
-        const results = await probeAll();
+        const results = await probeAll(undefined, undefined, cfg.settings?.network);
         const live = results.filter((r) => r.reachable && r.models.length > 0);
         const chosen = opts.runtime ? live.find((r) => r.runtime.id === opts.runtime) : live[0];
         if (!chosen) {
@@ -626,7 +641,14 @@ llmCmd
 
       const provider = buildLocalProvider(baseUrl, model);
       const result = withLocalProvider(cfg, provider);
+      // The SSRF guard refuses loopback and LAN targets unless the exact host is allowlisted, so wire it too.
+      const allowance = await withLocalAllowance(result.config, baseUrl);
+      if (allowance.changed) {
+        result.config = allowance.config;
+        result.changed = true;
+      }
       const advice = wireAdvice(result, model);
+      if (allowance.host) advice.push(`added '${allowance.host}' to settings.network.allow_private (the outbound network guard refuses local hosts otherwise).`);
 
       if (opts.print) {
         out("\n# settings.council.providers.local\n");

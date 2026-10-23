@@ -274,8 +274,29 @@ export interface VaultConfig {
   backend: "encrypted-file" | "env";
 }
 
+/**
+ * Outbound network guard (src/netguard.ts). Every request the gateway makes on behalf of config or
+ * tools resolves DNS first and refuses loopback, private, CGNAT, link-local, ULA, unspecified,
+ * multicast and cloud-metadata targets, follows at most 3 redirects with every hop re-validated, and
+ * is bounded in time and size. Defaults are safe; this block only relaxes or tunes them.
+ */
+export interface NetworkSettings {
+  /**
+   * Exact host names or IP addresses that may resolve to non-public addresses, e.g. a local model
+   * server: `["127.0.0.1"]` for Ollama on its default address. No wildcards, CIDR ranges, ports or
+   * schemes. Listing `127.0.0.1` does not allow `localhost` and the reverse.
+   */
+  allow_private?: string[];
+  /** Overall per-request deadline in ms (DNS, connect, headers and body). Default 15000. */
+  timeout_ms?: number;
+  /** Cap on a response body in bytes, enforced while streaming on decoded bytes. Default 5242880 (5 MiB). */
+  max_response_bytes?: number;
+}
+
 /** Dashboard-editable presentation/integration settings (the Composio "Settings" pages). */
 export interface SettingsConfig {
+  /** Outbound SSRF guard tuning. See {@link NetworkSettings}. */
+  network?: NetworkSettings;
   /** `/settings/general` — naming shown across the dashboard. Cosmetic; no effect on routing. */
   general?: {
     organization_name?: string;

@@ -28,6 +28,7 @@ import { WatchedJsonFile } from "./atomicfile.js";
 import { HOME_DIR, loadVaultKey, seal, unseal, type SealedSecret } from "./vault.js";
 import type { Vault } from "./vault.js";
 import { log } from "./logger.js";
+import { guardedFetch, type NetworkSource } from "./netguard.js";
 
 const STORE_PATH = join(HOME_DIR, "oauth.json");
 /** A connect flow's pending state is only valid for this long. */
@@ -198,7 +199,10 @@ export class OAuthStore {
   private static readonly OAUTH_REF = /\$\{oauth:([^}]+)\}/g;
 
   /** Throws `StoreCorruptError` when oauth.json exists but is unusable (never starts with an empty store). */
-  constructor(private readonly vault: Vault) {
+  constructor(
+    private readonly vault: Vault,
+    private readonly network?: NetworkSource,
+  ) {
     this.key = loadVaultKey();
     this.store = new WatchedJsonFile<StoreFile>(STORE_PATH, () => ({}), { validate: storeShape, mode: 0o600 });
   }
@@ -396,7 +400,8 @@ export class OAuthStore {
     headers: Record<string, string>,
     body: URLSearchParams,
   ): Promise<Record<string, unknown> & { access_token?: string }> {
-    const res = await fetch(provider.tokenUrl, { method: "POST", headers, body });
+    // Token and refresh calls carry client secrets and refresh tokens: same SSRF guard as every outbound call.
+    const res = await guardedFetch(provider.tokenUrl, { method: "POST", headers, body }, this.network);
     const text = await res.text();
     let json: Record<string, unknown>;
     try {

@@ -351,6 +351,45 @@ Each operation becomes a governed tool. Scope is inferred from the HTTP verb
 (`GET`→read, `POST/PUT/PATCH`→write, `DELETE`→full), so a generated `deletepet` is **denied** under the
 `read` ceiling above — same policy engine as every other server.
 
+### Outbound network guard (SSRF)
+
+Every request the gateway makes on behalf of your config or your tools (http-tool and app2mcp calls,
+OpenAPI spec fetches, decision webhooks, OAuth token and refresh calls, the council, catalog syncs) goes
+through one guard, `src/netguard.ts`. A URL in a config, inside an OpenAPI document, or in a redirect
+`Location` header is untrusted input; without a guard it can point the gateway at your loopback
+services, your LAN or a cloud metadata endpoint, with your credentials attached.
+
+- **DNS first, then connect to what was checked.** Loopback, private (RFC1918), CGNAT (100.64/10),
+  link-local (169.254/16, fe80::/10), unique-local (fc00::/7), unspecified, multicast, reserved and cloud
+  metadata addresses are refused, including their IPv4-mapped, NAT64 and 6to4 spellings and decimal, hex
+  or octal IPv4 spellings. One bad DNS answer refuses the host. The connection is pinned to the validated
+  address, so a second DNS answer cannot redirect it afterwards.
+- **Redirects are followed manually, at most 3, and every hop is re-checked.** `Authorization`, `Cookie`,
+  API-key style headers and any injected credential header are dropped when the origin changes. A 307/308
+  that would re-send a request body to another origin, and an https to http downgrade, are refused.
+- **Bounded.** One deadline per request (default 15 s) and a response cap enforced while streaming on the
+  decoded bytes (default 5 MiB). OpenAPI specs and catalog documents are bulk public files and get a 64 MiB
+  cap and 60 s instead.
+- **A spec cannot choose where your credentials go.** When a server has `credentials`, `auth_scheme`,
+  `auth` or `inject_args`, an app2mcp server must set `base_url` explicitly and the spec's own `servers`
+  host must match it. Spec paths that do not start with `/` are skipped.
+
+To reach a local or LAN service on purpose, list its **exact** host. Exact means the host as written in the
+URL: `127.0.0.1` does not allow `localhost`, and the reverse. There are no wildcards, CIDR ranges or ports.
+
+```yaml
+settings:
+  network:
+    allow_private: [127.0.0.1]      # Ollama, LM Studio, a LAN API: exact hosts only
+    timeout_ms: 15000               # optional; per request, DNS through the last body byte
+    max_response_bytes: 5242880     # optional; 5 MiB
+```
+
+The council `local` provider needs its host listed (`switchboard local-llm wire` adds it for you). The
+`local-llm` probes and the CLI's own `/healthz` check are explicit local probes: loopback passes without an
+entry, nothing else does. Remote MCP upstreams (`source: remote`) use the MCP SDK's own HTTP client and are
+not routed through this guard. Pinned by `npm run verify:netguard`.
+
 ### Cross-provider council (Phase 5)
 
 MCP Switchboard already brokers tool calls; the **council** lets one agent broker a *peer model*. Turn it
@@ -403,6 +442,8 @@ council is genuinely keyless:
 
 ```yaml
 settings:
+  network:
+    allow_private: [127.0.0.1]   # the outbound guard refuses local hosts unless listed; `wire` adds this
   council:
     enabled: true
     providers:
@@ -773,6 +814,7 @@ npm run verify     # build + npm audit + 26 oracles = 1171 checks, all green
 | Logs + I/O capture / redaction | `verify:audit` | 61 |
 | Atomic stores, live key/vault reload, DPAPI vault key | `verify:storage` | 102 |
 | Hash-chained audit log, rotation, secret-shape redaction | `verify:audit-chain` | 117 |
+| Outbound SSRF guard (address classes, pinned DNS, redirects, caps, openapi host rule) | `verify:netguard` | 158 |
 | Governed call path (router) | `verify:router` | 29 |
 | Profiles (narrow-only) | `verify:profiles` | 61 |
 | Rate limits + spend budgets | `verify:limits` | 61 |

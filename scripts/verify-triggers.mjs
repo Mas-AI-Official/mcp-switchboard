@@ -96,6 +96,8 @@ const cfg = {
   servers: [],
   settings: {
     logs: { capture_io: false },
+    // The receiver listens on loopback; since the SSRF guard (src/netguard.ts) a loopback webhook target must be allowlisted.
+    network: { allow_private: ["127.0.0.1"] },
     webhook: { enabled: false, url: RECV_URL, events: [], secret_ref: "" },
     triggers: {
       enabled: false,

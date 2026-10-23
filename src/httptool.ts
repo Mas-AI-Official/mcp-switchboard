@@ -3,7 +3,10 @@
  *
  * The lighter sibling of `app2mcp` (openapi.ts): instead of parsing a whole OpenAPI spec, the
  * operator lists a handful of endpoints in `http_tools`, and each becomes one governed MCP tool.
- * Tool calls execute with the global `fetch` (Node ≥18.18) — **zero deps**.
+ * Tool calls execute through the SSRF guard (`guardedFetch`, src/netguard.ts), **zero deps**: private,
+ * loopback and metadata targets are refused unless the exact host is in `settings.network.allow_private`,
+ * redirects are re-validated hop by hop and never carry the injected credentials to another origin, and
+ * the call has a deadline and a response-size cap.
  *
  * The invocation contract is deliberately simple and predictable for a hand-written tool:
  *   - `{name}` segments in the `path` are filled from same-named args (URL-encoded) and consumed.
@@ -22,6 +25,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { HttpToolDef, Scope, ServerConfig } from "./types.js";
+import { guardedFetch, type NetworkSource } from "./netguard.js";
 
 const MAX_RESPONSE_CHARS = 50_000;
 const BODY_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
@@ -75,6 +79,7 @@ async function invoke(
   plan: HttpToolPlan,
   args: Record<string, unknown>,
   authHeaders: Record<string, string>,
+  network: NetworkSource,
 ): Promise<CallToolResult> {
   const template = plan.absolute ?? plan.base + plan.path;
   const { filled, consumed } = fillPath(template, args);
@@ -86,10 +91,10 @@ async function invoke(
     if (!consumed.has(k) && v !== undefined) rest[k] = v;
   }
 
-  const init: RequestInit = { method: plan.method, headers };
+  let body: string | undefined;
   if (BODY_METHODS.has(plan.method)) {
     if (Object.keys(rest).length) {
-      init.body = JSON.stringify(rest);
+      body = JSON.stringify(rest);
       headers["content-type"] = "application/json";
     }
   } else {
@@ -100,9 +105,9 @@ async function invoke(
     }
   }
 
-  let resp: Response;
+  let resp: Awaited<ReturnType<typeof guardedFetch>>;
   try {
-    resp = await fetch(url, init);
+    resp = await guardedFetch(url, { method: plan.method, headers, body, credentialHeaders: Object.keys(authHeaders) }, network);
   } catch (err) {
     return {
       content: [{ type: "text", text: `request to ${plan.method} ${url.pathname} failed: ${(err as Error).message}` }],
@@ -128,10 +133,12 @@ async function invoke(
  * missing method, or a duplicate name throws rather than mounting a half-broken server.
  *
  * @param resolveHeaders called per tool-call to produce auth headers — async so OAuth tokens refresh.
+ * @param network the live `settings.network` (or a thunk returning it) for the SSRF guard.
  */
 export async function buildHttpToolServer(
   config: ServerConfig,
   resolveHeaders: () => Promise<Record<string, string>>,
+  network?: NetworkSource,
 ): Promise<HttpToolServer> {
   const defs: HttpToolDef[] = config.http_tools ?? [];
   if (!defs.length) {
@@ -200,7 +207,7 @@ export async function buildHttpToolServer(
       // Fail closed: a missing/expired credential must not silently send an unauthenticated call.
       return { content: [{ type: "text", text: `credential error: ${(err as Error).message}` }], isError: true };
     }
-    return invoke(plan, args, authHeaders);
+    return invoke(plan, args, authHeaders, network);
   });
 
   return { server, scopeHints, toolCount: tools.length };

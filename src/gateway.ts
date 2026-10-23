@@ -53,8 +53,9 @@ export class Gateway {
 
   constructor(private readonly cfg: SwitchboardConfig) {
     this.vault = new Vault(cfg.vault.backend);
-    this.oauth = new OAuthStore(this.vault);
-    this.registry = new Registry(this.vault, this.oauth);
+    // The network guard reads the live config object, so a settings change is picked up without a restart.
+    this.oauth = new OAuthStore(this.vault, () => cfg.settings?.network);
+    this.registry = new Registry(this.vault, this.oauth, () => cfg.settings?.network);
     this.router = new Router(this.registry, cfg, (ref) => this.vault.resolve(ref));
     // Polls run through this.router, so every trigger poll is governed + audited like any call.
     this.triggers = new TriggerManager(this.router, cfg, (ref) => this.vault.resolve(ref));
@@ -130,7 +131,7 @@ export class Gateway {
     if (!council?.enabled) return;
 
     try {
-      const { server, scopeHints, toolCount } = buildCouncilServer(council, this.vault);
+      const { server, scopeHints, toolCount } = buildCouncilServer(council, this.vault, () => this.cfg.settings?.network);
       if (toolCount === 0) return;
       const synthetic: ServerConfig = {
         id: COUNCIL_SERVER_ID,
