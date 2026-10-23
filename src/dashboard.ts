@@ -48,6 +48,7 @@ import {
   readCookie,
   securityHeaders,
   setSessionCookie,
+  urlLengthGuard,
   type Clock,
 } from "./httpsec.js";
 import { log } from "./logger.js";
@@ -339,6 +340,8 @@ export async function startDashboard(
   const app = express();
   app.disable("x-powered-by");
   app.use(securityHeaders());
+  // Over-long URLs are refused before the Host check parses the path (DoS review).
+  app.use(urlLengthGuard());
   // Host and Origin are checked before any body is parsed and before any route runs.
   const guard = new HostGuard({ port });
   app.use(guard.handler());

@@ -96,16 +96,63 @@ const CAPTURE_CAP_BYTES = 4096;
 /** Captured structures nested deeper than this are replaced, not copied (a size guard, never a leak). */
 const MAX_CAPTURE_DEPTH = 64;
 
-interface Shape {
-  kind: string;
-  re: RegExp;
+/**
+ * A shape is a RegExp, or a hand-written scanner where the RegExp cannot be made linear (the JWT shape).
+ * Every shape must be linear in the text it scans: the text is chosen by an upstream server or a client.
+ */
+type Shape = { kind: string; re: RegExp } | { kind: string; scan: (text: string) => string };
+
+/**
+ * `\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*` in linear time. As a RegExp it is quadratic:
+ * on `eyJa-eyJa-eyJa-...` every `eyJ` is a legal start, and each start scans the whole base64url run before
+ * failing for want of a `.`, so 80 KB of it blocked the gateway for 6 seconds and 200 KB for a minute.
+ *
+ * The scanner walks maximal base64url runs once. A match is: a run `[a, b)` followed by `.`, a second run of
+ * at least 4 characters followed by `.`, then a third run of any length. Its start is the LEFTMOST `eyJ` in the
+ * first run that leaves at least 4 characters before `b` and sits at a word boundary (the run start, or right
+ * after a `-`, the only non-word character a run can contain). Both the greedy runs and the leftmost-start
+ * rule are exactly what the RegExp did; an oracle compares the two on random strings.
+ */
+function redactJwts(text: string): string {
+  const n = text.length;
+  const isB64 = (c: number): boolean => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 45 || c === 95;
+  let out = "";
+  let copied = 0;
+  let pos = 0;
+  while (pos < n) {
+    while (pos < n && !isB64(text.charCodeAt(pos))) pos++;
+    if (pos >= n) break;
+    const a = pos;
+    let b = a;
+    while (b < n && isB64(text.charCodeAt(b))) b++;
+    pos = b;
+    if (text.charCodeAt(b) !== 46 /* . */ || b - a < 7) continue;
+    const c = b + 1;
+    let d = c;
+    while (d < n && isB64(text.charCodeAt(d))) d++;
+    if (d - c < 4 || text.charCodeAt(d) !== 46) continue;
+    let start = -1;
+    for (let i = a; i <= b - 7; i++) {
+      if (text.charCodeAt(i) === 101 && text.charCodeAt(i + 1) === 121 && text.charCodeAt(i + 2) === 74 /* eyJ */ && (i === a || text.charCodeAt(i - 1) === 45)) {
+        start = i;
+        break;
+      }
+    }
+    if (start < 0) continue;
+    let e = d + 1;
+    while (e < n && isB64(text.charCodeAt(e))) e++;
+    out += text.slice(copied, start) + "[redacted:jwt]";
+    copied = e;
+    pos = e;
+  }
+  return copied === 0 ? text : out + text.slice(copied);
 }
 
 /** Provider-specific and structural secret shapes. Order matters: wide structures first. */
 const SHAPES: Shape[] = [
   { kind: "pem-block", re: /-----BEGIN [A-Z0-9 ]{1,40}-----[\s\S]*?(?:-----END [A-Z0-9 ]{1,40}-----|$)/g },
   { kind: "bearer", re: /\b[Bb]earer\s+[A-Za-z0-9._~+/=-]{8,}/g },
-  { kind: "jwt", re: /\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*/g },
+  { kind: "jwt", scan: redactJwts },
   { kind: "sk-key", re: /(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{16,}/g },
   { kind: "google-api-key", re: /(?<![A-Za-z0-9_-])AIza[A-Za-z0-9_-]{30,}/g },
   { kind: "github-token", re: /(?<![A-Za-z0-9_])(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/g },
@@ -118,17 +165,54 @@ const SHAPES: Shape[] = [
 const GENERIC_TOKEN = /((?:key|token|secret)[A-Za-z_]{0,12}(?:\s+is)?[^A-Za-z0-9\r\n]{1,8})([A-Za-z0-9_-]{32,})(?![A-Za-z0-9_-])/gi;
 
 /**
+ * The most text one scrub will look at. Anything longer is cut here before any pattern runs, and the cut is
+ * marked `[truncated:<original length>]`. An audit row never needs more (captured values are capped at
+ * CAPTURE_CAP_BYTES anyway, an error message is a diagnostic), and it bounds the work an upstream can make
+ * us do with one answer, whatever a pattern does.
+ */
+export const REDACT_MAX_CHARS = 8192;
+
+/** Characters that can be part of a token-shaped secret (provider keys, bearer values, JWTs, base64, hex). */
+const isTokenChar = (c: number): boolean => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 45 || c === 95 || c === 46 || c === 126 || c === 43 || c === 47 || c === 61;
+
+/**
+ * The first REDACT_MAX_CHARS characters of `text`, backed off to a token boundary. A secret that straddles the
+ * cut would otherwise leave its first characters behind (too short for its pattern to match), so a token that
+ * is cut in half is dropped whole. A multi-line PEM block cut in the middle is still caught: its BEGIN line is
+ * in the kept part and the pattern redacts an unterminated block to the end of the text.
+ */
+function cutForScan(text: string): string {
+  let end = REDACT_MAX_CHARS;
+  if (isTokenChar(text.charCodeAt(end))) {
+    while (end > 0 && isTokenChar(text.charCodeAt(end - 1))) end--;
+  }
+  return text.slice(0, end);
+}
+
+/**
  * Replace every secret-shaped substring of `text` with `[redacted:<kind>]`: provider keys (sk-, sk-proj-,
  * AIza, ghp_/gho_/github_pat_, xox[abpr]-, hf_, AWS AKIA), Bearer tokens, JWTs, PEM blocks, and long
  * hex or base64url tokens adjacent to key / token / secret words. Over-redacting is the accepted
- * failure direction for a log. Linear in the input: no pattern nests quantifiers.
+ * failure direction for a log. Linear in the input (every shape is: see Shape, and the oracle times each
+ * one on adversarial input), and the input is capped at REDACT_MAX_CHARS first.
  */
 export function redactSecretShapes(text: string): string {
+  return scrubText(text);
+}
+
+/** Set by a scrub when it had to cut a text, so a caller that reports sizes can say the value was longer. */
+interface ScrubState {
+  cut: boolean;
+}
+
+function scrubText(text: string, state?: ScrubState): string {
   if (text.length < 8) return text;
-  let out = text;
-  for (const { kind, re } of SHAPES) out = out.replace(re, `[redacted:${kind}]`);
+  const over = text.length > REDACT_MAX_CHARS;
+  if (over && state) state.cut = true;
+  let out = over ? cutForScan(text) : text;
+  for (const shape of SHAPES) out = "scan" in shape ? shape.scan(out) : out.replace(shape.re, `[redacted:${shape.kind}]`);
   out = out.replace(GENERIC_TOKEN, (_m, lead: string, token: string) => `${lead}[redacted:${/^[0-9a-fA-F]+$/.test(token) ? "hex-token" : "b64url-token"}]`);
-  return out;
+  return over ? `${out}[truncated:${text.length}]` : out;
 }
 
 /**
@@ -144,34 +228,39 @@ export function redactSecretShapes(text: string): string {
  */
 export function sanitizeForAudit(value: unknown, secretKeys?: ReadonlySet<string>): unknown {
   let plain: unknown;
+  let originalSize = 0;
   try {
     const text = JSON.stringify(value);
     if (text === undefined) return undefined; // nothing serializable (undefined, a function)
+    originalSize = text.length;
     plain = JSON.parse(text); // normalises toJSON/Date/undefined and throws on a circular structure
   } catch {
     return "[uncapturable]";
   }
-  const redacted = redactTree(plain, 0, secretKeys);
+  const state: ScrubState = { cut: false };
+  const redacted = redactTree(plain, 0, secretKeys, state);
   let serialized: string;
   try {
     serialized = JSON.stringify(redacted);
   } catch {
     return "[uncapturable]";
   }
-  if (serialized !== undefined && serialized.length > CAPTURE_CAP_BYTES) {
-    return { _truncated: serialized.length, preview: serialized.slice(0, CAPTURE_CAP_BYTES) };
+  // A string longer than REDACT_MAX_CHARS was cut before scanning, so the redacted tree can be much shorter
+  // than the value that was captured: it still counts as over cap and reports the size it really had.
+  if (serialized !== undefined && (state.cut || serialized.length > CAPTURE_CAP_BYTES)) {
+    return { _truncated: state.cut ? Math.max(originalSize, serialized.length) : serialized.length, preview: serialized.slice(0, CAPTURE_CAP_BYTES) };
   }
   return redacted;
 }
 
-function redactTree(value: unknown, depth: number, secretKeys?: ReadonlySet<string>): unknown {
-  if (typeof value === "string") return redactSecretShapes(value);
+function redactTree(value: unknown, depth: number, secretKeys: ReadonlySet<string> | undefined, state: ScrubState): unknown {
+  if (typeof value === "string") return scrubText(value, state);
   if (value === null || typeof value !== "object") return value;
   if (depth >= MAX_CAPTURE_DEPTH) return "[truncated:depth]";
-  if (Array.isArray(value)) return value.map((v) => redactTree(v, depth + 1, secretKeys));
+  if (Array.isArray(value)) return value.map((v) => redactTree(v, depth + 1, secretKeys, state));
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-    out[redactSecretShapes(k)] = SECRET_KEY.test(k) || secretKeys?.has(k) ? "[redacted]" : redactTree(v, depth + 1, secretKeys);
+    out[scrubText(k, state)] = SECRET_KEY.test(k) || secretKeys?.has(k) ? "[redacted]" : redactTree(v, depth + 1, secretKeys, state);
   }
   return out;
 }

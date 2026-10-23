@@ -108,6 +108,10 @@ clients:
   `X-Frame-Options: DENY`, a restrictive CSP for the SPA; `x-powered-by` disabled.
 - OAuth AS consent (`/oauth/consent`) requires an owner session. DCR is rate limited and capped.
 - `listen` errors (port in use) fail loudly and exit non-zero instead of shadowing.
+- Request URLs longer than 4096 characters get 414 in the first middleware after the security headers, before
+  the Host check parses the path. Anything that runs before authentication must be linear in its input: the
+  trailing-slash trim on the request path and on the OAuth `resource` parameter is a loop, not a regex
+  (`stripTrailingSlashes`), because the regex is quadratic on a long run of slashes.
 
 ### 3.3 Approvals
 
@@ -167,6 +171,9 @@ Rows gain `seq`, `principal`, `client`, `risk`, `approval_id`, `prev_hash`, `has
 canonical row without `hash`). `switchboard audit verify` checks the chain. `capture_io` defaults to false
 and, when on, string values are scanned for secret shapes (provider key prefixes, bearer tokens, JWTs, PEM
 blocks, long high-entropy tokens) and replaced. Rotation at 20 MB keeps the chain (`prev_hash` carries over).
+Every scrub is linear in its input and looks at no more than 8192 characters: longer text is cut back to a token
+boundary (so no half of a secret survives) and marked `[truncated:<length>]`. This applies to captured I/O and to
+`error` text, which is scrubbed whether or not `capture_io` is on, because an upstream chooses it.
 
 ### 3.8 Kill switch
 
@@ -183,7 +190,10 @@ file changes, so CLI changes reach a running gateway. On Windows the vault key i
 ### 3.10 Resources and prompts
 
 `resources/read` and `prompts/get` go through policy at read scope, the client filter, the kill switch and
-the governor. Unlisted resource URIs are not broadcast to every server.
+the governor. Unlisted resource URIs are not broadcast to every server. The server that DECLARED a matching
+resource template owns the URI; templates are chosen by the upstream and URIs by the client, so matching is a
+linear NFA run (`uritemplate.ts`, no RegExp built from upstream text) with caps on template and URI length and one
+work budget per lookup. An out-of-bounds template is a non-match, never an error.
 
 ### 3.11 Composio source
 

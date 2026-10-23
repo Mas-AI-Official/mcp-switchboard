@@ -53,6 +53,7 @@ import { SB_ERR, SB_HINTS, type SbErrorCode } from "./errors.js";
 import { rankBm25, type RankDoc } from "./search-index.js";
 import { Governor } from "./governor.js";
 import { Breaker } from "./breaker.js";
+import { DEFAULT_STEP_BUDGET, templateMatches, type StepBudget } from "./uritemplate.js";
 import { log } from "./logger.js";
 
 const SEP = "__";
@@ -83,46 +84,9 @@ const DEFAULT_SEARCH_LIMIT = 10;
 const MAX_SEARCH_LIMIT = 50;
 /** Cap on tool calls per `batch_call` request — a runaway guard, not a quota. */
 const MAX_BATCH_CALLS = 20;
-/** URIs longer than this are never matched against a resource template (a ReDoS and cost guard). */
-const MAX_TEMPLATE_URI_LEN = 8192;
 /** The two read-scope content surfaces that run through policy like a tool call (design 3.10). */
 type ReadSurface = "resources/read" | "prompts/get";
 
-/**
- * Does `uri` fit an RFC 6570 URI template? Used only to find which server DECLARED a template for a
- * URI nobody listed; the match never reaches a second server. Deliberately conservative: an operator
- * form this does not model matches as a single path segment, so an odd template fails closed.
- */
-function templateMatches(template: string, uri: string): boolean {
-  // A client chooses the URI and the declaring server chooses the template: bound the work either way.
-  if (uri.length > MAX_TEMPLATE_URI_LEN) return false;
-  let pattern = "^";
-  let last = 0;
-  for (const m of template.matchAll(/\{([^}]*)\}/g)) {
-    const at = m.index ?? 0;
-    pattern += template.slice(last, at).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const op = (m[1] ?? "")[0];
-    pattern +=
-      op === "+" || op === "#"
-        ? ".+"
-        : op === "/"
-          ? "(?:/[^/?#]+)+"
-          : op === "."
-            ? "(?:\\.[^/?#.]+)+"
-            : op === ";"
-              ? "(?:;[^/?#;]+)+"
-              : op === "?" || op === "&"
-                ? "(?:[?&][^#]*)?"
-                : "[^/?#]+";
-    last = at + m[0].length;
-  }
-  pattern += template.slice(last).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$";
-  try {
-    return new RegExp(pattern).test(uri);
-  } catch {
-    return false;
-  }
-}
 /** The four MCP annotation hints that can be used as `find_tools` tag filters. */
 const ANNOTATION_TAGS = ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"] as const;
 
@@ -712,13 +676,20 @@ export class Router {
   /** The visible server that DECLARED a resource template matching `uri`, if any (first wins). Only
    *  the declaring server is ever asked to read it. */
   private async templateOwner(uri: string): Promise<string | undefined> {
+    // One work budget for the whole lookup: the templates are chosen by the upstreams, so a server
+    // that declares hundreds of hostile ones must not be able to add the cost up (see uritemplate.ts).
+    const budget: StepBudget = { steps: DEFAULT_STEP_BUDGET };
     for (const server of this.visibleServers()) {
       if (!server.client.getServerCapabilities()?.resources) continue;
       try {
         const { resourceTemplates } = await server.client.listResourceTemplates();
-        if ((resourceTemplates ?? []).some((t) => templateMatches(t.uriTemplate, uri))) return server.id;
+        if ((resourceTemplates ?? []).some((t) => templateMatches(t.uriTemplate, uri, budget))) return server.id;
       } catch (err) {
         log.warn(`listResourceTemplates failed for '${server.id}': ${err instanceof Error ? err.message : String(err)}`);
+      }
+      if (budget.steps <= 0) {
+        log.warn("resource template matching hit its work limit; treating the URI as unknown");
+        break;
       }
     }
     return undefined;

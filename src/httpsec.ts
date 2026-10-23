@@ -78,6 +78,43 @@ export function jsonErrorHandler(): ErrorRequestHandler {
   };
 }
 
+// ── request size guards ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * Longest request URL (path plus query) any route of this gateway accepts. Real URLs here are short (an
+ * OAuth authorize request, with its PKCE challenge, redirect URI and state, is the longest in practice);
+ * Node itself allows 16 KiB of headers, which is enough room for a hostile path to make later middleware
+ * do needless work. Defence in depth: the pre-auth code is linear on its own, this bounds what it sees.
+ */
+export const MAX_URL_CHARS = 4096;
+
+/**
+ * Answer 414 to an over-long URL before anything else looks at it, Host check included (design 3.2 and
+ * the DoS review: the Host check is the first thing that parses the path, so it must not meet a 16 KiB
+ * one). Registered after `securityHeaders()` so the refusal still carries them. No body detail.
+ */
+export function urlLengthGuard(): RequestHandler {
+  return (req, res, next) => {
+    if ((req.originalUrl ?? req.url).length > MAX_URL_CHARS) {
+      res.status(414).type("text/plain").send("uri too long");
+      return;
+    }
+    next();
+  };
+}
+
+/**
+ * `s.replace(/\/+$/, "")` in linear time. That regex is quadratic on a string with a long run of
+ * slashes that is not at the end (`//////x`): the engine retries from every slash of the run, and each
+ * try scans to the end of the run. Used on request paths BEFORE the Host check, where the input is
+ * chosen by whoever can reach the port, so it must stay linear.
+ */
+export function stripTrailingSlashes(s: string): string {
+  let end = s.length;
+  while (end > 0 && s.charCodeAt(end - 1) === 47) end--;
+  return end === s.length ? s : s.slice(0, end);
+}
+
 // ── Host and Origin allowlist ─────────────────────────────────────────────────────────────────────
 
 /**
@@ -86,7 +123,7 @@ export function jsonErrorHandler(): ErrorRequestHandler {
  * accounts callback) is loopback-only. Case-insensitive because Express routes are.
  */
 export function isPublicRoutePath(path: string): boolean {
-  const p = path.toLowerCase().replace(/\/+$/, "") || "/";
+  const p = stripTrailingSlashes(path.toLowerCase()) || "/";
   return (
     p === "/mcp" ||
     p === "/authorize" ||
@@ -99,7 +136,7 @@ export function isPublicRoutePath(path: string): boolean {
 }
 
 function isMcpPath(path: string): boolean {
-  return (path.toLowerCase().replace(/\/+$/, "") || "/") === "/mcp";
+  return (stripTrailingSlashes(path.toLowerCase()) || "/") === "/mcp";
 }
 
 const isSafeMethod = (m: string): boolean => m === "GET" || m === "HEAD";

@@ -50,6 +50,7 @@ import {
 } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import { readJsonFileSync, writeJsonAtomic } from "./atomicfile.js";
 import { HOME_DIR, loadVaultKey, seal, unseal, type SealedSecret } from "./vault.js";
+import { stripTrailingSlashes } from "./httpsec.js";
 import type { SwitchboardConfig, SettingsConfig } from "./types.js";
 import { log } from "./logger.js";
 
@@ -65,7 +66,7 @@ const sha256 = (s: string): string => createHash("sha256").update(s, "utf8").dig
 const randomToken = (): string => randomBytes(32).toString("base64url");
 const randomId = (): string => randomBytes(16).toString("base64url");
 
-const stripSlash = (s: string): string => s.replace(/\/+$/, "");
+const stripSlash = stripTrailingSlashes; // linear: `resource` is attacker-chosen (see httpsec.ts)
 const nowSec = (): number => Math.floor(Date.now() / 1000);
 
 /** Append query params to a URL string, preserving any it already carries. */

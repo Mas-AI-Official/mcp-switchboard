@@ -23,7 +23,7 @@ import type { Gateway } from "./gateway.js";
 import type { SwitchboardConfig } from "./types.js";
 import { ApiKeyStore } from "./apikeys.js";
 import { mountMcpEndpoint } from "./dashboard.js";
-import { HostGuard, assertPortFree, jsonErrorHandler, securityHeaders } from "./httpsec.js";
+import { HostGuard, assertPortFree, jsonErrorHandler, securityHeaders, urlLengthGuard } from "./httpsec.js";
 import { log, out } from "./logger.js";
 
 export type TunnelKind = "cloudflared" | "ngrok" | "tailscale";
@@ -87,6 +87,8 @@ export async function startMcpListener(
   const app = express();
   app.disable("x-powered-by");
   app.use(securityHeaders());
+  // Over-long URLs are refused before the Host check parses the path (DoS review).
+  app.use(urlLengthGuard());
   const guard = new HostGuard({ port });
   app.use(guard.handler());
   app.use(express.json());
