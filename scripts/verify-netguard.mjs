@@ -58,8 +58,7 @@ const { probeRuntime, withLocalAllowance } = await import("../dist/localllm.js")
 const { Registry } = await import("../dist/registry.js");
 const { Vault } = await import("../dist/vault.js");
 const { loadConfig } = await import("../dist/config.js");
-const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
-const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+const { Client, InMemoryTransport } = await import("@modelcontextprotocol/client");
 
 const checks = [];
 const assert = (name, cond, detail = "") => {

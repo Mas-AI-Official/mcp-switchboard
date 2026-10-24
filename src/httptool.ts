@@ -21,9 +21,8 @@
  * missing/expired credential returns an error result rather than silently sending an unauthed call.
  */
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
+import { Server } from "@modelcontextprotocol/server";
+import type { CallToolResult, Tool } from "@modelcontextprotocol/server";
 import type { HttpToolDef, Scope, ServerConfig } from "./types.js";
 import { guardedFetch, type NetworkSource } from "./netguard.js";
 import { dotSegmentProblem, pathParamProblem, rawPathOf } from "./pathparam.js";
@@ -207,8 +206,8 @@ export async function buildHttpToolServer(
     { capabilities: { tools: {} } },
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
-  server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToolResult> => {
+  server.setRequestHandler("tools/list", async () => ({ tools }));
+  server.setRequestHandler("tools/call", async (request): Promise<CallToolResult> => {
     const plan = plans.get(request.params.name);
     if (!plan) {
       return { content: [{ type: "text", text: `unknown tool '${request.params.name}'` }], isError: true };

@@ -28,12 +28,8 @@
  *     debate; the total provider calls per debate are bounded by `rounds * participants + 1`.
  */
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-} from "@modelcontextprotocol/sdk/types.js";
-import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
+import { Server } from "@modelcontextprotocol/server";
+import type { CallToolResult, Tool } from "@modelcontextprotocol/server";
 import type {
   CouncilConfig,
   CouncilProviderConfig,
@@ -358,9 +354,9 @@ export function buildCouncilServer(
     { capabilities: { tools: {} } },
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
+  server.setRequestHandler("tools/list", async () => ({ tools }));
 
-  server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToolResult> => {
+  server.setRequestHandler("tools/call", async (request): Promise<CallToolResult> => {
     const name = request.params.name;
     const a = (request.params.arguments ?? {}) as Record<string, unknown>;
 

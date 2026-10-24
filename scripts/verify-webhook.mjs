@@ -18,8 +18,7 @@ process.env.SWITCHBOARD_AUTO_APPROVE = "1"; // write_thing's approval gate resol
 const { Gateway } = await import("../dist/gateway.js");
 const { recentAudit } = await import("../dist/audit.js");
 const { verifyWebhook } = await import("../dist/webhook.js");
-const { Server } = await import("@modelcontextprotocol/sdk/server/index.js");
-const { CallToolRequestSchema, ListToolsRequestSchema } = await import("@modelcontextprotocol/sdk/types.js");
+const { Server } = await import("@modelcontextprotocol/server");
 
 const SECRET = "s3cr3t-webhook-signing-key";
 const checks = [];
@@ -64,8 +63,8 @@ const TOOLS = [
   { name: "write_thing", description: "write", inputSchema: { type: "object", additionalProperties: true } },
   { name: "delete_thing", description: "delete", inputSchema: { type: "object", additionalProperties: true } },
 ];
-echo.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
-echo.setRequestHandler(CallToolRequestSchema, async (req) => ({
+echo.setRequestHandler("tools/list", async () => ({ tools: TOOLS }));
+echo.setRequestHandler("tools/call", async (req) => ({
   content: [{ type: "text", text: JSON.stringify({ echoed: req.params.arguments ?? {} }) }],
 }));
 

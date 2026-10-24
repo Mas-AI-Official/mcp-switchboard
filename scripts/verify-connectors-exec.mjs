@@ -73,8 +73,7 @@ const { startDashboard } = await mod("dashboard.js");
 const { loadConfig } = await mod("config.js");
 const { setKillFile } = await mod("killswitch.js");
 const express = (await import("express")).default;
-const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
-const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+const { Client, InMemoryTransport } = await import("@modelcontextprotocol/client");
 
 const FIX = join(ROOT, "scripts", "fixtures", "connectors");
 const fixture = (name) => readFileSync(join(FIX, name), "utf8");

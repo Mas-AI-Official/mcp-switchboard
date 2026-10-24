@@ -17,13 +17,10 @@
  * the `credentials` map is rendered into request headers.
  */
 
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import { Client, InMemoryTransport, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
+import type { Transport } from "@modelcontextprotocol/client";
+import type { Server, Tool } from "@modelcontextprotocol/server";
 import type { Scope, ServerConfig } from "./types.js";
 import type { Vault } from "./vault.js";
 import type { OAuthStore } from "./oauth.js";
@@ -34,7 +31,7 @@ import { buildOpenApiServer } from "./openapi.js";
 import { buildHttpToolServer } from "./httptool.js";
 import { buildConnectorServer, type ConnectorHooks } from "./connectors/mcpserver.js";
 import { authSchemeEnv, authSchemeHeaders } from "./authscheme.js";
-import { baseChildEnv, passthroughEnv } from "./childenv.js";
+import { baseChildEnv, exactChildEnv, passthroughEnv } from "./childenv.js";
 import { log } from "./logger.js";
 
 /** `${oauth:provider}` reference — resolved to a bare access token at mount time. */
@@ -205,7 +202,7 @@ export class Registry {
       args = config.args ?? [];
     }
 
-    return new StdioClientTransport({ command, args, env, stderr: "inherit" });
+    return new StdioClientTransport({ command, args, env: exactChildEnv(env), stderr: "inherit" });
   }
 
   /**

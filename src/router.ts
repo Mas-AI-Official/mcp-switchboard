@@ -19,16 +19,16 @@
  * human confirm. Every verdict is written to the audit log.
  */
 
-import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
+import { ProtocolError, ProtocolErrorCode, SdkError, SdkErrorCode } from "@modelcontextprotocol/server";
 import type {
   CallToolResult,
   Tool,
   Resource,
-  ResourceTemplate,
+  ResourceTemplateType,
   Prompt,
   ReadResourceResult,
   GetPromptResult,
-} from "@modelcontextprotocol/sdk/types.js";
+} from "@modelcontextprotocol/server";
 import type { Registry, MountedServer } from "./registry.js";
 import type { LimitSpec, Risk, Scope, SwitchboardConfig } from "./types.js";
 import { evaluate, resolveToolScope } from "./policy.js";
@@ -81,6 +81,18 @@ import { APPROVED_META_KEY, AUDIT_META_KEY, CLIENT_META_KEY, TOOL_META_KEY, type
 import { isConnectorError, type ConnectorError } from "./connectors/errors.js";
 
 const SEP = "__";
+const RESERVED_META_PREFIX = "io.modelcontextprotocol/";
+
+/** Never relay an upstream SDK's reserved identity metadata as if it described this gateway. */
+function stripUpstreamReservedMeta<T extends { _meta?: Record<string, unknown> }>(value: T): T {
+  if (!value._meta || !Object.keys(value._meta).some((key) => key.startsWith(RESERVED_META_PREFIX))) return value;
+  const meta = Object.fromEntries(Object.entries(value._meta).filter(([key]) => !key.startsWith(RESERVED_META_PREFIX)));
+  if (Object.keys(meta).length === 0) {
+    const { _meta: _removed, ...rest } = value;
+    return rest as T;
+  }
+  return { ...value, _meta: meta };
+}
 
 /**
  * Per-field weights + length-normalization for the BM25F tool ranker (see search-index.ts).
@@ -705,7 +717,7 @@ export class Router {
     // by exact name in every capture below so a vault/oauth secret never lands in audit.log cleartext.
     const injectedKeys = injectedArgKeys(server.config, override);
 
-    // Native per-call timeout (ms) — the SDK throws an McpError with ErrorCode.RequestTimeout
+    // Native per-call timeout (ms): the SDK throws an SdkError with RequestTimeout
     // when it elapses, which we map to a distinct SB_UPSTREAM_TIMEOUT below.
     const timeoutMs = this.cfg.settings?.call_timeout_ms;
     const callOpts = typeof timeoutMs === "number" ? { timeout: timeoutMs } : undefined;
@@ -749,7 +761,11 @@ export class Router {
       // an approval was consumed for a planned call, the digest of what was approved: it rebuilds the call and refuses
       // one that hashes to anything else (another account, another request).
       const callMeta = server.connector ? this.connectorMeta(caller, plan, approvalId) : undefined;
-      const raw = (await server.client.callTool({ name: toolName, arguments: finalArgs, ...(callMeta ? { _meta: callMeta } : {}) }, undefined, callOpts)) as CallToolResult;
+      const upstream = (await server.client.callTool(
+        { name: toolName, arguments: finalArgs, ...(callMeta ? { _meta: callMeta } : {}) },
+        callOpts,
+      )) as CallToolResult;
+      const raw = stripUpstreamReservedMeta(upstream);
       // The server responded — transport is healthy even if the tool returned an error *result*
       // (a logical "not found" is not an outage). Closes the breaker / clears the failure count.
       this.breaker.record(server.id, true, Date.now());
@@ -771,7 +787,7 @@ export class Router {
       // A throw or timeout is a TRANSPORT failure — count it toward opening the breaker so a
       // wedged/dead upstream trips fast after N in a row, rather than every call hanging.
       this.breaker.record(server.id, false, Date.now());
-      const timedOut = err instanceof McpError && err.code === ErrorCode.RequestTimeout;
+      const timedOut = SdkError.isInstance(err) && err.code === SdkErrorCode.RequestTimeout;
       const code: SbErrorCode = timedOut ? SB_ERR.UPSTREAM_TIMEOUT : SB_ERR.UPSTREAM_ERROR;
       const msg = err instanceof Error ? err.message : String(err);
       rec({
@@ -855,8 +871,8 @@ export class Router {
   /** Aggregate resource templates across every visible, resource-capable server. Templates are
    *  parameterized URIs (never concrete identities), so there is no owner map to maintain — a read
    *  of a template-expanded URI resolves via readResource()'s try-each fallback. */
-  async listResourceTemplates(principal?: Principal): Promise<ResourceTemplate[]> {
-    const out: ResourceTemplate[] = [];
+  async listResourceTemplates(principal?: Principal): Promise<ResourceTemplateType[]> {
+    const out: ResourceTemplateType[] = [];
     for (const server of this.visibleServers(this.callerOf(principal).gate)) {
       if (!server.client.getServerCapabilities()?.resources) continue;
       try {
@@ -873,10 +889,10 @@ export class Router {
    * Read a resource by URI, routing to the server that listed it. The owner is resolved from what
    * servers LIST: the exact-URI map first (rebuilt once when cold or stale), then the resource
    * templates a server declared. A URI nobody listed or declared is NOT tried against every server
-   * (0.1.0 broadcast it): it is "unknown", an McpError(InvalidParams). The owner then goes through the
+   * (0.1.0 broadcast it): it is "unknown", a ProtocolError(InvalidParams). The owner then goes through the
    * same gates as a tool call, at read scope: kill switch, visibility (enabled + active profile),
    * policy, the governor and the approval gate (see governRead). resources/read is result-or-error,
-   * so every refusal is a thrown McpError carrying the SB_* code in `data.code`.
+   * so every refusal is a thrown ProtocolError carrying the SB_* code in `data.code`.
    */
   async readResource(uri: string, principal?: Principal): Promise<ReadResourceResult> {
     const caller = this.callerOf(principal);
@@ -889,12 +905,12 @@ export class Router {
     }
     ownerId ??= await this.templateOwner(uri);
     const server = ownerId ? this.registry.get(ownerId) : undefined;
-    if (!server) throw new McpError(ErrorCode.InvalidParams, `[switchboard] unknown resource '${uri}'`);
+    if (!server) throw new ProtocolError(ProtocolErrorCode.InvalidParams, `[switchboard] unknown resource '${uri}'`);
 
     await this.governRead(server, "resources/read", uri, caller);
     const start = Date.now();
     try {
-      const result = (await server.client.readResource({ uri })) as ReadResourceResult;
+      const result = stripUpstreamReservedMeta((await server.client.readResource({ uri })) as ReadResourceResult);
       rec({ server: server.id, tool: "resources/read", scope: "read", decision: "allow", reason: uri, duration_ms: Date.now() - start });
       return result;
     } catch (err) {
@@ -956,7 +972,7 @@ export class Router {
   /** Get a prompt by its exposed (namespaced) name, stripping the `serverId__` prefix before
    *  routing. A bare (un-prefixed) name is matched against the prompts each visible server LISTS and
    *  only the server that lists it is asked. Same gates as resources/read (see governRead); an
-   *  unresolved name throws McpError(InvalidParams), a refused one McpError(InvalidRequest). */
+   *  unresolved name throws ProtocolError(InvalidParams), a refused one ProtocolError(InvalidRequest). */
   async getPrompt(name: string, args?: Record<string, string>, principal?: Principal): Promise<GetPromptResult> {
     const caller = this.callerOf(principal);
     this.assertNotKilled("prompts/get", name, caller);
@@ -985,7 +1001,7 @@ export class Router {
       await this.governRead(server, "prompts/get", name, caller, { name, arguments: args ?? {} });
       return this.fetchPrompt(server, name, args, caller);
     }
-    throw new McpError(ErrorCode.InvalidParams, `[switchboard] unknown prompt '${name}'`);
+    throw new ProtocolError(ProtocolErrorCode.InvalidParams, `[switchboard] unknown prompt '${name}'`);
   }
 
   /** The upstream half of prompts/get: call it, audit the outcome, rethrow an upstream failure. */
@@ -993,10 +1009,10 @@ export class Router {
     const rec = (e: AuditInput): void => this.record(e, caller);
     const start = Date.now();
     try {
-      const result = (await server.client.getPrompt({
+      const result = stripUpstreamReservedMeta((await server.client.getPrompt({
         name: promptName,
         ...(args ? { arguments: args } : {}),
-      })) as GetPromptResult;
+      })) as GetPromptResult);
       rec({ server: server.id, tool: "prompts/get", scope: "read", decision: "allow", reason: promptName, duration_ms: Date.now() - start });
       return result;
     } catch (err) {
@@ -1020,7 +1036,7 @@ export class Router {
    * policy via evaluate() at READ scope (so a per-tool `enabled: false` on "resources/read" or
    * "prompts/get" and the profile ceiling apply), the governor (the same global, server and tool
    * buckets a tool call draws from), then the approval gate. Every refusal is audited and thrown as an
-   * McpError(InvalidRequest) with the SB_* code in `data.code`.
+   * ProtocolError(InvalidRequest) with the SB_* code in `data.code`.
    */
   private async governRead(server: MountedServer, tool: ReadSurface, detail: string, caller: Caller, bound: unknown = { detail }): Promise<void> {
     const gate = caller.gate;
@@ -1095,8 +1111,8 @@ export class Router {
   }
 
   /** A governed refusal on a result-or-error surface: the code travels in the message and in `data`. */
-  private refusal(code: SbErrorCode, message: string, extra?: Record<string, unknown>): McpError {
-    return new McpError(ErrorCode.InvalidRequest, `[switchboard] ${code}: ${message}`, { code, hint: SB_HINTS[code], ...extra });
+  private refusal(code: SbErrorCode, message: string, extra?: Record<string, unknown>): ProtocolError {
+    return new ProtocolError(ProtocolErrorCode.InvalidRequest, `[switchboard] ${code}: ${message}`, { code, hint: SB_HINTS[code], ...extra });
   }
 
   // ---------------------------------------------------------------------------------------------

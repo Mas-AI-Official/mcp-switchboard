@@ -18,8 +18,7 @@
 //                           failure returns an isError result and NEVER calls fetch (fail closed).
 // Zero deps (node stdlib + the package's own compiled output + its bundled MCP SDK). Build first.
 import { buildHttpToolServer } from "../dist/httptool.js";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { useFetchStubForTests } from "../dist/netguard.js";
 
 const checks = [];

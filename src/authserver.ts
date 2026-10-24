@@ -33,21 +33,21 @@ import type { Response } from "express";
 import type {
   OAuthServerProvider,
   AuthorizationParams,
-} from "@modelcontextprotocol/sdk/server/auth/provider.js";
-import type { OAuthRegisteredClientsStore } from "@modelcontextprotocol/sdk/server/auth/clients.js";
-import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
+  OAuthRegisteredClientsStore,
+} from "@modelcontextprotocol/server-legacy/auth";
 import type {
+  AuthInfo,
   OAuthTokens,
   OAuthClientInformationFull,
   OAuthTokenRevocationRequest,
-} from "@modelcontextprotocol/sdk/shared/auth.js";
+} from "@modelcontextprotocol/server";
 import {
   InvalidClientError,
   InvalidGrantError,
   InvalidScopeError,
   InvalidTargetError,
   InvalidTokenError,
-} from "@modelcontextprotocol/sdk/server/auth/errors.js";
+} from "@modelcontextprotocol/server-legacy/auth";
 import { readJsonFileSync, writeJsonAtomic } from "./atomicfile.js";
 import { HOME_DIR, loadVaultKey, seal, unseal, type SealedSecret } from "./vault.js";
 import { stripTrailingSlashes } from "./httpsec.js";

@@ -14,7 +14,7 @@
  * permissive upstream schema into a strict one that rejects calls the upstream would have accepted.
  */
 
-import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { Tool } from "@modelcontextprotocol/server";
 import { safeText } from "./safetext.js";
 import type { ResponseRedaction, SchemaModifier, ServerConfig, ToolOverride } from "./types.js";
 

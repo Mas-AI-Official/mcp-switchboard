@@ -8,14 +8,7 @@
 //   redact-router <n>     a hostile upstream answers one tools/call with an isError text of <n> bytes
 //                         (eyJa- repeated), once with capture_io off and once with it on
 // Prints one line: RESULT <json>. SWITCHBOARD_HOME must point at a throwaway directory (the parent sets it).
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import {
-  ListToolsRequestSchema,
-  CallToolRequestSchema,
-  ListResourcesRequestSchema,
-  ListResourceTemplatesRequestSchema,
-  ReadResourceRequestSchema,
-} from "@modelcontextprotocol/sdk/types.js";
+import { Server } from "@modelcontextprotocol/server";
 
 const [mode, nArg = "0"] = process.argv.slice(2);
 const n = Number(nArg);
@@ -33,16 +26,16 @@ const done = (obj) => {
 
 if (mode === "template-router") {
   const hostile = new Server({ name: "hostile", version: "0.0.0" }, { capabilities: { tools: {}, resources: {} } });
-  hostile.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [] }));
-  hostile.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: [] }));
-  hostile.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({ resourceTemplates: [{ uriTemplate: "mem://{a}{b}{c}{d}{e}{f}{g}x", name: "hostile" }] }));
-  hostile.setRequestHandler(ReadResourceRequestSchema, async (req) => ({ contents: [{ uri: req.params.uri, text: "hostile-read" }] }));
+  hostile.setRequestHandler("tools/list", async () => ({ tools: [] }));
+  hostile.setRequestHandler("resources/list", async () => ({ resources: [] }));
+  hostile.setRequestHandler("resources/templates/list", async () => ({ resourceTemplates: [{ uriTemplate: "mem://{a}{b}{c}{d}{e}{f}{g}x", name: "hostile" }] }));
+  hostile.setRequestHandler("resources/read", async (req) => ({ contents: [{ uri: req.params.uri, text: "hostile-read" }] }));
   // A second, honest upstream: a legitimate template must keep working beside the hostile one.
   const honest = new Server({ name: "honest", version: "0.0.0" }, { capabilities: { tools: {}, resources: {} } });
-  honest.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [] }));
-  honest.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: [] }));
-  honest.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({ resourceTemplates: [{ uriTemplate: "ok://doc/{id}", name: "ok" }] }));
-  honest.setRequestHandler(ReadResourceRequestSchema, async (req) => ({ contents: [{ uri: req.params.uri, text: "honest-read" }] }));
+  honest.setRequestHandler("tools/list", async () => ({ tools: [] }));
+  honest.setRequestHandler("resources/list", async () => ({ resources: [] }));
+  honest.setRequestHandler("resources/templates/list", async () => ({ resourceTemplates: [{ uriTemplate: "ok://doc/{id}", name: "ok" }] }));
+  honest.setRequestHandler("resources/read", async (req) => ({ contents: [{ uri: req.params.uri, text: "honest-read" }] }));
   const registry = new Registry(new Vault("env"));
   await registry.mountLocal({ id: "hostile", source: "local", enabled: true, policy: "full" }, hostile);
   await registry.mountLocal({ id: "honest", source: "local", enabled: true, policy: "full" }, honest);
@@ -63,8 +56,8 @@ if (mode === "template-router") {
 
 if (mode === "redact-router") {
   const hostile = new Server({ name: "hostile", version: "0.0.0" }, { capabilities: { tools: {} } });
-  hostile.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: "redos_error", description: "fails with a pathological error text", inputSchema: { type: "object", properties: {} } }] }));
-  hostile.setRequestHandler(CallToolRequestSchema, async () => ({ isError: true, content: [{ type: "text", text: "eyJa-".repeat(Math.floor(n / 5)) }] }));
+  hostile.setRequestHandler("tools/list", async () => ({ tools: [{ name: "redos_error", description: "fails with a pathological error text", inputSchema: { type: "object", properties: {} } }] }));
+  hostile.setRequestHandler("tools/call", async () => ({ isError: true, content: [{ type: "text", text: "eyJa-".repeat(Math.floor(n / 5)) }] }));
   const registry = new Registry(new Vault("env"));
   await registry.mountLocal({ id: "hostile", source: "local", enabled: true, policy: "full" }, hostile);
   const out = {};

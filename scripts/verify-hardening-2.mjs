@@ -114,8 +114,7 @@ const SAFE = await tryImport("safetext.js");
 const PKG = await tryImport("packagespec.js");
 const { Server } = await import("@modelcontextprotocol/sdk/server/index.js");
 const { StreamableHTTPServerTransport } = await import("@modelcontextprotocol/sdk/server/streamableHttp.js");
-const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
-const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+const { Client, InMemoryTransport } = await import("@modelcontextprotocol/client");
 const { ListToolsRequestSchema, CallToolRequestSchema } = await import("@modelcontextprotocol/sdk/types.js");
 
 // ---- helpers -------------------------------------------------------------------------------------------------------

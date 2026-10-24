@@ -18,7 +18,14 @@
 import { createHmac } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import express, { type Request, type Response } from "express";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import {
+  createMcpHandler,
+  isLegacyRequest,
+  WebStandardStreamableHTTPServerTransport,
+  type AuthInfo,
+  type McpHandlerRequestOptions,
+} from "@modelcontextprotocol/server";
+import { toNodeHandler } from "@modelcontextprotocol/node";
 import { mountMediaRoutes } from "./connectors/mediastage.js";
 import { AdminError, ConnectorAdmin, type ConnectBody } from "./connectors/admin.js";
 import { isConnectorError } from "./connectors/errors.js";
@@ -40,8 +47,7 @@ import { ClientConfigWatcher } from "./clientconfig.js";
 import { establishPrincipal, isValidClientId } from "./principal.js";
 import { loadCatalog, queryCatalog, type CatalogSnapshot, type Toolkit } from "./catalog.js";
 import { listTriggerTemplates } from "./trigger-templates.js";
-import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
-import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
+import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/server-legacy/auth";
 import { resolveOAuthServerOptions, SwitchboardAuthProvider, OAUTH_SCOPES_SUPPORTED } from "./authserver.js";
 import {
   DcrLimiter,
@@ -308,12 +314,16 @@ export function mountMcpEndpoint(app: express.Express, gateway: Gateway, opts: M
     const token = presentedToken(req);
     let apiKey: ReturnType<ApiKeyStore["authenticate"]> = null;
     let oauth: { clientId: string; clientName?: string } | null = null;
+    let authInfo: AuthInfo | undefined;
     if (token) {
       apiKey = opts.apiKeys.authenticate(token);
       if (!apiKey && opts.verifyOAuthToken) {
         // Never throws (the provider's verifyToken swallows errors -> null). The token is not echoed or logged.
         const info = await opts.verifyOAuthToken(token);
-        if (info) oauth = { clientId: info.clientId, clientName: opts.oauthClientName?.(info.clientId) };
+        if (info) {
+          authInfo = info;
+          oauth = { clientId: info.clientId, clientName: opts.oauthClientName?.(info.clientId) };
+        }
       }
     }
     const decision = establishPrincipal({
@@ -341,20 +351,53 @@ export function mountMcpEndpoint(app: express.Express, gateway: Gateway, opts: M
     // GET to attach a server-to-client stream to. The SDK would open an event stream anyway and hold the socket for
     // as long as the client likes: an unbounded resource per caller. The Streamable HTTP spec lets a server answer
     // 405 to say it offers no such stream. Authentication comes first, so an unauthenticated GET is still a 401.
-    if (req.method === "GET") {
+    if (req.method !== "POST") {
       res.set("Allow", "POST");
       res.status(405).json({ error: "method not allowed: this MCP endpoint is stateless and offers no event stream; POST JSON-RPC messages to /mcp" });
       return;
     }
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined,
-      ...(opts.enableJsonResponse ? { enableJsonResponse: true } : {}),
+    const json = opts.enableJsonResponse === true;
+    const modern = createMcpHandler(() => gateway.buildServer(principal), {
+      legacy: "reject",
+      onerror: (err) => log.warn(`/mcp request rejected: ${err.message}`),
+      ...(json ? { responseMode: "json" as const } : {}),
     });
-    res.on("close", () => void transport.close());
+    const legacy = async (request: globalThis.Request, handlerOpts?: McpHandlerRequestOptions): Promise<globalThis.Response> => {
+      const transport = new WebStandardStreamableHTTPServerTransport({
+        sessionIdGenerator: undefined,
+        ...(json ? { enableJsonResponse: true } : {}),
+      });
+      await gateway.buildServer(principal).connect(transport);
+      let response: globalThis.Response;
+      try {
+        response = await transport.handleRequest(request, {
+          parsedBody: handlerOpts?.parsedBody,
+          authInfo: handlerOpts?.authInfo,
+        });
+      } catch (err) {
+        void transport.close();
+        throw err;
+      }
+      if (json || !response.body) {
+        void transport.close();
+        return response;
+      }
+      const pass = new TransformStream<Uint8Array, Uint8Array>();
+      void response.body.pipeTo(pass.writable).catch(() => undefined).finally(() => void transport.close());
+      return new globalThis.Response(pass.readable, { status: response.status, headers: response.headers });
+    };
+    const node = toNodeHandler(
+      {
+        fetch: async (request, handlerOpts) =>
+          (await isLegacyRequest(request, handlerOpts?.parsedBody))
+            ? legacy(request, handlerOpts)
+            : modern.fetch(request, handlerOpts),
+      },
+      { onerror: (err) => log.error(`/mcp request failed: ${err.message}`) },
+    );
     try {
-      const server = gateway.buildServer(principal);
-      await server.connect(transport);
-      await transport.handleRequest(req, res, req.body);
+      (req as Request & { auth?: AuthInfo }).auth = authInfo;
+      await node(req, res, req.body);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log.error(`/mcp request failed: ${msg}`);

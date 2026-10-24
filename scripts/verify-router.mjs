@@ -45,13 +45,7 @@ delete process.env.SWITCHBOARD_AUTO_APPROVE;
 process.stdin.isTTY = false;
 process.stdout.isTTY = false;
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import {
-  ListToolsRequestSchema,
-  CallToolRequestSchema,
-  McpError,
-  ErrorCode,
-} from "@modelcontextprotocol/sdk/types.js";
+import { Server, ProtocolError, ProtocolErrorCode } from "@modelcontextprotocol/server";
 
 const { Registry } = await import("../dist/registry.js");
 const { Router } = await import("../dist/router.js");
@@ -74,10 +68,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // store -> "<server>:store:ok"             (write scope)  — drives injected-secret redaction
 function makeToolServer(serverName, toolNames) {
   const server = new Server({ name: serverName, version: "0.0.0" }, { capabilities: { tools: {} } });
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  server.setRequestHandler("tools/list", async () => ({
     tools: toolNames.map((t) => ({ name: t, inputSchema: { type: "object", properties: {} } })),
   }));
-  server.setRequestHandler(CallToolRequestSchema, async (req) => {
+  server.setRequestHandler("tools/call", async (req) => {
     const name = req.params.name;
     const a = req.params.arguments || {};
     switch (name) {
@@ -92,7 +86,7 @@ function makeToolServer(serverName, toolNames) {
       case "store":
         return { content: [{ type: "text", text: `${serverName}:store:ok` }] };
       default:
-        throw new McpError(ErrorCode.MethodNotFound, `no such tool ${name}`);
+        throw new ProtocolError(ProtocolErrorCode.MethodNotFound, `no such tool ${name}`);
     }
   });
   return server;

@@ -454,8 +454,8 @@ async function main() {
 
     // --- B6: a real MCP SDK client speaking stdio to the bridge ------------------------------------
     {
-      const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
-      const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
+      const { Client } = await import("@modelcontextprotocol/client");
+      const { StdioClientTransport } = await import("@modelcontextprotocol/client/stdio");
       const transport = new StdioClientTransport({
         command: process.execPath,
         args: [CLI, "bridge", "--client", "oracle-client", "--url", gwUrl],

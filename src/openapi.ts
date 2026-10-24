@@ -24,9 +24,8 @@
 import { readFileSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
+import { Server } from "@modelcontextprotocol/server";
+import type { CallToolResult, Tool } from "@modelcontextprotocol/server";
 import type { Scope, ServerConfig } from "./types.js";
 import { BULK_DOCUMENT_MAX_BYTES, BULK_DOCUMENT_TIMEOUT_MS, guardedFetch, type NetworkSource } from "./netguard.js";
 import { dotSegmentProblem, pathParamProblem } from "./pathparam.js";
@@ -533,8 +532,8 @@ export async function buildOpenApiServer(
     { capabilities: { tools: {} } },
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
-  server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToolResult> => {
+  server.setRequestHandler("tools/list", async () => ({ tools }));
+  server.setRequestHandler("tools/call", async (request): Promise<CallToolResult> => {
     const plan = plans.get(request.params.name);
     if (!plan) {
       return { content: [{ type: "text", text: `unknown tool '${request.params.name}'` }], isError: true };

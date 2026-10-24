@@ -10,8 +10,7 @@
 // Prompts go to stdout (as for a human); machine lines go to stderr:
 //   EARLY <json>      how many calls had already been refused before any input arrived
 //   RESULT <json>     the final outcome
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { Server } from "@modelcontextprotocol/server";
 
 process.stdin.isTTY = true;
 process.stdout.isTTY = true;
@@ -48,13 +47,13 @@ if (mode === "direct" || mode === "spoof") {
   const { Vault } = await import("../../dist/vault.js");
   const executed = [];
   const upstream = new Server({ name: "gated", version: "0.0.0" }, { capabilities: { tools: {} } });
-  upstream.setRequestHandler(ListToolsRequestSchema, async () => ({
+  upstream.setRequestHandler("tools/list", async () => ({
     tools: [
       { name: "send_note", description: "write", inputSchema: { type: "object", properties: { text: { type: "string" } } } },
       { name: "delete_thing", description: "destructive", inputSchema: { type: "object", properties: {} } },
     ],
   }));
-  upstream.setRequestHandler(CallToolRequestSchema, async (req) => {
+  upstream.setRequestHandler("tools/call", async (req) => {
     executed.push(`${req.params.name}:${JSON.stringify(req.params.arguments ?? {})}`);
     return { content: [{ type: "text", text: "done" }] };
   });
