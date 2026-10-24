@@ -442,7 +442,9 @@ export class Executor {
     if (!caps.ok) throw new ConnectorError(CONNECTOR_ERR.POLICY_DENY, `${action.slug} ${caps.reason}`, { hint: "raise the client's limits with `switchboard link <client> <toolkit> --max-scope ... --max-risk ...`" });
 
     // Files are read and hashed once, here. The approval binds to those hashes and the same bytes are sent.
-    const resolved = await this.resolveFiles(action, args, ctx);
+    // Nothing is published or made reachable before the approval: a public URL for a platform that fetches the
+    // media itself is made after it (stagePublicUrls), and only checked for here so a refusal still comes first.
+    const resolved = await this.resolveFiles(action, args);
     mark("approval");
     const needs = (d.needsApproval ?? ((a: Action) => a.approval === "always"))(action);
     if (needs) {
@@ -473,6 +475,7 @@ export class Executor {
 
     mark("build");
     const toolkitBase = this.baseUrlFor(tk, action, provider);
+    await this.stagePublicUrls(action, args, resolved, ctx);
     let result: { data: unknown; files: FileRef[]; status?: number };
     if (action.steps) {
       mark("files");
@@ -535,10 +538,16 @@ export class Executor {
     return action.files?.upload ?? [];
   }
 
-  /** Read every file input once (allowlist, sensitive paths, symlinks, size) and hash it. */
-  private async resolveFiles(action: Action, args: Record<string, unknown>, ctx: RunCtx): Promise<Map<string, ResolvedFile>> {
-    const out = new Map<string, ResolvedFile>();
+  /** The `x-file` flag of an upload parameter (a string schema, or an array whose items carry it). */
+  private fileFlag(action: Action, param: string): string | undefined {
     const props = (action.input_schema.properties ?? {}) as Record<string, unknown>;
+    const flag = props[param] as { "x-file"?: string; items?: { "x-file"?: string } } | undefined;
+    return flag?.["x-file"] ?? flag?.items?.["x-file"];
+  }
+
+  /** Read every file input once (allowlist, sensitive paths, symlinks, size) and hash it. Reads and hashes only. */
+  private async resolveFiles(action: Action, args: Record<string, unknown>): Promise<Map<string, ResolvedFile>> {
+    const out = new Map<string, ResolvedFile>();
     for (const param of this.fileParams(action)) {
       const raw = args[param];
       if (raw === undefined || raw === null) continue;
@@ -548,17 +557,33 @@ export class Executor {
         const maxBytes = action.http?.upload?.max_bytes;
         const file = await this.d.files.resolveUpload(ref, maxBytes ? Math.min(maxBytes, this.d.files.maxUpload()) : undefined);
         out.set(key, file);
-        // A platform that fetches the media itself gets an ephemeral public URL instead of the bytes.
-        const flag = (props[param] as { "x-file"?: string; items?: { "x-file"?: string } } | undefined);
-        if ((flag?.["x-file"] ?? flag?.items?.["x-file"]) === "public_url") {
-          const staged = await this.d.media.backend().publish({ bytes: file.bytes, name: file.name, mimeType: file.mimeType }, {});
-          ctx.cleanup.push(() => this.d.media.release(staged.id));
-          if (Array.isArray(raw)) (args[param] as unknown[])[i] = staged.url;
-          else args[param] = staged.url;
-        }
       }
+      // A refusal to publish (no tunnel, no listener) comes now, before anyone is asked to approve an action that cannot run.
+      if (refs.length > 0 && this.fileFlag(action, param) === "public_url") this.d.media.backend().check();
     }
     return out;
+  }
+
+  /**
+   * After the approval: a platform that fetches the media itself gets an ephemeral public URL instead of the bytes.
+   * Making the URL is an outward act (the file becomes fetchable from the internet), so it never happens before a
+   * human said yes. The approval is bound to the file's content hash, which `resolveFiles` computed from these bytes.
+   */
+  private async stagePublicUrls(action: Action, args: Record<string, unknown>, resolved: Map<string, ResolvedFile>, ctx: RunCtx): Promise<void> {
+    for (const param of this.fileParams(action)) {
+      if (this.fileFlag(action, param) !== "public_url") continue;
+      const raw = args[param];
+      if (raw === undefined || raw === null) continue;
+      const refs = Array.isArray(raw) ? raw : [raw];
+      for (const [i] of refs.entries()) {
+        const file = resolved.get(Array.isArray(raw) ? `${param}[${i}]` : param);
+        if (!file) continue;
+        const staged = await this.d.media.backend().publish({ bytes: file.bytes, name: file.name, mimeType: file.mimeType }, {});
+        ctx.cleanup.push(() => this.d.media.release(staged.id));
+        if (Array.isArray(raw)) (args[param] as unknown[])[i] = staged.url;
+        else args[param] = staged.url;
+      }
+    }
   }
 
   private hashableArgs(action: Action, args: Record<string, unknown>, resolved: Map<string, ResolvedFile>): unknown {

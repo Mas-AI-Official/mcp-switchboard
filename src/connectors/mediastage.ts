@@ -50,13 +50,21 @@ export interface MediaFile {
 /** The seam a bucket backed implementation plugs into. */
 export interface MediaBackend {
   readonly kind: "expose" | "s3";
+  /** Throws the same refusal `publish` would (not configured, no listener) without staging anything. */
+  check(): void;
   publish(file: MediaFile, opts?: { ttlSeconds?: number; maxFetches?: number }): Promise<StagedMedia>;
 }
 
 export class S3PresignBackend implements MediaBackend {
   readonly kind = "s3" as const;
+  check(): void {
+    throw this.refusal();
+  }
   async publish(): Promise<StagedMedia> {
-    throw new ConnectorError(
+    throw this.refusal();
+  }
+  private refusal(): ConnectorError {
+    return new ConnectorError(
       CONNECTOR_ERR.MEDIA_NOT_CONFIGURED,
       "the S3-compatible media backend is not implemented in this build: it refuses until a bucket, credentials and a presign step are configured",
       { hint: "use backend: expose with a tunnel (settings.connectors.media.public_base_url), or wait for the s3 backend" },
@@ -128,11 +136,16 @@ export class MediaStage implements MediaBackend {
     );
   }
 
-  async publish(file: MediaFile, o: { ttlSeconds?: number; maxFetches?: number } = {}): Promise<StagedMedia> {
-    const base = this.base();
+  check(): void {
+    this.base();
     if (!this.attached) {
       throw new ConnectorError(CONNECTOR_ERR.MEDIA_NOT_CONFIGURED, "no media listener is running in this process: start the gateway (`switchboard dashboard` or `serve`) so /media/<id> can be served", { hint: "media staging only works inside a running gateway" });
     }
+  }
+
+  async publish(file: MediaFile, o: { ttlSeconds?: number; maxFetches?: number } = {}): Promise<StagedMedia> {
+    this.check();
+    const base = this.base();
     this.sweep();
     const cfg = this.opts.settings()?.media;
     const ttl = Math.max(1, Math.min(MEDIA_MAX_TTL_S, Math.floor(o.ttlSeconds ?? cfg?.ttl_seconds ?? MEDIA_MAX_TTL_S)));

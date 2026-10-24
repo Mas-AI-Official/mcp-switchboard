@@ -664,6 +664,39 @@ decision.allow = true;
 assert("5. a refused approval sends nothing, not even the session request", !upDenied.ok && upDenied.error.code === "SB_APPROVAL_DENIED" && reqs() === nUp);
 const upBad = await run("minivid", "videos_insert", { part: ["snippet"], snippet: { title: "t" }, media_file: join(OUTSIDE, "secret.txt") });
 assert("5. a file refusal inside an action stops it at the approval stage with SB_FILE_REFUSED and sends nothing", !upBad.ok && upBad.error.code === "SB_FILE_REFUSED" && reqs() === nUp);
+// THE finding (agent-supplied UNC or file://host path): refused lexically, before approval and before any filesystem
+// call. A host never used before in this Windows session (a random unroutable 10.255.x.y) makes the old code block
+// the whole process for ~21 s inside realpathSync, so the timing is a real reproduction, not a mock.
+{
+  const rnd = () => 1 + Math.floor(Math.random() * 250);
+  const h1 = `10.255.${rnd()}.${rnd()}`;
+  const h2 = `10.255.${rnd()}.${rnd()}`;
+  let tick = Date.now();
+  let maxGapMs = 0;
+  const beat = setInterval(() => {
+    const n = Date.now();
+    maxGapMs = Math.max(maxGapMs, n - tick);
+    tick = n;
+  }, 5);
+  decision.allow = false;
+  const nApprovals = approvals.length;
+  const nReq = reqs();
+  const timed = [];
+  for (const ref of [`//${h1}/share/x.mp4`, `file://${h2}/share/x.mp4`]) {
+    tick = Date.now();
+    const t0 = Date.now();
+    const r = await run("minivid", "videos_insert", { part: ["snippet"], snippet: { title: "t" }, media_file: ref });
+    timed.push({ ref, r, ms: Date.now() - t0 });
+  }
+  await sleep(40);
+  clearInterval(beat);
+  decision.allow = true;
+  for (const { ref, r, ms } of timed) {
+    assert(`5. a network path as an upload argument (${ref.split(":")[0] === "file" ? "file://host" : "//host"}) is refused with SB_FILE_REFUSED before approval, in under 250 ms`, !r.ok && r.error.code === "SB_FILE_REFUSED" && !r.stages.includes("approval") && ms < 250, `${ms} ms, stages ${r.stages.join(">")}`);
+  }
+  assert("5. the approver was never asked, and nothing was sent, for a network path", approvals.length === nApprovals && reqs() === nReq);
+  assert("5. the gateway event loop never stalled while a network path was refused (max gap under 100 ms)", maxGapMs < 100, `max gap ${maxGapMs} ms`);
+}
 kit.configure({ needsApproval: undefined });
 const mp = await run("miniapi", "upload_item_file", { id: "i1", caption: "c", file: okFile });
 const mpSeen = hits((e) => e.path === "/v1/items/i1/files").at(-1);
@@ -795,6 +828,38 @@ writeFileSync(photoPath, IMG);
 mock.fetched.length = 0;
 const ph = await run("igish", "post_photo", { image: photoPath, caption: "hello" });
 assert("6. an Instagram shaped recipe: the platform fetched the staged URL once and got the file, then the URL was released", ph.ok && mock.fetched.length === 1 && mock.fetched[0].status === 200 && mock.fetched[0].sha === sha(IMG) && kit.media.count() === 0, ph.error?.message ?? JSON.stringify(mock.fetched[0]));
+
+// the ephemeral public URL is an outward act: it is made only AFTER the human approved, and a refusal makes none
+{
+  const gate = { stagedAtApproval: [], fetchedAtApproval: [], allow: true };
+  let publishes = 0;
+  const realPublish = kit.media.publish.bind(kit.media);
+  kit.media.publish = async (...a) => (publishes++, realPublish(...a));
+  const defaultNeeds = (a) => a.slug === "videos_insert" || a.approval === "always";
+  kit.configure({
+    needsApproval: (a) => a.slug === "post_photo" || defaultNeeds(a),
+    approve: async (req) => (approvals.push(req), gate.stagedAtApproval.push(kit.media.count()), gate.fetchedAtApproval.push(mock.fetched.length), gate.allow),
+  });
+  mock.fetched.length = 0;
+  const okRun = await run("igish", "post_photo", { image: photoPath, caption: "approved" });
+  assert("6. a public_url upload is approved BEFORE its URL exists: nothing was staged or fetched when the approver was asked", okRun.ok && gate.stagedAtApproval.at(-1) === 0 && gate.fetchedAtApproval.at(-1) === 0, `staged at approval ${gate.stagedAtApproval.at(-1)}, run ${okRun.error?.message ?? "ok"}`);
+  assert("6. after approval the platform still fetches the staged file once, with the approved bytes, and the URL is released", mock.fetched.length === 1 && mock.fetched[0].status === 200 && mock.fetched[0].sha === sha(IMG) && kit.media.count() === 0 && publishes === 1 && approvals.at(-1).files[0].sha256 === sha(IMG));
+  gate.allow = false;
+  publishes = 0;
+  mock.fetched.length = 0;
+  const reqMid = reqs();
+  const denied = await run("igish", "post_photo", { image: photoPath, caption: "refused" });
+  assert("6. a refused approval makes no public URL at all (the media stage was never asked to publish) and sends nothing", !denied.ok && denied.error.code === "SB_APPROVAL_DENIED" && publishes === 0 && mock.fetched.length === 0 && reqs() === reqMid && kit.media.count() === 0, `publish calls ${publishes}`);
+  gate.allow = true;
+  const approvalsBefore = approvals.length;
+  const savedMedia2 = SETTINGS.media;
+  SETTINGS.media = {};
+  const noMedia = await run("igish", "post_photo", { image: photoPath, caption: "no url" });
+  SETTINGS.media = savedMedia2;
+  assert("6. with no public URL configured the action is refused BEFORE the approval prompt (nobody is asked to approve what cannot run)", !noMedia.ok && noMedia.error.code === "SB_MEDIA_NOT_CONFIGURED" && approvals.length === approvalsBefore && !noMedia.stages.includes("approval"), `${noMedia.error?.code} stages ${noMedia.stages.join(">")}`);
+  delete kit.media.publish;
+  kit.configure({ needsApproval: defaultNeeds, approve: async (req) => (approvals.push(req), decision.allow) });
+}
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════
 // recipes

@@ -71,6 +71,8 @@ export interface FileRef {
 
 export const sha256Hex = (b: Uint8Array | string): string => createHash("sha256").update(b).digest("hex");
 
+const ALLOWLIST_HINT = "move the file into an allowlisted folder, or add its folder to settings.connectors.upload_allowlist";
+
 function refuse(message: string, hint?: string): ConnectorError {
   return new ConnectorError(CONNECTOR_ERR.FILE_REFUSED, message, hint ? { hint } : {});
 }
@@ -82,6 +84,36 @@ export function isInside(outer: string, inner: string): boolean {
   const b = ci ? inner.toLowerCase() : inner;
   const rel = relative(a, b);
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+/** Windows reserved device names (CON, NUL, COM1 ...), with or without an extension. Refused in an agent-supplied path. */
+const WIN_DEVICE = /^(con|prn|aux|nul|conin\$|conout\$|com[0-9\u00b9\u00b2\u00b3]|lpt[0-9\u00b9\u00b2\u00b3])([. ].*)?$/i;
+
+/** Characters Windows reserves in a name: stream syntax (`name:stream`), wildcards, quoting, control codes. */
+// eslint-disable-next-line no-control-regex
+const WIN_RESERVED_CHARS = /[<>:"|?*\u0000-\u001f]/;
+
+/**
+ * The lexical gate for an agent-supplied local path, applied BEFORE any filesystem call (the sync filesystem
+ * calls on a UNC path go to the network and block the whole gateway; on an existing share they also make the
+ * refusal an existence oracle and open an authenticated SMB session under the owner's identity). Returns the
+ * reason when the path is refused, `undefined` when its shape is acceptable. It never touches the disk.
+ *
+ * On Windows only `X:\folder\file` and `X:/folder/file` pass: no UNC (`\\host\share`, `//host/share`), no device
+ * namespace (`\\?\`, `\\.\`), no drive-relative or rooted-without-drive path, no device names (CON, NUL, COM1...),
+ * no stream or wildcard syntax. Elsewhere an absolute path is accepted and only an embedded NUL is refused.
+ * `platform` is a parameter so the oracle can prove both tables on any host.
+ */
+export function localPathRefusal(raw: string, platform: NodeJS.Platform = process.platform): string | undefined {
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000]/.test(raw)) return "it contains a NUL byte";
+  if (platform !== "win32") return undefined;
+  if (/^[\\/]{2}/.test(raw)) return "network (UNC) and device paths such as \\\\host\\share, \\\\?\\ and \\\\.\\ are never accepted";
+  if (!/^[A-Za-z]:[\\/]/.test(raw)) return "only a local path with a drive letter, such as C:/folder/file.ext, is accepted";
+  const rest = raw.slice(2);
+  if (WIN_RESERVED_CHARS.test(rest)) return "it contains a character Windows reserves (stream syntax, a wildcard or a control code)";
+  if (rest.split(/[\\/]+/).some((s) => WIN_DEVICE.test(s))) return "it names a Windows device (CON, NUL, COM1, LPT1 ...), not a file";
+  return undefined;
 }
 
 function segmentsOf(path: string): string[] {
@@ -137,8 +169,13 @@ export class FileService {
     if (/^file:\/\//i.test(ref)) {
       let p: string;
       try {
-        p = fileURLToPath(ref);
-      } catch {
+        const u = new URL(ref);
+        // A host in a file:// URL is a network share on Windows (file://host/share becomes \\host\share). Only the
+        // empty host, and `localhost` which the URL parser folds to empty, name a local file.
+        if (u.hostname !== "") throw refuse("a file:// URL that names a host is a network path and is never accepted", "use a local path such as file:///C:/folder/file.ext");
+        p = fileURLToPath(u);
+      } catch (err) {
+        if (err instanceof ConnectorError) throw err;
         throw refuse("the file:// URL could not be read as a path");
       }
       return this.readLocal(p, maxBytes);
@@ -150,13 +187,30 @@ export class FileService {
 
   private readLocal(path: string, maxBytes: number): ResolvedFile {
     if (!isAbsolute(path)) throw refuse(`'${path}' is not an absolute path`, "give the full path of the file");
+    // Everything up to the realpath below is LEXICAL: the path is agent-controlled, and a sync filesystem call on a
+    // network path (UNC, \\?\UNC, file://host) blocks the whole gateway and reaches the network before any refusal.
+    const shape = localPathRefusal(path);
+    if (shape) throw refuse(`that path is refused: ${shape}`, "give a local path with a drive letter, such as C:/folder/file.ext, inside a folder in settings.connectors.upload_allowlist");
     const allow = (this.opts.settings()?.upload_allowlist ?? []).filter((d) => typeof d === "string" && d.trim());
     const ownFiles = this.safeReal(this.filesRoot);
     if (allow.length === 0 && !ownFiles) {
       throw refuse("local file uploads are off: settings.connectors.upload_allowlist is empty", "list the folders agents may upload from, for example settings.connectors.upload_allowlist: [\"D:/Ideas/creative\"]");
     }
     const lexical = resolve(path);
+    // resolve() folds `..`, so the normalized form is checked again.
+    const folded = localPathRefusal(lexical);
+    if (folded) throw refuse(`that path is refused: ${folded}`, "give a local path with a drive letter, such as C:/folder/file.ext");
     this.checkSensitive(lexical, "path");
+    // A network folder in the owner's allowlist can never match (agent paths must be local), and resolving it would
+    // send a sync filesystem call to that host on every upload, so only local folders are used.
+    const allowRoots = allow.map((d) => resolve(d)).filter((r) => localPathRefusal(r) === undefined);
+    const ignored = allow.length - allowRoots.length;
+    const roots = [...allowRoots.map((r) => this.safeReal(r)), ownFiles].filter((r): r is string => Boolean(r));
+    // Outside every allowlisted folder, by name or by the folder's real path: refused here, with no filesystem call
+    // on the agent's path, so an outside path answers the same whether or not it exists (no existence oracle).
+    if (![...allowRoots, resolve(this.filesRoot), ...roots].some((r) => isInside(r, lexical))) {
+      throw refuse(`'${basename(lexical)}' is outside the upload allowlist${ignored > 0 ? ` (${ignored} allowlist entr${ignored === 1 ? "y is a network path and is ignored" : "ies are network paths and are ignored"}: only local drive-letter folders count)` : ""}`, ALLOWLIST_HINT);
+    }
     let real: string;
     try {
       real = realpathSync.native(lexical);
@@ -165,9 +219,8 @@ export class FileService {
     }
     // The real path is what counts: a link inside the allowlist that points outside is an escape.
     this.checkSensitive(real, "real path");
-    const roots = [...allow.map((d) => this.safeReal(resolve(d))), ownFiles].filter((r): r is string => Boolean(r));
     if (!roots.some((r) => isInside(r, real))) {
-      throw refuse(`'${basename(lexical)}' is outside the upload allowlist${real.toLowerCase() !== lexical.toLowerCase() ? " (it resolves through a link to somewhere else)" : ""}`, "move the file into an allowlisted folder, or add its folder to settings.connectors.upload_allowlist");
+      throw refuse(`'${basename(lexical)}' is outside the upload allowlist${real.toLowerCase() !== lexical.toLowerCase() ? " (it resolves through a link to somewhere else)" : ""}`, ALLOWLIST_HINT);
     }
     const home = this.safeReal(this.opts.home);
     if (home && isInside(home, real) && !(ownFiles && isInside(ownFiles, real))) throw refuse("files inside SWITCHBOARD_HOME (vault, tokens, audit) are never uploadable");
@@ -217,6 +270,10 @@ export class FileService {
   stagedPath(id: string): string {
     const m = id.match(/^([A-Za-z0-9_-]{3,64})\/([^/\\]{1,160})$/);
     if (!m || m[2] === "." || m[2] === ".." || m[2]!.includes("\0")) throw refuse(`'staged:${id}' is not a staged file id (expected staged:<run_id>/<name>)`);
+    // safeName() never lets a stream, wildcard or control character into a saved name, so on Windows one here is a
+    // probe (`name:stream`), not a file this gateway saved. Device names are NOT refused here: a download may be
+    // legitimately called `aux.pdf`, and Node writes it as an ordinary file.
+    if (process.platform === "win32" && WIN_RESERVED_CHARS.test(m[2]!)) throw refuse(`'staged:${id}' is not a staged file id (it uses stream or wildcard syntax)`);
     return join(this.filesRoot, m[1]!, m[2]!);
   }
 

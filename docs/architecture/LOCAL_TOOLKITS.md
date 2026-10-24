@@ -107,8 +107,8 @@ redaction, audit row (toolkit, version, account, client, risk; never a token).
 ## 6. Files and media
 
 Actions may declare `file: upload` and `file: download` parameters. An upload accepts a local path inside an
-allowlisted folder (resolved by real path, so a symlink escape is refused), an https URL (through the SSRF guard),
-or `staged:<id>`. Sensitive path segments (`.ssh`, `.aws`, `.env`, key and vault files, browser profiles) are never
+allowlisted folder (resolved by real path, so a symlink escape is refused; on Windows a drive-letter path only, never
+a UNC, device or `file://host` path), an https URL (through the SSRF guard), or `staged:<id>`. Sensitive path segments (`.ssh`, `.aws`, `.env`, key and vault files, browser profiles) are never
 uploadable whatever the allowlist says; every action has a size cap. A download is written under
 `SWITCHBOARD_HOME/files/<run_id>/` and returned as `{uri, bytes, sha256, mimeType}`, never inline.
 
