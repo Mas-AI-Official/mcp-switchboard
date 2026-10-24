@@ -464,7 +464,7 @@ toolkitsCmd
         `awesome-mcp taxonomy: ${enrichment.taxonomy_entries} categorized repos → ${enrichment.reclassified} registry servers reclassified`,
       );
     } else {
-      log.warn("awesome-mcp taxonomy unavailable — categories fell back to the keyword heuristic");
+      log.warn("awesome-mcp taxonomy unavailable: categories fell back to the keyword heuristic");
     }
     for (const e of errors) log.warn(`partial: ${e.source} failed — ${e.message}`);
   });
@@ -492,7 +492,7 @@ toolkitsCmd
   .option("-n, --limit <n>", "max results", "20")
   .action(async (query: string[], opts: { limit: string }) => {
     const q = query.join(" ");
-    out(`Searching awesome-mcp-servers live for "${q}" (discovery only — nothing is written)…`);
+    out(`Searching awesome-mcp-servers live for "${q}" (discovery only: nothing is written)…`);
     let results;
     try {
       results = await discoverToolkits(q, { limit: Number(opts.limit) || 20, network: networkFromConfig() });
@@ -505,7 +505,7 @@ toolkitsCmd
       out("no new servers found (all matches are already in the snapshot, or no match)");
       return;
     }
-    out(`\n${results.length} discovery result(s) — vet before mounting, none are auto-installed:`);
+    out(`\n${results.length} discovery result(s): vet before mounting, none are auto-installed:`);
     for (const r of results) {
       out(`  • ${safeText(r.name, 80)}  [${safeText(r.category, 40)}]`);
       out(`    ${safeText(r.repository, 200)}`);
@@ -520,10 +520,10 @@ toolkitsCmd
     const path = defaultCatalogPath();
     const c = loadCatalog(path);
     if (c.counts.total === 0) {
-      out("catalog is empty — run `switchboard toolkits sync` first");
+      out("catalog is empty: run `switchboard toolkits sync` first");
       return;
     }
-    out("Fetching the awesome-mcp-servers category taxonomy (categories only — no server lists)…");
+    out("Fetching the awesome-mcp-servers category taxonomy (categories only: no server lists)…");
     let taxonomy: Map<string, string>;
     try {
       taxonomy = await fetchAwesomeTaxonomy(networkFromConfig());
@@ -533,7 +533,7 @@ toolkitsCmd
       return;
     }
     if (taxonomy.size === 0) {
-      log.error("taxonomy fetch returned no categories — catalog left unchanged");
+      log.error("taxonomy fetch returned no categories: catalog left unchanged");
       process.exitCode = 1;
       return;
     }
@@ -1156,23 +1156,36 @@ apikeyCmd
   .command("new <name>")
   .description("issue a new API key — the token is shown once and stored only as a one-way hash")
   .option("--client <id>", "bind the key to a registered client (every key must be bound once clients are configured; prefer `switchboard client add`)")
-  .action((name: string, opts: { client?: string }) => {
+  .action(async (name: string, opts: { client?: string }) => {
     if (opts.client !== undefined) {
       if (!isValidClientId(opts.client)) {
         log.error(BAD_CLIENT_ID);
         process.exitCode = 1;
         return;
       }
-      let known = false;
+      let cfg: SwitchboardConfig;
       try {
-        known = Object.prototype.hasOwnProperty.call(loadConfig(configPath()).clients ?? {}, opts.client);
+        cfg = loadConfig(configPath());
       } catch (err) {
         log.error(err instanceof Error ? err.message : String(err));
         process.exitCode = 1;
         return;
       }
-      if (!known) {
+      if (!Object.prototype.hasOwnProperty.call(cfg.clients ?? {}, opts.client)) {
         log.error(`client '${opts.client}' is not configured: run \`switchboard client add ${opts.client}\` first`);
+        process.exitCode = 1;
+        return;
+      }
+      // A key bound to a client is a grant of access. A running gateway grants only after its own presence check
+      // (design 3.15), so this path, which has none, refuses while one answers.
+      let running = true;
+      try {
+        running = (await runningGateway(cfg)) !== null;
+      } catch {
+        running = true;
+      }
+      if (running) {
+        log.error(`a running gateway issues client keys only after it checks you are present: run \`switchboard client rotate ${opts.client} --print\``);
         process.exitCode = 1;
         return;
       }

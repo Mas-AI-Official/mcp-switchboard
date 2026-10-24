@@ -194,7 +194,7 @@ export class FileService {
     const allow = (this.opts.settings()?.upload_allowlist ?? []).filter((d) => typeof d === "string" && d.trim());
     const ownFiles = this.safeReal(this.filesRoot);
     if (allow.length === 0 && !ownFiles) {
-      throw refuse("local file uploads are off: settings.connectors.upload_allowlist is empty", "list the folders agents may upload from, for example settings.connectors.upload_allowlist: [\"D:/Ideas/creative\"]");
+      throw refuse("local file uploads are off: settings.connectors.upload_allowlist is empty", "list the folders agents may upload from, for example settings.connectors.upload_allowlist: [\"D:/Media/uploads\"]");
     }
     const lexical = resolve(path);
     // resolve() folds `..`, so the normalized form is checked again.

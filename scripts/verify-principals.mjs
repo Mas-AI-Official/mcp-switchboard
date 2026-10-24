@@ -983,9 +983,12 @@ clients:
       assert("C: and none of them changed the config file or created a key", readFileSync(cfgPathC, "utf8") === snap && !existsSync(CK.clientKeyPath("okid")));
       const ak1 = await cli(["apikey", "new", "bound-key", "--client", "nosuch"]);
       assert("C: `apikey new --client` refuses an unconfigured client", ak1.code === 1 && /not configured/.test(ak1.stderr));
+      // Adapted (design 3.15): a key bound to a client is a grant. While a gateway runs, grants pass its presence check, so
+      // `apikey new --client` (no presence) refuses and names the presence-gated route; it mints nothing and prompts nobody.
+      const keysBefore = (await cli(["apikey", "list"])).stdout;
+      const promptsBeforeAk = presencePrompts.length;
       const ak2 = await cli(["apikey", "new", "bound-key", "--client", "coder"]);
-      const akTok = ak2.stdout.match(/sb_[A-Za-z0-9_-]{30,}/)?.[0];
-      assert("C: `apikey new --client coder` issues a key bound to it (and `apikey list` shows the client)", ak2.code === 0 && !!akTok && (await mcp(portC, akTok, "tools/list")).status === 200 && /client coder/.test((await cli(["apikey", "list"])).stdout));
+      assert("C: with a gateway running, `apikey new --client coder` refuses, names `client rotate`, mints no key and asks no presence", ak2.code === 1 && /client rotate coder/.test(ak2.stderr) && !/sb_[A-Za-z0-9_-]{30,}/.test(ak2.stdout) && (await cli(["apikey", "list"])).stdout === keysBefore && presencePrompts.length === promptsBeforeAk, ak2.stderr.slice(0, 160));
 
       // --- purge returns the gateway to legacy mode ---
       const rm2 = await cli(["client", "rm", "coder", "--purge"]);
@@ -1002,7 +1005,7 @@ clients:
       assert("C: the CLI grants (add, rotate) are audited as owner:cli and the removals as local:cli, naming the client", grantsOk && removes.length >= 1 && removes.every((r) => r.principal === "local:cli"), cliRows.map((r) => `${r.tool}:${r.principal}`).join(","));
       assert("C: the gateway asked its own presence check for the grants, with the client named in the prompt", presencePrompts.some((m) => /Register client 'coder'/.test(m)) && presencePrompts.some((m) => /Change client 'coder'/.test(m)) && presencePrompts.some((m) => /Rotate the key of client 'coder'/.test(m)), presencePrompts.join(" | ").slice(0, 300));
       const rawLog = readdirSync(SBHOME).filter((n) => n.startsWith("audit.log")).map((n) => readFileSync(join(SBHOME, n), "utf8")).join("\n");
-      assert("C: no client token ever reached the audit log (checked in the raw file)", ![t1, t2, t3, akTok].some((t) => rawLog.includes(t)) && rawLog.length > 1000);
+      assert("C: no client token ever reached the audit log (checked in the raw file)", ![t1, t2, t3].some((t) => rawLog.includes(t)) && rawLog.length > 1000);
       assert("C: the audit chain verifies after rows from the gateway and the CLI", verifyAudit().ok === true);
     }
     await retire(dashC, gwC);

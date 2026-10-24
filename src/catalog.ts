@@ -77,7 +77,7 @@ export interface CatalogSnapshot {
 
 const MCP_REGISTRY_URL = "https://registry.modelcontextprotocol.io/v0/servers?limit=100";
 const APIS_GURU_URL = "https://api.apis.guru/v2/list.json";
-// awesome-mcp-servers (MIT) — used ONLY as a category-taxonomy source and for LIVE discovery,
+// awesome-mcp-servers (MIT): used ONLY as a category-taxonomy source and for LIVE discovery,
 // never bulk-snapshotted. See docs/COMPOSIO-PARITY.md ("parse awesome-mcp-servers headings";
 // "enrichment registries = discovery only, never snapshot").
 const AWESOME_MCP_README_URL =
@@ -186,7 +186,7 @@ function isLatestRow(row: RegistryRow): boolean | undefined {
 /**
  * Turn a registry server into a Toolkit, or null if it has no mountable transport. When a `taxonomy`
  * (repo→category, from awesome-mcp-servers) is supplied and this server's repo is in it, that curated
- * category wins over the keyword heuristic — this is what drains the generic "MCP Servers" catch-all.
+ * category wins over the keyword heuristic: this is what drains the generic "MCP Servers" catch-all.
  */
 function toolkitFromRegistry(srv: RegistryServer, taxonomy?: Map<string, string>): Toolkit | null {
   const rawName = (srv.name ?? "").trim();
@@ -309,17 +309,17 @@ async function ingestApisGuru(network?: NetworkSource): Promise<Toolkit[]> {
   return out;
 }
 
-// --- Adapter C: awesome-mcp-servers (MIT) — TAXONOMY + LIVE DISCOVERY ONLY ---
+// --- Adapter C: awesome-mcp-servers (MIT): TAXONOMY + LIVE DISCOVERY ONLY ---
 //
 // Design boundary (docs/COMPOSIO-PARITY.md): awesome-mcp-servers is NOT a bulk-snapshot source
-// (only CC0 sources — MCP Registry + apis.guru — are copied into data/catalog.json). We use it two
+// (only CC0 sources, MCP Registry + apis.guru, are copied into data/catalog.json). We use it two
 // ways, both allowed: (1) its curated category HEADINGS become a taxonomy we apply to servers we
-// ALREADY hold from CC0 sources, keyed by GitHub repo — a category NAME is a non-copyrightable fact;
+// ALREADY hold from CC0 sources, keyed by GitHub repo: a category NAME is a non-copyrightable fact;
 // (2) live `discoverToolkits` surfaces servers NOT in our snapshot at query time, never persisted.
 // Attribution: category taxonomy © the awesome-mcp-servers contributors (MIT).
 
 /**
- * Reduce any GitHub URL to its canonical `github.com/owner/repo` join key — lowercased, no
+ * Reduce any GitHub URL to its canonical `github.com/owner/repo` join key: lowercased, no
  * protocol / `www.` / `git+` prefix / `.git` suffix / trailing path, first two segments only.
  * Returns null for non-GitHub or unparseable URLs. This is the key that joins our CC0 registry
  * entries (which carry `repository.url`) to awesome-mcp-servers' human-curated category headings.
@@ -385,7 +385,7 @@ function awesomeDescription(line: string): string {
 
 /**
  * Parse awesome-mcp-servers' README (MIT) into (category, repo, name, description) records. ONLY the
- * `## Server Implementations` section is walked — its `### <emoji?> <a name>Category` headings are the
+ * `## Server Implementations` section is walked: its `### <emoji?> <a name>Category` headings are the
  * taxonomy, and each `- [text](url) … - desc` bullet is one server. Pure and offline (feed it the
  * markdown string). The first GitHub link on a bullet is the repo; inline doc links (after the
  * description dash) and glama score badges are ignored.
@@ -438,7 +438,7 @@ async function fetchText(url: string, network?: NetworkSource): Promise<string> 
 
 /**
  * Live, best-effort fetch of awesome-mcp-servers' category taxonomy. Returns a repo→category map,
- * or an EMPTY map on any failure — category enrichment must never break or fail a catalog sync.
+ * or an EMPTY map on any failure: category enrichment must never break or fail a catalog sync.
  */
 export async function fetchAwesomeTaxonomy(network?: NetworkSource): Promise<Map<string, string>> {
   try {
@@ -451,7 +451,7 @@ export async function fetchAwesomeTaxonomy(network?: NetworkSource): Promise<Map
 /**
  * A live discovery hit from awesome-mcp-servers. DELIBERATELY not a `Toolkit`: it has no `slug`,
  * `mount`, or snapshot `origin`, so it can never be persisted into data/catalog.json nor mounted
- * blindly. Discovery is "query live, don't snapshot" — surfaced at query time, never written.
+ * blindly. Discovery is "query live, don't snapshot": surfaced at query time, never written.
  */
 export interface DiscoveryResult {
   name: string;
@@ -464,7 +464,7 @@ export interface DiscoveryResult {
 }
 
 const DISCOVERY_NOTE =
-  "discovery-only (awesome-mcp-servers, MIT) — not in the CC0 snapshot; vet before mounting";
+  "discovery-only (awesome-mcp-servers, MIT): not in the CC0 snapshot; vet before mounting";
 
 /** Pure discovery: filter awesome-mcp entries by query terms, excluding repos we already hold. */
 export function searchAwesomeServers(
@@ -498,7 +498,7 @@ export function searchAwesomeServers(
 
 /**
  * Live discovery lookup: search awesome-mcp-servers for MCP servers matching `query` that are NOT
- * already in our CC0 snapshot. Fetches live and returns transient results — nothing is written to
+ * already in our CC0 snapshot. Fetches live and returns transient results: nothing is written to
  * disk (honors the catalog boundary: enrichment registries are discovery-only, never snapshotted).
  */
 export async function discoverToolkits(
@@ -604,10 +604,10 @@ export async function ingestCatalogVerbose(network?: NetworkSource): Promise<{
 /**
  * Re-apply the awesome-mcp category taxonomy to an ALREADY-LOADED snapshot, in place, WITHOUT a full
  * registry re-fetch. For every `mcp-registry` toolkit whose GitHub repo is in the taxonomy, its primary
- * `category` is overridden with the curated one — identical semantics to `toolkitFromRegistry`'s
+ * `category` is overridden with the curated one: identical semantics to `toolkitFromRegistry`'s
  * `curatedCategory || deriveMcpCategory`, just applied post-hoc so `toolkits recategorize` can enrich
  * the shipped catalog cheaply (small reviewable diff, no network re-snapshot). apis-guru entries are
- * NEVER touched (origin-scoped) — they carry their own provider-domain categories. The histogram is
+ * NEVER touched (origin-scoped): they carry their own provider-domain categories. The histogram is
  * recomputed so the count==content invariant still holds. Empty taxonomy is a no-op (never wipes
  * categories). Mutates `snapshot`; returns how many entries matched a taxonomy repo and how many
  * actually changed category.

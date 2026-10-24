@@ -9,7 +9,7 @@
  * `switchboard link|unlink|links` live in cli.ts: they edit the gateway's `clients:` section through ClientAdmin
  * (planning in link.ts), because there is one access-control source and it is that section.
  *
- *   switchboard coverage [toolkit] [--json] [--import [dir]] [--mark <row> --state <state> --account <ca_>]
+ *   switchboard coverage [toolkit] [--json] [--import <dir>] [--mark <row> --state <state> --account <ca_>]
  *
  * `toolkits sync` with no argument is the older command that rebuilds the browse catalog; it is untouched.
  */
@@ -22,7 +22,7 @@ import { log, out } from "../logger.js";
 import type { NetworkSettings } from "../netguard.js";
 import type { SwitchboardConfig } from "../types.js";
 import { Connectors } from "./index.js";
-import { DEFAULT_CHECKLIST_DIR, formatReport } from "./coverage.js";
+import { formatReport } from "./coverage.js";
 import { VERIFICATION_STATES, type VerificationState } from "./toolkits.js";
 import { syncToolkits, type SyncOutcome } from "./sync.js";
 import { toolkitEnableProblem } from "./admin.js";
@@ -186,16 +186,16 @@ export function registerKitCommands(program: Command, toolkitsCmd: Command, h: K
     .command("coverage [toolkit]")
     .description("honest counts: only rows proven live by an owner-run probe are 'working'")
     .option("--json", "print the report as JSON")
-    .option("--import [dir]", `import the R1 checklist CSVs (default ${DEFAULT_CHECKLIST_DIR}) as the local row snapshot`)
+    .option("--import <dir>", "import the R1 checklist CSVs in <dir> as the local row snapshot")
     .option("--mark <row>", "append a state line for one checklist row (with --state)")
     .option("--state <state>", `with --mark: ${VERIFICATION_STATES.join(", ")}`)
     .option("--account <ca>", "with --mark live_verified: the connected account that proved it")
     .option("--note <text>", "with --mark: a short note")
-    .action((toolkit: string | undefined, opts: { json?: boolean; import?: string | boolean; mark?: string; state?: string; account?: string; note?: string }) => {
+    .action((toolkit: string | undefined, opts: { json?: boolean; import?: string; mark?: string; state?: string; account?: string; note?: string }) => {
       try {
         const cov = build(h).kit.coverage;
         if (opts.import !== undefined) {
-          const dir = typeof opts.import === "string" ? opts.import : DEFAULT_CHECKLIST_DIR;
+          const dir = opts.import;
           const r = cov.importCsv(dir);
           for (const p of r.problems) log.warn(p);
           log.ok(`imported ${r.rows} rows from ${r.files} checklist(s) in ${dir}; ${r.deprecated} deprecated`);
@@ -209,7 +209,7 @@ export function registerKitCommands(program: Command, toolkitsCmd: Command, h: K
           return;
         }
         if (cov.rows().length === 0) {
-          out("no checklist rows imported yet: run `switchboard coverage --import` first");
+          out("no checklist rows imported yet: run `switchboard coverage --import <dir>` first");
           process.exitCode = 1;
           return;
         }

@@ -90,7 +90,7 @@ settings:
 
   # Toolkit file handling and media staging (connectors; see docs/architecture/CONNECTORS.md).
   # connectors:
-  #   upload_allowlist: ["D:/Ideas/creative"]   # local drive-letter folders an action may upload from (empty = no local path; network folders are ignored)
+  #   upload_allowlist: ["D:/Media/uploads"]     # local drive-letter folders an action may upload from (empty = no local path; network folders are ignored)
   #   max_upload_bytes: 268435456
   #   media:                                     # for platforms that fetch media themselves (Instagram, TikTok)
   #     public_base_url: https://your-tunnel.example   # from `switchboard expose --tunnel cloudflared`

@@ -178,7 +178,7 @@ const snap = {
 }
 
 // ==================================================================================================
-// awesome-mcp-servers adapter (Adapter C) — taxonomy + live discovery. These prove the ENRICHMENT
+// awesome-mcp-servers adapter (Adapter C): taxonomy + live discovery. These prove the ENRICHMENT
 // layer parses/joins correctly and, critically, that it can NEVER leak into the snapshot.
 // ==================================================================================================
 

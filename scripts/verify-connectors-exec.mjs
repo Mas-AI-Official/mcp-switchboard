@@ -1201,14 +1201,15 @@ cov.mark("GOOGLEDRIVE_GUESS", "blocked_by_platform", { note: "needs a paid tier"
 cov.mark("GOOGLEDRIVE_PARSE_FILE", "declined");
 assert("coverage: a deprecated row cannot be promoted; blocked_by_platform and declined are states of their own and not working", /deprecated/.test(depErr?.message ?? "") && stateOf("GOOGLEDRIVE_GUESS") === "blocked_by_platform" && stateOf("GOOGLEDRIVE_PARSE_FILE") === "declined" && cov.report().total.working === 1);
 assert("coverage: a toolkit filter accepts the R1 name or ours and the summary counts rows by our slug", cov.report("drive").total.rows === 3 && cov.report("googledrive").total.rows === 3 && cov.summary("drive").declined === 1);
-const R1_DIR = "D:/agents/wiki/reference/mcp-switchboard-rea/checklists";
-if (existsSync(R1_DIR)) {
+// Optional: point SWITCHBOARD_R1_CHECKLISTS at a local copy of the R1 checklist CSVs to reconcile the real rows.
+const R1_DIR = process.env.SWITCHBOARD_R1_CHECKLISTS ?? "";
+if (R1_DIR && existsSync(R1_DIR)) {
   const real1 = new Coverage(join(WORK, "cov-real"), () => clock.ms);
   const ri = real1.importCsv(R1_DIR);
   const rr = real1.report();
   assert("coverage: the real R1 checklists reconcile: 1,740 rows, 31 deprecated excluded by name, per-state counts sum to 1,740, nothing is working", ri.rows === 1740 && ri.deprecated === 31 && sumStates(rr.total) === 1740 && rr.deprecated_rows.length === 31 && rr.total.working === 0 && rr.total.addressable === 1709 && rr.toolkits.length === 12, `${ri.rows} rows, ${ri.deprecated} deprecated, ${rr.toolkits.length} toolkits, mapped ${rr.total.counts.mapped}, unmapped ${rr.total.counts.unmapped}`);
 } else {
-  note(`the real R1 checklists were not found at ${R1_DIR}: that reconciliation check was not run (not counted)`);
+  note(`the real R1 checklists were not found (set SWITCHBOARD_R1_CHECKLISTS${R1_DIR ? `, now ${R1_DIR}` : ""}): that reconciliation check was not run (not counted)`);
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════

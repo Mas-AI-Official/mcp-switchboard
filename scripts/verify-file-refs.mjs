@@ -237,7 +237,7 @@ for (const [p, label] of WIN_REFUSED) assert(`4. win32 refuses: ${label}`, typeo
 const WIN_ACCEPTED = [
   ["C:\\a\\b.txt", "drive path, backslashes"],
   ["c:/A/b c.mp4", "drive path, forward slashes, lower-case drive, space in name"],
-  ["D:\\Ideas\\creative\\x.mp4", "typical allowlisted path"],
+  ["D:\\Media\\uploads\\x.mp4", "typical allowlisted path"],
   ["C:\\a\\console.txt", "name that only starts like CON"],
   ["C:\\a\\nullable.txt", "name that only starts like NUL"],
   ["C:\\a\\com10.txt", "COM10 is not a reserved name"],

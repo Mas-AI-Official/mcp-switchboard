@@ -31,8 +31,6 @@ import { VERIFICATION_STATES, type VerificationState } from "./toolkits.js";
 /** R1 checklist toolkit name -> our toolkit slug, where they differ. */
 export const R1_TOOLKIT_SLUG: Record<string, string> = { googledrive: "drive", twitter: "x" };
 
-export const DEFAULT_CHECKLIST_DIR = "D:/agents/wiki/reference/mcp-switchboard-rea/checklists";
-
 export interface CoverageRow {
   /** The R1 toolkit name (`googledrive`). */
   toolkit: string;
