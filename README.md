@@ -11,7 +11,7 @@
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-2dd4bf.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/Model_Context_Protocol-1.29-2dd4bf.svg)](https://modelcontextprotocol.io)
-[![Node](https://img.shields.io/badge/node-%E2%89%A518.18-2dd4bf.svg)](https://nodejs.org)
+[![Node](https://img.shields.io/badge/node-%E2%89%A522.12-2dd4bf.svg)](https://nodejs.org)
 [![Verified](https://img.shields.io/badge/deterministic_oracles-1171_checks-2dd4bf.svg)](#everything-is-verified-by-a-deterministic-oracle)
 [![Status](https://img.shields.io/badge/status-working_alpha-D4A843.svg)](#project-status)
 [![Zero native deps](https://img.shields.io/badge/native_deps-0-D4A843.svg)](#security)
@@ -111,7 +111,7 @@ circuit breaker, all running on your own hardware.**
 
 ### Install from GitHub release tarball
 
-> One-time prerequisite: install **[Node 18.18+](https://nodejs.org)**.
+> One-time prerequisite: install **[Node 22.12+](https://nodejs.org)**.
 
 ```bash
 npm install -g https://github.com/Mas-AI-Official/mcp-switchboard/releases/download/v0.1.0/mcp-switchboard-0.1.0.tgz   # installs the `switchboard` command globally
@@ -143,7 +143,7 @@ client in one command with `switchboard install <client>` (see [below](#wire-it-
 
 ### Fastest start — one click (no terminal)
 
-> One-time prerequisite: install **[Node 18.18+](https://nodejs.org)**.
+> One-time prerequisite: install **[Node 22.12+](https://nodejs.org)**.
 
 1. Get the code — `git clone https://github.com/Mas-AI-Official/mcp-switchboard.git`, or **Code ▸ Download ZIP** on GitHub and unzip it.
 2. **Windows:** double-click **`start-switchboard.bat`**.
@@ -156,7 +156,7 @@ The launcher runs MCP Switchboard in **HTTP + dashboard** mode on `http://127.0.
 
 ### From source (manual)
 
-> Requires Node ≥ 18.18. Prefer this if you want to hack on MCP Switchboard or pin a specific commit.
+> Requires Node ≥ 22.12. Prefer this if you want to hack on MCP Switchboard or pin a specific commit.
 
 ```bash
 git clone https://github.com/Mas-AI-Official/mcp-switchboard.git

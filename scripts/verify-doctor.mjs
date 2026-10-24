@@ -46,7 +46,7 @@ const resolve = (v) => {
 };
 
 // ── 1. meetsNodeFloor — semver-lite, total, never throws ─────────────────────────────────────
-assert("NODE_FLOOR is 18.18.0", NODE_FLOOR === "18.18.0");
+assert("NODE_FLOOR is 22.12.0", NODE_FLOOR === "22.12.0");
 assert("equal version meets floor", meetsNodeFloor("18.18.0", "18.18.0") === true);
 assert("higher patch meets floor", meetsNodeFloor("18.18.1", "18.18.0") === true);
 assert("lower patch fails floor", meetsNodeFloor("18.18.0", "18.18.1") === false);
@@ -64,11 +64,11 @@ assert("garbage parses low, fails floor (no throw)", meetsNodeFloor("garbage", "
     { id: "weather", source: "npx", policy: "read", tools: { get_forecast: {} } },
     { id: "github", source: "remote", policy: "write", credentials: { token: "${oauth:github}" } },
   ]);
-  const r = buildDoctorReport({ cfg, resolve, oauthClientIds: new Set(["github"]), nodeVersion: "22.10.5" });
+  const r = buildDoctorReport({ cfg, resolve, oauthClientIds: new Set(["github"]), nodeVersion: "24.13.0" });
   assert("healthy: ok true", r.ok === true);
   assert("healthy: zero problems", r.problems.length === 0, JSON.stringify(r.problems));
   assert("healthy: node.ok true", r.node.ok === true);
-  assert("healthy: node version echoed", r.node.version === "22.10.5");
+  assert("healthy: node version echoed", r.node.version === "24.13.0");
   assert("healthy: endpoint composed from host:port", r.endpoint === "http://127.0.0.1:8787/mcp", r.endpoint);
   assert("healthy: vault backend echoed", r.vaultBackend === "file");
   assert("healthy: transports echoed", JSON.stringify(r.transports) === JSON.stringify(["http"]));
@@ -80,7 +80,7 @@ assert("garbage parses low, fails floor (no throw)", meetsNodeFloor("garbage", "
 // ── 3. unresolvable secret ref is surfaced, fail-closed ──────────────────────────────────────
 {
   const cfg = mkCfg([{ id: "db", source: "npx", policy: "read", env: { DSN: "${vault:MISSING}" } }]);
-  const r = buildDoctorReport({ cfg, resolve, nodeVersion: "22.10.5" });
+  const r = buildDoctorReport({ cfg, resolve, nodeVersion: "24.13.0" });
   assert("unresolved: ok false", r.ok === false);
   assert("unresolved: one finding on the server", r.servers[0].unresolved.length === 1, JSON.stringify(r.servers[0].unresolved));
   assert("unresolved: problem mentions the server id", r.problems.some((p) => p.includes("db")), JSON.stringify(r.problems));
@@ -93,13 +93,13 @@ assert("garbage parses low, fails floor (no throw)", meetsNodeFloor("garbage", "
     { id: "slackbot", source: "remote", policy: "write", credentials: { token: "${oauth:slack}" } },
     { id: "notiontool", source: "http-tool", policy: "read", inject_args: { auth: "${oauth:notion}" } },
   ]);
-  const withSet = buildDoctorReport({ cfg, resolve, oauthClientIds: new Set(["github"]), nodeVersion: "22.10.5" });
+  const withSet = buildDoctorReport({ cfg, resolve, oauthClientIds: new Set(["github"]), nodeVersion: "24.13.0" });
   assert("oauth: slack flagged (no client id)", withSet.servers[0].oauthUnconfigured.includes("slack"));
   assert("oauth: notion flagged from inject_args (3rd value map scanned)", withSet.servers[1].oauthUnconfigured.includes("notion"));
   assert("oauth: ok false when a provider is unconfigured", withSet.ok === false);
   assert("oauth: problem names the provider + remedy", withSet.problems.some((p) => p.includes("slack") && p.includes("connect")));
   // When no client-id set is supplied, the oauth check is skipped entirely (offline-safe).
-  const noSet = buildDoctorReport({ cfg, resolve, nodeVersion: "22.10.5" });
+  const noSet = buildDoctorReport({ cfg, resolve, nodeVersion: "24.13.0" });
   assert("oauth: skipped when no client-id set passed", noSet.servers.every((s) => s.oauthUnconfigured.length === 0));
   assert("oauth: ok true when the check is skipped and nothing else is wrong", noSet.ok === true);
 }
@@ -110,7 +110,7 @@ assert("garbage parses low, fails floor (no throw)", meetsNodeFloor("garbage", "
     { id: "tools", source: "npx", policy: "read" },
     { id: "tools", source: "remote", policy: "read" },
   ]);
-  const r = buildDoctorReport({ cfg, resolve, nodeVersion: "22.10.5" });
+  const r = buildDoctorReport({ cfg, resolve, nodeVersion: "24.13.0" });
   assert("dup: first occurrence not flagged", r.servers[0].duplicateId === false);
   assert("dup: second occurrence flagged", r.servers[1].duplicateId === true);
   assert("dup: ok false", r.ok === false);
@@ -123,7 +123,7 @@ assert("garbage parses low, fails floor (no throw)", meetsNodeFloor("garbage", "
     { id: "capped", source: "npx", policy: "read", tools: { push: { policy: "write" } } },
     { id: "open", source: "npx", policy: "full", tools: { push: { policy: "write" } } },
   ]);
-  const r = buildDoctorReport({ cfg, resolve, nodeVersion: "22.10.5" });
+  const r = buildDoctorReport({ cfg, resolve, nodeVersion: "24.13.0" });
   assert("trap: write tool denied under read ceiling", r.servers[0].policyTraps.length === 1, JSON.stringify(r.servers[0].policyTraps));
   assert("trap: reason names the tool and the cap", r.servers[0].policyTraps[0].reason.includes("push") && r.servers[0].policyTraps[0].reason.includes("read"));
   assert("trap: same tool fine under a full ceiling (no false positive)", r.servers[1].policyTraps.length === 0);
@@ -142,8 +142,8 @@ assert("garbage parses low, fails floor (no throw)", meetsNodeFloor("garbage", "
 
 // ── 8. the verdict can't drift from the detail ───────────────────────────────────────────────
 for (const [label, inputs] of [
-  ["clean", { cfg: mkCfg([{ id: "a", source: "npx", policy: "read" }]), resolve, nodeVersion: "22.10.5" }],
-  ["dirty", { cfg: mkCfg([{ id: "a", source: "npx", policy: "read", env: { K: "${vault:MISSING}" } }]), resolve, nodeVersion: "22.10.5" }],
+  ["clean", { cfg: mkCfg([{ id: "a", source: "npx", policy: "read" }]), resolve, nodeVersion: "24.13.0" }],
+  ["dirty", { cfg: mkCfg([{ id: "a", source: "npx", policy: "read", env: { K: "${vault:MISSING}" } }]), resolve, nodeVersion: "24.13.0" }],
 ]) {
   const r = buildDoctorReport(inputs);
   assert(`invariant: ok === (problems empty) [${label}]`, r.ok === (r.problems.length === 0), `ok=${r.ok} problems=${r.problems.length}`);

@@ -17,8 +17,8 @@ import type { ServerConfig, SwitchboardConfig, Scope } from "./types.js";
 import { evaluate } from "./policy.js";
 import { unpinnedPackageWarnings } from "./packagespec.js";
 
-/** Minimum Node that the runtime relies on (global `fetch`, stable ESM). Mirrors package.json `engines.node`. */
-export const NODE_FLOOR = "18.18.0";
+/** Minimum Node: the highest `engines.node` among the pinned dependencies (commander 15 needs 22.12). Mirrors package.json `engines.node`. */
+export const NODE_FLOOR = "22.12.0";
 
 /** `${oauth:provider}` reference — resolved by the OAuth store at call time, not the vault. */
 const OAUTH_REF = /\$\{oauth:([^}]+)\}/g;
