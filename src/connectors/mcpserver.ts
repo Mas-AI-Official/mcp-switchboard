@@ -34,9 +34,8 @@
  * only honours this field from a `connector` server).
  */
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
+import { Server } from "@modelcontextprotocol/server";
+import type { CallToolResult, Tool } from "@modelcontextprotocol/server";
 import type { Scope, ServerConfig } from "../types.js";
 import { CONNECTOR_ERR, ConnectorError } from "./errors.js";
 import type { ConnectorKit } from "./kit.js";
@@ -253,7 +252,7 @@ export async function buildConnectorServer(kit: ConnectorKit, config: ServerConf
 
   const server = new Server({ name: `switchboard-connector:${config.id}`, version: "0.1.0" }, { capabilities: { tools: {} } });
 
-  server.setRequestHandler(ListToolsRequestSchema, async (request) => {
+  server.setRequestHandler("tools/list", async (request) => {
     const caller = callerOf(request.params?._meta);
     if (caller.bad) return { tools: [] };
     const access = kit.access.check(caller.client, config.id);
@@ -266,7 +265,7 @@ export async function buildConnectorServer(kit: ConnectorKit, config: ServerConf
     };
   });
 
-  server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToolResult> => {
+  server.setRequestHandler("tools/call", async (request): Promise<CallToolResult> => {
     const name = request.params.name;
     const args = (request.params.arguments ?? {}) as Record<string, unknown>;
     const caller = callerOf(request.params._meta);

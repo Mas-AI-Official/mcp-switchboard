@@ -33,7 +33,7 @@
 
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult } from "@modelcontextprotocol/server";
 import type { Router } from "./router.js";
 import type { SwitchboardConfig, TriggerDefinition } from "./types.js";
 import { deliverTriggerWebhook, type SecretResolver, type TriggerWebhookEvent } from "./webhook.js";

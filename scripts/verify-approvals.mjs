@@ -88,8 +88,7 @@ const CKEY = await import(dist("controlkey.js"));
 const { isOsProtected } = await import(dist("oscrypt.js"));
 const { ownerSession } = await import("./lib/owner.mjs");
 const { SB_ERR, SB_HINTS } = await import(dist("errors.js"));
-const { Server } = await import("@modelcontextprotocol/sdk/server/index.js");
-const { ListToolsRequestSchema, CallToolRequestSchema, ListResourcesRequestSchema, ReadResourceRequestSchema } = await import("@modelcontextprotocol/sdk/types.js");
+const { Server } = await import("@modelcontextprotocol/server");
 
 // ---- independent reference for the canonical args hash (not the code under test) -----------------------------------
 const refCanon = (v) =>
@@ -209,14 +208,14 @@ function makeUpstream(id, { resources = false } = {}) {
   const caps = { tools: {}, ...(resources ? { resources: {} } : {}) };
   const server = new Server({ name: id, version: "0.0.0" }, { capabilities: caps });
   const tool = (name) => ({ name, description: name, inputSchema: { type: "object", properties: { text: { type: "string" }, token: { type: "string" } } } });
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: ["get_item", "send_note", "publish_post", "delete_thing"].map(tool) }));
-  server.setRequestHandler(CallToolRequestSchema, async (req) => {
+  server.setRequestHandler("tools/list", async () => ({ tools: ["get_item", "send_note", "publish_post", "delete_thing"].map(tool) }));
+  server.setRequestHandler("tools/call", async (req) => {
     executed.push({ name: req.params.name, args: req.params.arguments ?? {} });
     return { content: [{ type: "text", text: `done:${req.params.name}` }] };
   });
   if (resources) {
-    server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: [{ uri: "res://secret/1", name: "secret" }] }));
-    server.setRequestHandler(ReadResourceRequestSchema, async (req) => {
+    server.setRequestHandler("resources/list", async () => ({ resources: [{ uri: "res://secret/1", name: "secret" }] }));
+    server.setRequestHandler("resources/read", async (req) => {
       executed.push({ name: "resources/read", args: { uri: req.params.uri } });
       return { contents: [{ uri: req.params.uri, text: "SECRET-BODY" }] };
     });

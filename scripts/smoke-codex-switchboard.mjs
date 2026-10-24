@@ -20,8 +20,7 @@ process.env.SWITCHBOARD_HOME = mkdtempSync(join(tmpdir(), "sb-codex-smoke-"));
 const { createGateway } = await import("../dist/gateway.js");
 const { startDashboard } = await import("../dist/dashboard.js");
 const { recentAudit } = await import("../dist/audit.js");
-const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
-const { StreamableHTTPClientTransport } = await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
+const { Client, StreamableHTTPClientTransport } = await import("@modelcontextprotocol/client");
 
 const checks = [];
 const assert = (name, cond, detail = "") => {

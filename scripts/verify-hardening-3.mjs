@@ -75,8 +75,7 @@ const { SB_ERR } = await import(dist("errors.js"));
 const CKEY = await import(dist("controlkey.js"));
 const { ApiKeyStore } = await import(dist("apikeys.js"));
 const { ClientAdmin } = await import(dist("clientadmin.js"));
-const { Server } = await import("@modelcontextprotocol/sdk/server/index.js");
-const { ListToolsRequestSchema, CallToolRequestSchema } = await import("@modelcontextprotocol/sdk/types.js");
+const { Server } = await import("@modelcontextprotocol/server");
 const YAML = await import("yaml");
 
 // ---- helpers -------------------------------------------------------------------------------------------------------
@@ -164,10 +163,10 @@ async function callTool(port, token, name, args = {}) {
 function makeUpstream(id, names) {
   const executed = [];
   const server = new Server({ name: id, version: "0.0.0" }, { capabilities: { tools: {} } });
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  server.setRequestHandler("tools/list", async () => ({
     tools: names.map((n) => ({ name: n, description: n, inputSchema: { type: "object", properties: { text: { type: "string" }, recipient: { type: "string" } } } })),
   }));
-  server.setRequestHandler(CallToolRequestSchema, async (req) => {
+  server.setRequestHandler("tools/call", async (req) => {
     const entry = { name: req.params.name, args: req.params.arguments ?? {} };
     executed.push(entry);
     return { content: [{ type: "text", text: `done:${req.params.name}` }] };

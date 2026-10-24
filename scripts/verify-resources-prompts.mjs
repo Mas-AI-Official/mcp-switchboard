@@ -35,17 +35,7 @@ import { join } from "node:path";
 // (vault.ts reads SWITCHBOARD_HOME there), so this redirects every write away from the real ~/.switchboard.
 process.env.SWITCHBOARD_HOME = mkdtempSync(join(tmpdir(), "sb-respr-"));
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import {
-  ListToolsRequestSchema,
-  ListResourcesRequestSchema,
-  ListResourceTemplatesRequestSchema,
-  ReadResourceRequestSchema,
-  ListPromptsRequestSchema,
-  GetPromptRequestSchema,
-  McpError,
-  ErrorCode,
-} from "@modelcontextprotocol/sdk/types.js";
+import { Server, ProtocolError, ProtocolErrorCode } from "@modelcontextprotocol/server";
 
 const { Registry } = await import("../dist/registry.js");
 const { Router } = await import("../dist/router.js");
@@ -60,23 +50,23 @@ const assert = (name, cond, detail = "") => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** Did `fn()` throw an McpError carrying ErrorCode.InvalidParams? */
+/** Did `fn()` throw a ProtocolError carrying InvalidParams? */
 async function throwsInvalidParams(fn) {
   try {
     await fn();
     return false;
   } catch (err) {
-    return err instanceof McpError && err.code === ErrorCode.InvalidParams;
+    return ProtocolError.isInstance(err) && err.code === ProtocolErrorCode.InvalidParams;
   }
 }
 
-/** Did `fn()` throw an McpError refused by governance, carrying `data.code` === `code`? */
+/** Did `fn()` throw a ProtocolError refused by governance, carrying `data.code` === `code`? */
 async function throwsRefused(fn, code) {
   try {
     await fn();
     return false;
   } catch (err) {
-    return err instanceof McpError && err.data?.code === code;
+    return ProtocolError.isInstance(err) && err.data?.code === code;
   }
 }
 
@@ -84,30 +74,30 @@ async function throwsRefused(fn, code) {
 function makeUpstream({ caps, resources = [], templates = [], reads = {}, prompts = [] }) {
   const server = new Server({ name: "upstream", version: "0.0.0" }, { capabilities: caps });
   // mountLocal calls client.listTools(), so every upstream MUST answer tools/list (even if empty).
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [] }));
+  server.setRequestHandler("tools/list", async () => ({ tools: [] }));
 
   if (caps.resources) {
-    server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources }));
-    server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({ resourceTemplates: templates }));
-    server.setRequestHandler(ReadResourceRequestSchema, async (req) => {
+    server.setRequestHandler("resources/list", async () => ({ resources }));
+    server.setRequestHandler("resources/templates/list", async () => ({ resourceTemplates: templates }));
+    server.setRequestHandler("resources/read", async (req) => {
       const uri = req.params.uri;
       const text = reads[uri];
-      if (text === undefined) throw new McpError(ErrorCode.InvalidParams, `no such resource ${uri}`);
+      if (text === undefined) throw new ProtocolError(ProtocolErrorCode.InvalidParams, `no such resource ${uri}`);
       return { contents: [{ uri, mimeType: "text/plain", text }] };
     });
   }
 
   if (caps.prompts) {
-    server.setRequestHandler(ListPromptsRequestSchema, async () => ({
+    server.setRequestHandler("prompts/list", async () => ({
       prompts: prompts.map((p) => ({
         name: p.name,
         description: p.description,
         ...(p.arguments ? { arguments: p.arguments } : {}),
       })),
     }));
-    server.setRequestHandler(GetPromptRequestSchema, async (req) => {
+    server.setRequestHandler("prompts/get", async (req) => {
       const p = prompts.find((x) => x.name === req.params.name);
-      if (!p) throw new McpError(ErrorCode.InvalidParams, `no such prompt ${req.params.name}`);
+      if (!p) throw new ProtocolError(ProtocolErrorCode.InvalidParams, `no such prompt ${req.params.name}`);
       const text = p.render(req.params.arguments || {});
       return { description: p.description, messages: [{ role: "user", content: { type: "text", text } }] };
     });
@@ -265,7 +255,7 @@ try {
   let refused = false;
   try {
     const barren = new Server({ name: "barren", version: "0" }, { capabilities: { tools: {} } });
-    barren.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: [] }));
+    barren.setRequestHandler("resources/list", async () => ({ resources: [] }));
   } catch {
     refused = true;
   }

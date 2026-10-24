@@ -13,7 +13,7 @@
  * supported route for a secret is `credentials` with a `${vault:..}` reference).
  */
 
-import { getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { getDefaultEnvironment } from "@modelcontextprotocol/client/stdio";
 
 /** Windows variables a child needs beyond the SDK defaults (design 3.6, verbatim). */
 export const WINDOWS_ENV_ALLOWLIST: readonly string[] = [
@@ -24,6 +24,19 @@ export const WINDOWS_ENV_ALLOWLIST: readonly string[] = [
 
 /** POSIX counterpart: the SDK already covers HOME, LOGNAME, PATH, SHELL, TERM and USER. */
 export const POSIX_ENV_ALLOWLIST: readonly string[] = ["TMPDIR", "LANG", "LC_ALL", "NPM_CONFIG_CACHE", "NODE_EXTRA_CA_CERTS"];
+
+/**
+ * The names the SDK's default environment may contribute, pinned to the SDK 1.x lists the closed world was designed
+ * against. SDK 2.x widened its Windows defaults (PROGRAMW6432 among others); a dependency upgrade must not widen
+ * what a child sees, so anything the SDK returns outside these names is dropped.
+ */
+const SDK_DEFAULT_NAMES: Readonly<Record<"win32" | "posix", ReadonlySet<string>>> = {
+  win32: new Set([
+    "APPDATA", "HOMEDRIVE", "HOMEPATH", "LOCALAPPDATA", "PATH", "PROCESSOR_ARCHITECTURE", "SYSTEMDRIVE", "SYSTEMROOT",
+    "TEMP", "USERNAME", "USERPROFILE", "PROGRAMFILES",
+  ]),
+  posix: new Set(["HOME", "LOGNAME", "PATH", "SHELL", "TERM", "USER"]),
+};
 
 const SECRET_WORDS: ReadonlySet<string> = new Set([
   "key", "keys", "token", "tokens", "secret", "secrets", "password", "passwords", "passwd", "passphrase", "credential",
@@ -66,12 +79,26 @@ const forwardable = (v: string | undefined): v is string => typeof v === "string
  * Names are written in the allowlist's spelling; Windows looks them up case-insensitively.
  */
 export function baseChildEnv(platform: NodeJS.Platform = process.platform): Record<string, string> {
-  const env: Record<string, string> = { ...getDefaultEnvironment() };
+  const pinned = SDK_DEFAULT_NAMES[platform === "win32" ? "win32" : "posix"];
+  const env: Record<string, string> = {};
+  for (const [name, v] of Object.entries(getDefaultEnvironment())) if (pinned.has(name.toUpperCase())) env[name] = v;
   for (const name of platform === "win32" ? WINDOWS_ENV_ALLOWLIST : POSIX_ENV_ALLOWLIST) {
     const v = process.env[name];
     if (forwardable(v)) env[name] = v;
   }
   return env;
+}
+
+/**
+ * The SDK's stdio transport spreads its own default environment under the env it is given, so a default name left out
+ * of `env` would still reach the child. Each such name is masked with undefined (Node's spawn skips undefined values),
+ * so the child sees exactly `env`.
+ */
+export function exactChildEnv(env: Record<string, string>): Record<string, string> {
+  const have = new Set(Object.keys(env).map((k) => k.toUpperCase()));
+  const masked: Record<string, string | undefined> = { ...env };
+  for (const name of Object.keys(getDefaultEnvironment())) if (!have.has(name.toUpperCase())) masked[name] = undefined;
+  return masked as Record<string, string>;
 }
 
 /**

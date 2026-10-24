@@ -52,8 +52,7 @@ const { Registry } = await import("../dist/registry.js");
 const { Router } = await import("../dist/router.js");
 const { Vault } = await import("../dist/vault.js");
 const { starterConfig } = await import("../dist/config.js");
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { Server } from "@modelcontextprotocol/server";
 
 let n = 0;
 const freshHome = (label) => {
@@ -422,8 +421,8 @@ assert("every kind in the spec is covered: sk-/sk-proj-, AIza, ghp_/gho_/github_
   const SECRET_DEEP = "sk-proj-" + rep("Tt4Uu5Vv", 5);
   let upstreamCalls = 0;
   const upstream = new Server({ name: "alpha", version: "0.0.0" }, { capabilities: { tools: {} } });
-  upstream.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: "echo", inputSchema: { type: "object", properties: {} } }, { name: "get_echo", inputSchema: { type: "object", properties: {} } }] }));
-  upstream.setRequestHandler(CallToolRequestSchema, async (req) => {
+  upstream.setRequestHandler("tools/list", async () => ({ tools: [{ name: "echo", inputSchema: { type: "object", properties: {} } }, { name: "get_echo", inputSchema: { type: "object", properties: {} } }] }));
+  upstream.setRequestHandler("tools/call", async (req) => {
     upstreamCalls++;
     return { content: [{ type: "text", text: `echo:${req.params.arguments?.msg ?? ""} saw ${SECRET_OUT}` }] };
   });

@@ -12,18 +12,8 @@
  * enabled server, and exposes `buildServer()` for the transports to wire up.
  */
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-  ListResourcesRequestSchema,
-  ListResourceTemplatesRequestSchema,
-  ReadResourceRequestSchema,
-  ListPromptsRequestSchema,
-  GetPromptRequestSchema,
-  type CallToolResult,
-} from "@modelcontextprotocol/sdk/types.js";
+import { Server, type CallToolResult } from "@modelcontextprotocol/server";
+import { serveStdio as serveMcpStdio } from "@modelcontextprotocol/server/stdio";
 import type { ServerConfig, SwitchboardConfig } from "./types.js";
 import { Vault } from "./vault.js";
 import { OAuthStore } from "./oauth.js";
@@ -206,34 +196,34 @@ export class Gateway {
       { capabilities: { tools: {}, resources: {}, prompts: {} } },
     );
 
-    server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    server.setRequestHandler("tools/list", async () => ({
       tools: this.router.listTools(principal),
     }));
 
-    server.setRequestHandler(CallToolRequestSchema, async (req): Promise<CallToolResult> => {
+    server.setRequestHandler("tools/call", async (req): Promise<CallToolResult> => {
       const { name, arguments: args } = req.params;
       return this.router.callTool(name, args ?? {}, principal);
     });
 
     // Resources — opaque URIs, aggregated across upstreams and read back by URI (not namespaced).
-    server.setRequestHandler(ListResourcesRequestSchema, async () => ({
+    server.setRequestHandler("resources/list", async () => ({
       resources: await this.router.listResources(principal),
     }));
 
-    server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({
+    server.setRequestHandler("resources/templates/list", async () => ({
       resourceTemplates: await this.router.listResourceTemplates(principal),
     }));
 
-    server.setRequestHandler(ReadResourceRequestSchema, async (req) =>
+    server.setRequestHandler("resources/read", async (req) =>
       this.router.readResource(req.params.uri, principal),
     );
 
     // Prompts — namespaced `serverId__name`, aggregated across upstreams.
-    server.setRequestHandler(ListPromptsRequestSchema, async () => ({
+    server.setRequestHandler("prompts/list", async () => ({
       prompts: await this.router.listPrompts(principal),
     }));
 
-    server.setRequestHandler(GetPromptRequestSchema, async (req) =>
+    server.setRequestHandler("prompts/get", async (req) =>
       this.router.getPrompt(req.params.name, req.params.arguments, principal),
     );
 
@@ -246,8 +236,9 @@ export class Gateway {
     // stdin and stdout now carry JSON-RPC: no terminal prompt may use them, for the legacy gate or for a presence challenge.
     setStdioActive(true);
     this.approvals.setStdioActive(true);
-    const server = this.buildServer(principal);
-    await server.connect(new StdioServerTransport());
+    serveMcpStdio(() => this.buildServer(principal), {
+      onerror: (err) => log.error(`stdio request failed: ${err.message}`),
+    });
     log.ok(`stdio transport ready: ${this.router.listTools(principal).length} tools exposed${principal?.client ? ` to client '${principal.client}'` : ""}`);
   }
 

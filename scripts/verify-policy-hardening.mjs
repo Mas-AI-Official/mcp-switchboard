@@ -53,18 +53,7 @@ delete process.env.SWITCHBOARD_PROFILE;
 process.stdin.isTTY = false;
 process.stdout.isTTY = false;
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import {
-  ListToolsRequestSchema,
-  CallToolRequestSchema,
-  ListResourcesRequestSchema,
-  ListResourceTemplatesRequestSchema,
-  ReadResourceRequestSchema,
-  ListPromptsRequestSchema,
-  GetPromptRequestSchema,
-  McpError,
-  ErrorCode,
-} from "@modelcontextprotocol/sdk/types.js";
+import { Server, ProtocolError, ProtocolErrorCode } from "@modelcontextprotocol/server";
 
 const { inferScope, evaluate, resolveToolScope, tokenizeToolName } = await import("../dist/policy.js");
 const { Registry } = await import("../dist/registry.js");
@@ -106,16 +95,16 @@ const coded = (res) => {
     return null;
   }
 };
-/** Run fn(); return the thrown McpError (or null when it did not throw / threw something else). */
+/** Run fn(); return the thrown ProtocolError (or null when it did not throw / threw something else). */
 async function mcpError(fn) {
   try {
     await fn();
     return null;
   } catch (err) {
-    return err instanceof McpError ? err : null;
+    return ProtocolError.isInstance(err) ? err : null;
   }
 }
-const refusedWith = (err, code) => !!err && err.code === ErrorCode.InvalidRequest && err.data?.code === code && String(err.message).includes(code);
+const refusedWith = (err, code) => !!err && err.code === ProtocolErrorCode.InvalidRequest && err.data?.code === code && String(err.message).includes(code);
 
 const rows = (pred) => recentAudit(2000).filter(pred);
 
@@ -249,29 +238,29 @@ function makeUpstream({ tools = [], resources = [], templates = [], reads = {}, 
     { name: "upstream", version: "0.0.0" },
     { capabilities: caps ?? { tools: {}, ...(hasRes ? { resources: {} } : {}), ...(prompts.length ? { prompts: {} } : {}) } },
   );
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  server.setRequestHandler("tools/list", async () => ({
     tools: tools.map((t) => ({ name: t.name, description: t.name, inputSchema: { type: "object", properties: {} }, ...(t.annotations ? { annotations: t.annotations } : {}) })),
   }));
-  server.setRequestHandler(CallToolRequestSchema, async (req) => {
+  server.setRequestHandler("tools/call", async (req) => {
     spy.tools.push(req.params.name);
     return { content: [{ type: "text", text: `ran:${req.params.name}` }] };
   });
   if (hasRes) {
-    server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources }));
-    server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({ resourceTemplates: templates }));
-    server.setRequestHandler(ReadResourceRequestSchema, async (req) => {
+    server.setRequestHandler("resources/list", async () => ({ resources }));
+    server.setRequestHandler("resources/templates/list", async () => ({ resourceTemplates: templates }));
+    server.setRequestHandler("resources/read", async (req) => {
       spy.reads.push(req.params.uri);
       const text = reads[req.params.uri];
-      if (text === undefined) throw new McpError(ErrorCode.InvalidParams, `no such resource ${req.params.uri}`);
+      if (text === undefined) throw new ProtocolError(ProtocolErrorCode.InvalidParams, `no such resource ${req.params.uri}`);
       return { contents: [{ uri: req.params.uri, mimeType: "text/plain", text }] };
     });
   }
   if (prompts.length) {
-    server.setRequestHandler(ListPromptsRequestSchema, async () => ({ prompts: prompts.map((p) => ({ name: p.name, description: p.name })) }));
-    server.setRequestHandler(GetPromptRequestSchema, async (req) => {
+    server.setRequestHandler("prompts/list", async () => ({ prompts: prompts.map((p) => ({ name: p.name, description: p.name })) }));
+    server.setRequestHandler("prompts/get", async (req) => {
       spy.prompts.push(req.params.name);
       const p = prompts.find((x) => x.name === req.params.name);
-      if (!p) throw new McpError(ErrorCode.InvalidParams, `no such prompt ${req.params.name}`);
+      if (!p) throw new ProtocolError(ProtocolErrorCode.InvalidParams, `no such prompt ${req.params.name}`);
       return { messages: [{ role: "user", content: { type: "text", text: p.text } }] };
     });
   }
@@ -517,7 +506,7 @@ const KILL_PATH = join(SB_HOME, "KILL");
     assert("tools/call is refused with SB_KILL_SWITCH", t1.isError === true && c1?.code === SB_ERR.KILL_SWITCH && c1?.hint === SB_HINTS[SB_ERR.KILL_SWITCH], t1.content?.[0]?.text);
     assert("the error code is the literal string SB_KILL_SWITCH", SB_ERR.KILL_SWITCH === "SB_KILL_SWITCH");
     const e2 = await mcpError(() => router.readResource("kk://doc/1"));
-    assert("resources/read is refused with SB_KILL_SWITCH (McpError, data.code, message)", refusedWith(e2, "SB_KILL_SWITCH"), e2?.message);
+    assert("resources/read is refused with SB_KILL_SWITCH (ProtocolError, data.code, message)", refusedWith(e2, "SB_KILL_SWITCH"), e2?.message);
     const e3 = await mcpError(() => router.getPrompt("kk__hello"));
     assert("prompts/get is refused with SB_KILL_SWITCH", refusedWith(e3, "SB_KILL_SWITCH"), e3?.message);
     const e3b = await mcpError(() => router.getPrompt("hello"));
@@ -695,14 +684,14 @@ const KILL_PATH = join(SB_HOME, "KILL");
     await router.listResources();
     const r0 = reads();
     const eUnlisted = await mcpError(() => router.readResource("beta://gen/xyz"));
-    assert("an unlisted URI (served only by beta) is unknown: McpError InvalidParams", !!eUnlisted && eUnlisted.code === ErrorCode.InvalidParams, eUnlisted?.message);
+    assert("an unlisted URI (served only by beta) is unknown: ProtocolError InvalidParams", !!eUnlisted && eUnlisted.code === ProtocolErrorCode.InvalidParams, eUnlisted?.message);
     assert("...and NO upstream was asked for it (spies on alpha and beta)", reads() === r0 && !alpha.spy.reads.includes("beta://gen/xyz") && !beta.spy.reads.includes("beta://gen/xyz"), `${r0} -> ${reads()}`);
     assert("a template-expanded URI resolves to the server that declared the template", text(await router.readResource("alpha://doc/99")) === "ALPHA-99");
     assert("...and only that server was asked", alpha.spy.reads.includes("alpha://doc/99") && !beta.spy.reads.includes("alpha://doc/99"));
     const eNear = await mcpError(() => router.readResource("alpha://other/1"));
-    assert("a URI that does not fit the template is unknown and not broadcast", !!eNear && eNear.code === ErrorCode.InvalidParams && !alpha.spy.reads.includes("alpha://other/1") && !beta.spy.reads.includes("alpha://other/1"));
+    assert("a URI that does not fit the template is unknown and not broadcast", !!eNear && eNear.code === ProtocolErrorCode.InvalidParams && !alpha.spy.reads.includes("alpha://other/1") && !beta.spy.reads.includes("alpha://other/1"));
     const ePrompt = await mcpError(() => router.getPrompt("nonexistent"));
-    assert("an unlisted bare prompt name is unknown: McpError InvalidParams", !!ePrompt && ePrompt.code === ErrorCode.InvalidParams);
+    assert("an unlisted bare prompt name is unknown: ProtocolError InvalidParams", !!ePrompt && ePrompt.code === ProtocolErrorCode.InvalidParams);
 
     // ---- a disabled server (after it was listed) is refused ---------------------------------------------------
     await router.listResources();
@@ -717,7 +706,7 @@ const KILL_PATH = join(SB_HOME, "KILL");
     const disRows = rows((e) => e.server === "alpha" && e.decision === "deny" && e.error_code === "SB_POLICY_DENY");
     assert("...both refusals are audited as deny rows with SB_POLICY_DENY", disRows.some((e) => e.tool === "resources/read" && /disabled/.test(e.reason)) && disRows.some((e) => e.tool === "prompts/get" && /disabled/.test(e.reason)));
     const eBare = await mcpError(() => router.getPrompt("summarize"));
-    assert("a bare prompt name no longer resolves to a disabled server", !!eBare && eBare.code === ErrorCode.InvalidParams);
+    assert("a bare prompt name no longer resolves to a disabled server", !!eBare && eBare.code === ProtocolErrorCode.InvalidParams);
     alphaCfg.enabled = true;
     assert("re-enabled: both work again", text(await router.readResource("alpha://doc/1")) === "ALPHA-1" && pmsg(await router.getPrompt("alpha__summarize")) === "ALPHA-SUM");
 
@@ -831,7 +820,7 @@ const KILL_PATH = join(SB_HOME, "KILL");
     assert("every template read reached only the declaring server", other.spy.reads.length === 0 && tpl.spy.reads.length === Object.keys(reads).length);
     for (const uri of ["t1://items/7/8", "t1://items/", "t4://doc", "t3://files", "o://x/1/2", "t1://nothing"]) {
       const e = await mcpError(() => router.readResource(uri));
-      assert(`non-matching ${uri} is unknown (not broadcast)`, !!e && e.code === ErrorCode.InvalidParams);
+      assert(`non-matching ${uri} is unknown (not broadcast)`, !!e && e.code === ProtocolErrorCode.InvalidParams);
     }
     assert("an owner-declared template serves its own URI", text(await router.readResource("o://x/1")) === "O" && other.spy.reads.includes("o://x/1"));
     assert("...and the other server was not asked for the non-matching URIs", !other.spy.reads.some((u) => u.startsWith("t")) && !tpl.spy.reads.some((u) => u.includes("nothing") || u.endsWith("/8")));
@@ -839,9 +828,9 @@ const KILL_PATH = join(SB_HOME, "KILL");
     const t0 = Date.now();
     const eH = await mcpError(() => router.readResource(hostile));
     const ms = Date.now() - t0;
-    assert(`a hostile 4000-char URI against a {.ext} template is rejected quickly, no catastrophic backtracking (${ms} ms, limit 2000)`, !!eH && eH.code === ErrorCode.InvalidParams && ms < 2000, `${ms} ms`);
+    assert(`a hostile 4000-char URI against a {.ext} template is rejected quickly, no catastrophic backtracking (${ms} ms, limit 2000)`, !!eH && eH.code === ProtocolErrorCode.InvalidParams && ms < 2000, `${ms} ms`);
     const eL = await mcpError(() => router.readResource("t2://" + "a".repeat(9000)));
-    assert("a URI over 8192 characters is never matched against a template", !!eL && eL.code === ErrorCode.InvalidParams && !tpl.spy.reads.some((u) => u.length > 8000));
+    assert("a URI over 8192 characters is never matched against a template", !!eL && eL.code === ProtocolErrorCode.InvalidParams && !tpl.spy.reads.some((u) => u.length > 8000));
   } finally {
     await registry.unmountAll();
   }
