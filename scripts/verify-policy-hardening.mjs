@@ -75,7 +75,7 @@ const { recentAudit } = await import("../dist/audit.js");
 const { SB_ERR, SB_HINTS } = await import("../dist/errors.js");
 const { loadConfig } = await import("../dist/config.js");
 const { startDashboard } = await import("../dist/dashboard.js");
-const { LoginCodeStore } = await import("../dist/httpsec.js");
+const { ownerSession } = await import("./lib/owner.mjs");
 const ks = await import("../dist/killswitch.js");
 const ce = await import("../dist/childenv.js");
 
@@ -552,7 +552,12 @@ const KILL_PATH = join(SB_HOME, "KILL");
     mkdirSync(KILL_PATH);
     assert("anything at the KILL path trips it (fail closed)", coded(await router.callTool("kk__get_ping", {}))?.code === SB_ERR.KILL_SWITCH);
     rmSync(KILL_PATH, { recursive: true });
-    assert("cleared again", !(await router.callTool("kk__get_ping", {})).isError);
+    // Adapted (design 3.15): a KILL file removed by hand no longer reopens the gateway. The first call that saw the switch
+    // latched it, so only the owner-authorised clear (setKillFile(false), which the gateway calls after its presence
+    // check) turns it off. The old check, "cleared again" right after the hand removal, described the file being the state.
+    assert("a KILL file removed by hand is latched: the gateway keeps refusing (design 3.15)", coded(await router.callTool("kk__get_ping", {}))?.code === SB_ERR.KILL_SWITCH);
+    ks.setKillFile(false);
+    assert("cleared again by the owner-authorised clear", !(await router.callTool("kk__get_ping", {})).isError);
 
     // ---- config switch ---------------------------------------------------------------------------------
     cfgK.gateway.kill_switch = true;
@@ -629,11 +634,9 @@ const KILL_PATH = join(SB_HOME, "KILL");
       assert("/healthz reports kill_switch:true while on (liveness stays 200)", h1.status === 200 && h1.body.kill_switch === true && h1.body.status === "ok");
       const a1 = await get("/api/health");
       assert("/api/health reports the file source while on, and the server verdict is untouched", a1.body.kill_switch?.active === true && a1.body.kill_switch?.source === "file" && a1.body.status === "ok" && a1.status === 200, JSON.stringify(a1.body));
-      // owner session for the gated state route
-      const code = new LoginCodeStore().mint();
-      const login = await fetch(base + "/api/session", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code }) });
-      const cookie = (login.headers.get("set-cookie") ?? "").split(";")[0];
-      const st = await get("/api/state", { cookie });
+      // owner session for the gated state route (adapted: the gateway mints the code after its presence check, the session is a header)
+      const owner = await ownerSession(port);
+      const st = await get("/api/state", owner.hdr);
       assert("/api/state (owner session) reports the kill switch", st.status === 200 && st.body.kill_switch?.active === true, JSON.stringify(st.body.kill_switch));
       ks.setKillFile(false);
       cfgH.gateway.kill_switch = true;

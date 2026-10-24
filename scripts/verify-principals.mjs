@@ -124,14 +124,26 @@ async function main() {
   const childEnv = (extra = {}) => ({ ...process.env, NO_COLOR: "1", ...extra });
 
   const P = await import("../dist/principal.js");
-  const { Gateway, createGateway } = await import("../dist/gateway.js");
+  const { Gateway } = await import("../dist/gateway.js");
   const { startDashboard } = await import("../dist/dashboard.js");
   const { ApiKeyStore } = await import("../dist/apikeys.js");
   const { loadConfig, writeConfig, validateConfig, parseClientEntry } = await import("../dist/config.js");
   const { evaluate } = await import("../dist/policy.js");
   const { Governor } = await import("../dist/governor.js");
   const { recentAudit, verifyAudit } = await import("../dist/audit.js");
-  const { LoginCodeStore } = await import("../dist/httpsec.js");
+  const { Approvals } = await import("../dist/approvals.js");
+  const { ownerSession } = await import("./lib/owner.mjs");
+  // Adapted (design 3.15): the gateway checks owner presence itself (sign-in, client grants). Here that check is an
+  // injected provider that approves and records the prompt: a default gateway would open a real Windows Hello prompt,
+  // which no oracle may do. Everything else is the createGateway of src/gateway.ts.
+  const presencePrompts = [];
+  async function createGateway(cfg) {
+    const approvals = new Approvals({ presence: async (m) => (presencePrompts.push(m), { ok: true, method: "none" }) });
+    const gw = new Gateway(cfg, { approvals });
+    await gw.mountAll();
+    gw.triggers.start();
+    return gw;
+  }
   const CK = await import("../dist/clientkeys.js");
   const CC = await import("../dist/clientconfig.js");
   const { ClientAdmin, ClientAdminError } = await import("../dist/clientadmin.js");
@@ -763,40 +775,48 @@ clients:
       assert("B: the audit chain still verifies with the new fields", verifyAudit().ok === true, JSON.stringify(verifyAudit().break ?? ""));
     }
 
-    // ---- hot edit of the config file (no admin API) ----
+    // ---- an edit of the config file behind the running gateway (adapted for design 3.15: the watcher is pinned) ----
+    // Before: a valid edit of the clients section was applied to the running gateway on the next request. The file is
+    // writable by any process of the same OS user, so that edit WAS a way to widen a client's ceiling without the owner.
+    // Now the running gateway reports the edit (a warning and one client.drift_ignored audit row) and never applies it.
     {
       const text = readFileSync(cfgPathB, "utf8");
+      const view0 = await toolNames(portB, K.alice.token);
+      const driftRows = () => recentAudit(3000).filter((r) => r.tool === "client.drift_ignored");
+      const drift0 = driftRows().length;
       writeFileSync(cfgPathB, text.replace(`exclude_tools: ["alpha__delete_*"]`, `exclude_tools: ["alpha__delete_*", "beta__send_*"]`));
       const t = await toolNames(portB, K.alice.token);
-      assert("B: editing the config file changes alice's tools on the running gateway", !t.includes("beta__send_message") && t.includes("beta__get_weather"), t.join(","));
+      assert("B: editing the config file does NOT change alice's tools on the running gateway (pinned, design 3.15)", same(t, view0) && t.includes("beta__send_message") && t.includes("beta__get_weather"), t.join(","));
       const cl = await call(portB, K.alice.token, "beta__send_message");
-      assert("B: and the newly excluded tool is uncallable at once", cl.isError && /client 'alice'/.test(cl.sb?.error ?? ""));
+      assert("B: and the tool the file would now exclude is still callable (the file is not the authority while the gateway runs)", !cl.isError, JSON.stringify(cl.sb ?? cl.text).slice(0, 160));
+      const drift1 = driftRows();
+      assert("B: the edit left exactly one client.drift_ignored audit row, naming the client, from principal file:config", drift1.length === drift0 + 1 && drift1[0].principal === "file:config" && drift1[0].decision === "deny" && /alice/.test(drift1[0].reason ?? "") && /not applied/.test(drift1[0].reason ?? ""), JSON.stringify(drift1[0]));
       const keep = JSON.stringify(cfgB.clients);
       writeFileSync(cfgPathB, "gateway: [broken\n");
       const t2 = await toolNames(portB, K.alice.token);
-      assert("B: a broken config file is ignored, the previous clients stay in force", same(t2, t) && JSON.stringify(cfgB.clients) === keep);
+      assert("B: a broken config file is ignored, the previous clients stay in force", same(t2, t) && JSON.stringify(cfgB.clients) === keep && driftRows().length === drift0 + 1);
       writeFileSync(cfgPathB, text.replace(`servers: [alpha, beta]\n    exclude_tools`, `servers: [alpha, beta, gamma]\n    exclude_tools`));
       const t3 = await toolNames(portB, K.alice.token);
-      assert("B: a valid edit after a broken one is picked up", t3.includes("gamma__get_time"), t3.join(","));
+      assert("B: a valid edit after a broken one is reported (a second drift row) and still not applied", !t3.includes("gamma__get_time") && same(t3, view0) && driftRows().length === drift0 + 2, t3.join(","));
       writeFileSync(cfgPathB, text);
       const t4 = await toolNames(portB, K.alice.token);
-      assert("B: restoring the file restores the original view", same(t4, tools.alice));
+      assert("B: restoring the file leaves the original view and raises no further drift row", same(t4, tools.alice) && driftRows().length === drift0 + 2);
     }
+
 
     // ---- admin API ----
     {
-      const code = new LoginCodeStore().mint();
-      const login = await raw(portB, "POST", "/api/session", { body: { code } });
-      const sid = (login.headers["set-cookie"] ?? []).find((c) => c.startsWith("switchboard_session="))?.split(";")[0] ?? "";
-      const csrf = jsonOf(login).csrf;
-      assert("B: owner login for the admin API", login.status === 200 && !!sid && !!csrf);
+      const owner = await ownerSession(portB);
+      const csrf = owner.csrf;
+      assert("B: owner login for the admin API", owner.status === 200 && !!owner.sid && !!csrf);
+      assert("B: the login sets no cookie: the session is a header (design 3.15), and the gateway asked its own presence check first", owner.setCookie === undefined && presencePrompts.some((m) => /Sign in to the MCP Switchboard dashboard/.test(m)));
       const corpus = [];
-      const adm = async (method, path, body, { csrfOn = true, cookieOn = true, collect = true } = {}) => {
-        const r = await raw(portB, method, path, { cookie: cookieOn ? sid : undefined, headers: csrfOn ? { "x-switchboard-csrf": csrf } : {}, body });
+      const adm = async (method, path, body, { csrfOn = true, sessionOn = true, collect = true } = {}) => {
+        const r = await raw(portB, method, path, { headers: { ...(sessionOn ? { "x-switchboard-session": owner.sid } : {}), ...(csrfOn ? { "x-switchboard-csrf": csrf } : {}) }, body });
         if (collect) corpus.push(r.body);
         return r;
       };
-      const noSession = await adm("GET", "/api/clients", undefined, { cookieOn: false, csrfOn: false });
+      const noSession = await adm("GET", "/api/clients", undefined, { sessionOn: false, csrfOn: false });
       assert("B: GET /api/clients without an owner session is 401", noSession.status === 401);
       const bearer = await raw(portB, "GET", "/api/clients", { headers: { authorization: `Bearer ${K.alice.token}` } });
       assert("B: a client key is never accepted on the admin API", bearer.status === 401);
@@ -942,8 +962,10 @@ clients:
       const t3 = CK.readClientKey("coder");
 
       // --- rm without --purge ---
+      const promptsBeforeRm = presencePrompts.length;
       const rm1 = await cli(["client", "rm", "coder"]);
       assert("C: `client rm` revokes the key, deletes the key file and keeps the config entry", rm1.code === 0 && /1 key\(s\) revoked/.test(rm1.stderr) && CK.readClientKey("coder") === null && loadConfig(cfgPathC).clients.coder !== undefined);
+      assert("C: a removal asked no presence (it only takes access away), design 3.15", presencePrompts.length === promptsBeforeRm, String(presencePrompts.length - promptsBeforeRm));
       assert("C: the revoked key is dead on the running gateway, and the gateway stays closed (clients still configured)", (await mcp(portC, t3, "tools/list")).status === 401 && (await mcp(portC, null, "tools/list")).status === 401);
       const bridge4 = await lineSession(["bridge", "--client", "coder", "--url", urlC], [initMsg(1)], { want: 1 });
       assert("C: the bridge for a removed client answers with a JSON-RPC error, not a crash", bridge4.got.get(1)?.error !== undefined && bridge4.code === 0, JSON.stringify(bridge4.got.get(1)).slice(0, 160));
@@ -972,8 +994,13 @@ clients:
       assert("C: removing the last client puts the running gateway back in legacy mode (no credential needed)", (await mcp(portC, null, "tools/list")).status === 200);
       assert("C: --purge also revoked the keys bound to the client (apikey list no longer shows it)", !/client coder/.test((await cli(["apikey", "list"])).stdout));
       assert("C: no client key file is left behind", !existsSync(CK.clientKeyPath("coder")));
-      const cliRows = recentAudit(2000).filter((r) => r.tool.startsWith("client.") && r.principal === "owner:cli" && /client 'coder'/.test(r.reason ?? ""));
-      assert("C: the CLI changes are audited as owner:cli (add, rotate, remove), naming the client", ["client.add", "client.rotate", "client.remove"].every((t) => cliRows.some((r) => r.tool === t)), cliRows.map((r) => r.tool).join(","));
+      // Adapted (design 3.15): a grant (add, rotate) went through the gateway's own presence check, so it is owner:cli; a removal
+      // only takes access away, needs no presence and is honestly labelled local:cli (nothing proved the owner was there).
+      const cliRows = recentAudit(2000).filter((r) => r.tool.startsWith("client.") && /client 'coder'/.test(r.reason ?? ""));
+      const grantsOk = ["client.add", "client.rotate"].every((t) => cliRows.some((r) => r.tool === t && r.principal === "owner:cli"));
+      const removes = cliRows.filter((r) => r.tool === "client.remove");
+      assert("C: the CLI grants (add, rotate) are audited as owner:cli and the removals as local:cli, naming the client", grantsOk && removes.length >= 1 && removes.every((r) => r.principal === "local:cli"), cliRows.map((r) => `${r.tool}:${r.principal}`).join(","));
+      assert("C: the gateway asked its own presence check for the grants, with the client named in the prompt", presencePrompts.some((m) => /Register client 'coder'/.test(m)) && presencePrompts.some((m) => /Change client 'coder'/.test(m)) && presencePrompts.some((m) => /Rotate the key of client 'coder'/.test(m)), presencePrompts.join(" | ").slice(0, 300));
       const rawLog = readdirSync(SBHOME).filter((n) => n.startsWith("audit.log")).map((n) => readFileSync(join(SBHOME, n), "utf8")).join("\n");
       assert("C: no client token ever reached the audit log (checked in the raw file)", ![t1, t2, t3, akTok].some((t) => rawLog.includes(t)) && rawLog.length > 1000);
       assert("C: the audit chain verifies after rows from the gateway and the CLI", verifyAudit().ok === true);
@@ -986,6 +1013,13 @@ clients:
     {
       const cfgPathD = join(base, "stdio.yaml");
       writeFileSync(cfgPathD, configYaml({ port: 1, transport: "[stdio]", servers: ["alpha", "beta"], clients: `\nclients:\n  s1:\n    servers: [alpha]\n    max_scope: read\n  s2:\n    servers: [beta]\n` }));
+      // Adapted (design 3.15): `serve --client <id>` needs the client's key, the same one `bridge` reads, so the YAML alone
+      // no longer lets a process claim a client. The oracle provisions keys the way an owner-run `client rotate` does.
+      const adminD = new ClientAdmin({ cfg: loadConfig(cfgPathD), configPath: cfgPathD, apiKeys: new ApiKeyStore() });
+      adminD.rotate("s1");
+      const noKeyRun = await cliRun(["--config", cfgPathD, "serve", "--client", "s2"], { timeoutMs: 30_000 });
+      assert("D: `serve --client s2` while s2 has no key exits 1 and says why (the YAML entry alone is not a credential)", noKeyRun.code === 1 && /no working key/.test(noKeyRun.stderr), noKeyRun.stderr.slice(0, 200));
+      adminD.rotate("s2");
       const run = (extra, msgs, want) => lineSession(["--config", cfgPathD, "serve", ...extra], msgs, { want, killAfter: true });
       const s1 = await run(["--client", "s1"], [initMsg(1), toolsMsg(2), callMsg(3, "alpha__get_status"), callMsg(4, "beta__get_weather"), callMsg(5, "alpha__create_note")], 5);
       const names = (s1.got.get(2)?.result?.tools ?? []).map((t) => t.name).sort();
@@ -1040,10 +1074,7 @@ clients:
       gateways.push(gwE);
       const dashE = await startDashboard(gwE, cfgE);
       handles.push(dashE);
-      const code = new LoginCodeStore().mint();
-      const login = await raw(portE, "POST", "/api/session", { body: { code } });
-      const sidE = (login.headers["set-cookie"] ?? []).find((c) => c.startsWith("switchboard_session="))?.split(";")[0] ?? "";
-      const csrfE = jsonOf(login).csrf;
+      const ownerE = await ownerSession(portE);
       const b64url = (b) => b.toString("base64url");
       const formHeaders = { "content-type": "application/x-www-form-urlencoded" };
       const form = (o) => new URLSearchParams(o).toString();
@@ -1052,10 +1083,12 @@ clients:
         const reg = jsonOf(await raw(portE, "POST", "/register", { body: meta }));
         const verifier = b64url(randomBytes(32));
         const challenge = b64url(createHash("sha256").update(verifier).digest());
-        const auth = await raw(portE, "GET", `/authorize?response_type=code&client_id=${encodeURIComponent(reg.client_id)}&redirect_uri=${encodeURIComponent(meta.redirect_uris[0])}&code_challenge=${challenge}&code_challenge_method=S256&state=st&scope=read&resource=${encodeURIComponent(`${PUBLIC}/mcp`)}`, { cookie: sidE });
-        const pending = auth.body.match(/name="pending_id"\s+value="([^"]+)"/)?.[1];
-        const approve = await raw(portE, "POST", "/oauth/consent", { cookie: sidE, headers: { ...formHeaders, "x-switchboard-csrf": csrfE }, body: form({ pending_id: pending, decision: "approve" }) });
-        const authCode = new URL(approve.headers.location ?? "http://x/", "http://x").searchParams.get("code");
+        const auth = await raw(portE, "GET", `/authorize?response_type=code&client_id=${encodeURIComponent(reg.client_id)}&redirect_uri=${encodeURIComponent(meta.redirect_uris[0])}&code_challenge=${challenge}&code_challenge_method=S256&state=st&scope=read&resource=${encodeURIComponent(`${PUBLIC}/mcp`)}`, { headers: ownerE.hdr });
+        // Adapted (design 3.15): /authorize answers 401 with a page that points the owner at the dashboard (no form, no cookie);
+        // the decision is made through the admin API with the session and CSRF headers.
+        const pending = auth.body.match(/#\/oauth\/([A-Za-z0-9_-]+)/)?.[1];
+        const approve = await raw(portE, "POST", "/api/oauth/consent", { headers: ownerE.hdrC, body: { pending_id: pending, decision: "approve" } });
+        const authCode = new URL(jsonOf(approve).redirect ?? "http://x/", "http://x").searchParams.get("code");
         const tok = await raw(portE, "POST", "/token", { headers: formHeaders, body: form({ grant_type: "authorization_code", code: authCode, redirect_uri: meta.redirect_uris[0], client_id: reg.client_id, code_verifier: verifier, resource: `${PUBLIC}/mcp` }) });
         return { token: jsonOf(tok).access_token, clientId: reg.client_id };
       }

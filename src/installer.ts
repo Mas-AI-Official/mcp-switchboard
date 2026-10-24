@@ -32,6 +32,7 @@ import { createInterface } from "node:readline";
 import { ApiKeyStore } from "./apikeys.js";
 import { atomicWriteFileSync, writeJsonAtomic } from "./atomicfile.js";
 import { ClientAdmin, type ClientSpec } from "./clientadmin.js";
+import { askGateway, controlRequest } from "./controlclient.js";
 import { clientKeyPath, readClientKey } from "./clientkeys.js";
 import {
   BAD_SERVER_NAME,
@@ -95,13 +96,16 @@ export interface EnsureResult {
   created: boolean;
   keyIssued: boolean;
 }
-export type EnsureClientFn = (cfg: SwitchboardConfig, cfgPath: string, id: string) => EnsureResult;
+export type EnsureClientFn = (cfg: SwitchboardConfig, cfgPath: string, id: string, io?: Pick<InstallIO, "out">) => EnsureResult | Promise<EnsureResult>;
 
 /**
  * The equivalent of `switchboard client add <id>` when the client is not configured; when it is, only a missing or
- * unusable key is replaced (its settings are never touched).
+ * unusable key is replaced (its settings are never touched). Registering a client is a grant of access, so while a
+ * gateway runs it is the GATEWAY that makes it, after its own owner-presence check (design 3.15); a refusal there
+ * stops the install before any client file is touched. With no gateway running there is nothing to ask: the
+ * registration is written directly and its audit row is labelled `local:cli`, not as an owner act.
  */
-export const ensureClientRegistered: EnsureClientFn = (cfg, cfgPath, id) => {
+export const ensureClientRegistered: EnsureClientFn = async (cfg, cfgPath, id, io) => {
   const configured = Object.prototype.hasOwnProperty.call(cfg.clients ?? {}, id);
   const store = new ApiKeyStore();
   let keyOk = false;
@@ -112,8 +116,16 @@ export const ensureClientRegistered: EnsureClientFn = (cfg, cfgPath, id) => {
     keyOk = false;
   }
   if (configured && keyOk) return { created: false, keyIssued: false };
+  const spec: ClientSpec = configured ? {} : { ...INSTALL_CLIENT_DEFAULTS, servers: [...(INSTALL_CLIENT_DEFAULTS.servers ?? [])] };
+  const port = cfg.gateway.http.port;
+  if ((await askGateway(port, "GET", "/clients", 15_000)) !== null) {
+    io?.out("asking the gateway to verify you are present (Windows Hello on this machine, or a challenge at the gateway's terminal)...");
+    const r = await controlRequest(port, "POST", `/clients/${encodeURIComponent(id)}/add`, 150_000, { spec });
+    if (r.status !== 200) throw new InstallRefusal(String(r.body.error ?? `the gateway answered ${r.status}`));
+    return { created: r.body.created === true, keyIssued: r.body.keyKept !== true };
+  }
   const admin = new ClientAdmin({ cfg, configPath: cfgPath, apiKeys: store, actor: "cli" });
-  const r = admin.add(id, configured ? {} : { ...INSTALL_CLIENT_DEFAULTS, servers: [...(INSTALL_CLIENT_DEFAULTS.servers ?? [])] });
+  const r = admin.add(id, spec);
   return { created: r.created, keyIssued: !r.keyKept };
 };
 
@@ -597,7 +609,7 @@ async function install(o: InstallOptions, io: InstallIO): Promise<InstallOutcome
 
   if (unchanged) {
     if (!o.dryRun) {
-      const ensure = (o.ensureClient ?? ensureClientRegistered)(o.cfg, o.cfgPath, o.client);
+      const ensure = await (o.ensureClient ?? ensureClientRegistered)(o.cfg, o.cfgPath, o.client, io);
       if (ensure.created || ensure.keyIssued) io.ok(`client '${o.client}' ${ensure.created ? "registered" : "key re-issued"}`);
     }
     const msg = `${plan.target.label} already has an identical '${plan.name}' entry in ${plan.target.path}: nothing to change.`;
@@ -623,7 +635,7 @@ async function install(o: InstallOptions, io: InstallIO): Promise<InstallOutcome
   const current = readIf(plan.target.path);
   if (current !== plan.originalText) throw new InstallRefusal(`${plan.target.path} changed after the preview was built; nothing was written. Run the command again.`);
 
-  const ensure = (o.ensureClient ?? ensureClientRegistered)(o.cfg, o.cfgPath, o.client);
+  const ensure = await (o.ensureClient ?? ensureClientRegistered)(o.cfg, o.cfgPath, o.client, io);
   if (ensure.created) io.ok(`client '${o.client}' registered (servers ${INSTALL_CLIENT_DEFAULTS.servers!.join(",")}, max_scope ${INSTALL_CLIENT_DEFAULTS.max_scope}, max_risk ${INSTALL_CLIENT_DEFAULTS.max_risk})`);
   else if (ensure.keyIssued) io.ok(`client '${o.client}': a new key was issued for the bridge`);
 

@@ -897,15 +897,15 @@ console.log("\n== 2e. client registration (the real `client add` equivalent) =="
   C.writeConfig();
   const keyFile = (id) => join(process.env.SWITCHBOARD_HOME, "clients", `${id}.key`);
   let cfg = loadConfig(C.cfg);
-  const e1 = inst.ensureClientRegistered(cfg, C.cfg, "cursor");
+  const e1 = await inst.ensureClientRegistered(cfg, C.cfg, "cursor");
   const after1 = loadConfig(C.cfg).clients;
   assert("an unconfigured client is created with the design's defaults: all servers, max_scope write, max_risk high", e1.created === true && e1.keyIssued === true && eq(after1.cursor.servers, ["*"]) && after1.cursor.max_scope === "write" && after1.cursor.max_risk === "high", JSON.stringify(after1));
   assert("... and gets a key in the client key store", existsSync(keyFile("cursor")));
-  const e2 = inst.ensureClientRegistered(loadConfig(C.cfg), C.cfg, "vscode");
+  const e2 = await inst.ensureClientRegistered(loadConfig(C.cfg), C.cfg, "vscode");
   const after2 = loadConfig(C.cfg).clients;
   assert("an already configured client keeps its settings (servers, max_scope, max_risk) and only gets a key", e2.created === false && e2.keyIssued === true && eq(after2.vscode.servers, ["only-this"]) && after2.vscode.max_scope === "read" && after2.vscode.max_risk === "low" && existsSync(keyFile("vscode")), JSON.stringify(after2));
   const before = read(C.cfg);
-  const e3 = inst.ensureClientRegistered(loadConfig(C.cfg), C.cfg, "cursor");
+  const e3 = await inst.ensureClientRegistered(loadConfig(C.cfg), C.cfg, "cursor");
   assert("a configured client with a working key is left completely alone (config file not rewritten)", e3.created === false && e3.keyIssued === false && read(C.cfg) === before);
 }
 

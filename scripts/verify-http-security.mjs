@@ -13,17 +13,17 @@
 //   Owner session      every /api/* route except /healthz and /api/health is 401 without a session
 //                      (swept dynamically over every route found in the compiled dashboard), mutating
 //                      routes are 403 without the CSRF header, a client API key never opens /api/*.
-//   Login codes        single use (also under concurrency), 120 s expiry by injected clock, stored only as
-//                      sha256, redeemable by a gateway that started before the code was minted, cookie
-//                      flags, 12 h session expiry, sessions persisted hashed and surviving a restart.
-//   CLI login          `dashboard login` verifies presence, prints the loopback URL, the code it mints is
-//                      redeemable by the running gateway; presence none is refused without the env flag.
-//   OAuth consent      without an owner session no consent form is rendered and a POST is refused; with a
-//                      session the flow completes; DCR is capped (50 clients, 20 per hour).
+//   Login codes        (design 3.15) minted only inside the gateway after ITS presence check, single use (also
+//                      under concurrency), 120 s expiry by injected clock, memory only (no file is a credential),
+//                      no cookie (the session is a header), 12 h session expiry, a restart ends every session.
+//   CLI login          `dashboard login` asks the running gateway (which verifies presence), prints the loopback
+//                      URL, the code is redeemable once; the caller cannot choose the presence method.
+//   OAuth consent      there is no consent form: the decision goes through the admin API with the session and
+//                      CSRF headers; without them nothing is decided; DCR is capped (50 clients, 20 per hour).
 //   Listen failures    a busy port (also a wildcard or loopback shadow) makes serve, dashboard, expose and
 //                      startDashboard fail instead of reporting success.
 // Zero deps (node stdlib + the package's compiled output). Build first. Isolated SWITCHBOARD_HOME.
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
@@ -50,7 +50,18 @@ const { Gateway } = await import("../dist/gateway.js");
 const { startDashboard } = await import("../dist/dashboard.js");
 const { startMcpListener } = await import("../dist/expose.js");
 const { ApiKeyStore } = await import("../dist/apikeys.js");
-const { LoginCodeStore, OwnerSessions, isPublicRoutePath, CONTENT_SECURITY_POLICY } = await import("../dist/httpsec.js");
+const { LoginCodeStore, isPublicRoutePath, CONTENT_SECURITY_POLICY } = await import("../dist/httpsec.js");
+const { Approvals } = await import("../dist/approvals.js");
+const { ownerSession, mintLoginCode } = await import("./lib/owner.mjs");
+
+// Adapted (design 3.15): the gateway checks owner presence itself (sign-in), so the oracle gives it an injected provider:
+// `presence.ok` decides, `presence.prompts` records what was asked. A default gateway would open a real Windows Hello
+// prompt, which no oracle may do.
+const presence = { ok: true, prompts: [] };
+const mkGateway = (cfg) =>
+  new Gateway(cfg, {
+    approvals: new Approvals({ presence: async (m) => (presence.prompts.push(m), presence.ok ? { ok: true, method: "none" } : { ok: false, method: "hello", reason: "declined" }) }),
+  });
 
 const checks = [];
 const assert = (name, cond, detail = "") => {
@@ -77,12 +88,12 @@ function freePort() {
   });
 }
 
-/** Raw HTTP with full control of Host, Origin and Cookie (fetch would not let us forge Host). */
-function raw(port, method, path, { host, origin, cookie, headers = {}, body } = {}) {
+/** Raw HTTP with full control of Host, Origin and the session header (fetch would not let us forge Host). */
+function raw(port, method, path, { host, origin, session, headers = {}, body } = {}) {
   return new Promise((resolve) => {
     const h = { Host: host ?? `127.0.0.1:${port}`, ...headers };
     if (origin !== undefined) h.Origin = origin;
-    if (cookie) h.Cookie = cookie;
+    if (session) h["X-Switchboard-Session"] = session;
     let data;
     if (body !== undefined) {
       data = typeof body === "string" ? body : JSON.stringify(body);
@@ -121,15 +132,11 @@ const MCP_HEADERS = { accept: "application/json, text/event-stream" };
 
 let T = Date.now(); // injected clock: frozen between steps so boundaries are exact, advanced by the tests
 const clock = () => T;
-const codes = new LoginCodeStore({ clock }); // the "CLI side" mint, same home dir as the gateway
-
+// Adapted (design 3.15): the gateway mints the login code after ITS presence check (the injected provider above); the
+// session id comes back in the body and travels as a header. Nothing here can mint a code without the gateway.
 async function login(port) {
-  const code = codes.mint();
-  const r = await raw(port, "POST", "/api/session", { body: { code } });
-  const sc = r.headers["set-cookie"] ?? [];
-  const cookieLine = sc.find((c) => c.startsWith("switchboard_session=")) ?? "";
-  const sid = cookieLine.split(";")[0].split("=")[1] ?? "";
-  return { status: r.status, cookie: `switchboard_session=${sid}`, sid, csrf: json(r).csrf, setCookie: cookieLine, body: json(r) };
+  const s = await ownerSession(port);
+  return { status: s.status, sid: s.sid, csrf: s.csrf, setCookie: s.setCookie, response: s.response, body: s.body };
 }
 
 const mkCfg = (port, settings = {}) => ({
@@ -160,6 +167,46 @@ function runCli(args, { env, timeoutMs = 25_000 } = {}) {
     timeout: timeoutMs,
     stdio: ["pipe", "pipe", "pipe"],
   });
+}
+
+/** The CLI as an async child: needed whenever it talks to a gateway that lives in THIS process (spawnSync would block it). */
+function runCliAsync(args, { env, timeoutMs = 30_000 } = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [join(root, "dist", "cli.js"), ...args], { cwd: root, env: childEnv(env), stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    children.push(child);
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d) => (stdout += d));
+    child.stderr.on("data", (d) => (stderr += d));
+    const timer = setTimeout(() => child.kill(), timeoutMs);
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ status: code, stdout, stderr });
+    });
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      resolve({ status: null, stdout, stderr: String(err.message) });
+    });
+  });
+}
+
+/** Every file under a directory with its text (latin1, so binary files are searchable too). */
+function filesUnder(dir) {
+  const out = [];
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, e.name);
+    if (e.isDirectory()) out.push(...filesUnder(p));
+    else {
+      let t = "";
+      try {
+        t = readFileSync(p, "latin1");
+      } catch {
+        /* unreadable: nothing to search */
+      }
+      out.push({ name: p, text: t });
+    }
+  }
+  return out;
 }
 
 const listen = (host, port) =>
@@ -198,7 +245,7 @@ try {
     assert("the CSP forbids framing, plugins and <base>", /frame-ancestors 'none'/.test(CONTENT_SECURITY_POLICY) && /object-src 'none'/.test(CONTENT_SECURITY_POLICY) && /base-uri 'none'/.test(CONTENT_SECURITY_POLICY));
     assert("the CSP has no form-action (it would block the OAuth consent redirect)", !/form-action/.test(CONTENT_SECURITY_POLICY));
     assert("app.js routes every request through ONE fetch wrapper", (appJs.match(/\bfetch\(/g) ?? []).length === 1, `fetch( count=${(appJs.match(/\bfetch\(/g) ?? []).length}`);
-    assert("app.js sends credentials and the CSRF header", /credentials:\s*["'](same-origin|include)["']/.test(appJs) && appJs.includes("X-Switchboard-CSRF"));
+    assert("app.js sends the session and CSRF headers and never ambient credentials (design 3.15: no cookie)", /credentials:\s*["']omit["']/.test(appJs) && appJs.includes("X-Switchboard-CSRF") && appJs.includes("X-Switchboard-Session"));
     assert("app.js redeems #login=<code> via POST /api/session and clears the hash", /login=/.test(appJs) && appJs.includes("/api/session") && appJs.includes("history.replaceState"));
     assert("app.js tells the owner to run 'switchboard dashboard login' on a 401", appJs.includes("switchboard dashboard login"));
     assert("isPublicRoutePath: /mcp and the OAuth routes only", isPublicRoutePath("/mcp") && isPublicRoutePath("/authorize") && isPublicRoutePath("/.well-known/oauth-authorization-server") && isPublicRoutePath("/oauth/consent") && !isPublicRoutePath("/api/state") && !isPublicRoutePath("/") && !isPublicRoutePath("/oauth/callback") && !isPublicRoutePath("/app.js"));
@@ -209,15 +256,15 @@ try {
   // =================================================================================================
   const portA = await freePort();
   const cfgA = mkCfg(portA);
-  const gwA = new Gateway(cfgA);
+  const gwA = mkGateway(cfgA);
   let hA = await startDashboard(gwA, cfgA, undefined, { clock });
   handles.push(hA);
 
   // ---- Host allowlist ----
   const sess = await login(portA);
   assert("login with a fresh code returns 200 and a csrf value", sess.status === 200 && typeof sess.csrf === "string" && sess.csrf.length >= 32, `status ${sess.status}`);
-  const withSession = { cookie: sess.cookie };
-  const withCsrf = { cookie: sess.cookie, headers: { "x-switchboard-csrf": sess.csrf } };
+  const withSession = { session: sess.sid };
+  const withCsrf = { session: sess.sid, headers: { "x-switchboard-csrf": sess.csrf } };
 
   {
     const forged = "evil.example";
@@ -348,7 +395,7 @@ try {
     const okReads = [await raw(portA, "GET", "/api/state", withSession), await raw(portA, "GET", "/api/settings", withSession), await raw(portA, "GET", "/api/apikeys", withSession)];
     assert("with a session, admin GETs succeed (no CSRF needed for reads)", okReads.every((r) => r.status === 200), okReads.map((r) => r.status).join(","));
     const me = await raw(portA, "GET", "/api/session", withSession);
-    assert("GET /api/session returns the same csrf (the SPA recovers it after a reload)", me.status === 200 && json(me).csrf === sess.csrf && json(me).authenticated === true);
+    assert("GET /api/session confirms the session (authenticated, with an expiry) and does not hand the CSRF value back (the SPA keeps it in sessionStorage)", me.status === 200 && json(me).authenticated === true && !!json(me).expires_at && json(me).csrf === undefined);
 
     // A client API key never opens the admin API.
     const issued = await raw(portA, "POST", "/api/apikeys", { ...withCsrf, body: { name: "client-key" } });
@@ -365,26 +412,35 @@ try {
   }
 
   // ---- login codes and sessions ----
+  // Adapted for design 3.15 (hardening round 3). Login codes and sessions are memory only, and the session is a header
+  // the SPA keeps in sessionStorage, not a cookie. The cookie-flag, login-codes/ file, sessions.json and "survives a
+  // restart" checks described the old file-backed, cookie-carried design (files any process of the same OS user could
+  // write, a cookie every other local port receives). Each is replaced below by its counterpart in the new form; the
+  // single-use, concurrency, expiry, logout and session-lifetime checks keep their meaning and only change how the
+  // code is obtained (the gateway mints it after its own presence check) and how the session is carried.
   {
-    // cookie flags
-    const c = sess.setCookie;
-    assert("session cookie name is switchboard_session", c.startsWith("switchboard_session="));
-    assert("cookie is HttpOnly", /;\s*HttpOnly/i.test(c), c);
-    assert("cookie is SameSite=Strict", /;\s*SameSite=Strict/i.test(c), c);
-    assert("cookie is Path=/", /;\s*Path=\/(;|$)/i.test(c), c);
-    assert("cookie lifetime is 12 h (Max-Age=43200)", /;\s*Max-Age=43200(;|$)/i.test(c), c);
-    assert("cookie is not Secure on plain-http loopback", !/;\s*Secure/i.test(c));
+    const mintCode = async () => (await mintLoginCode(portA)).code;
+
+    // no cookie
+    assert("login sets no cookie at all (a cookie is not scoped by port: every other local listener would receive it)", sess.setCookie === undefined && (sess.response.headers["set-cookie"] ?? []).length === 0);
+    assert("the login answer carries the session id, a CSRF value and an expiry", typeof sess.body.session === "string" && typeof sess.body.csrf === "string" && !!sess.body.expires_at, JSON.stringify(Object.keys(sess.body)));
     assert("session id is 32 random bytes (43 base64url chars)", /^[A-Za-z0-9_-]{43}$/.test(sess.sid) && Buffer.from(sess.sid, "base64url").length === 32, sess.sid.length);
+    const asCookie = await raw(portA, "GET", "/api/state", { headers: { cookie: `switchboard_session=${sess.sid}` } });
+    assert("the old session cookie is not read: the session id sent as a cookie opens nothing", asCookie.status === 401, `status ${asCookie.status}`);
     const second = await login(portA);
     assert("two logins give different session ids and csrf values", second.sid !== sess.sid && second.csrf !== sess.csrf);
+    for (const [label, v] of [["empty", ""], ["over-long", "x".repeat(5000)], ["path-like", "../../etc/passwd"], ["a code instead of a session", await mintCode()]]) {
+      const r = await raw(portA, "GET", "/api/state", { session: v });
+      assert(`a malformed session header (${label}) fails closed with 401`, r.status === 401, `status ${r.status}`);
+    }
 
     // single use, also under concurrency
-    const once = codes.mint();
+    const once = await mintCode();
     const first = await raw(portA, "POST", "/api/session", { body: { code: once } });
     const replay = await raw(portA, "POST", "/api/session", { body: { code: once } });
     assert("a login code redeems once", first.status === 200, `status ${first.status}`);
     assert("the same code is refused the second time", replay.status === 401 && json(replay).code === "SB_LOGIN_CODE", `status ${replay.status}`);
-    const race = codes.mint();
+    const race = await mintCode();
     const results = await Promise.all(Array.from({ length: 8 }, () => raw(portA, "POST", "/api/session", { body: { code: race } })));
     assert("8 concurrent redemptions of one code: exactly one wins", results.filter((r) => r.status === 200).length === 1, results.map((r) => r.status).join(","));
     for (const [label, code] of [["unknown", b64url(randomBytes(32))], ["too short", "abc"], ["wrong type", 12345], ["path-like", "../../etc/passwd"], ["empty", ""]]) {
@@ -395,89 +451,100 @@ try {
     assert("login with no body is 401", noBody.status === 401, `status ${noBody.status}`);
 
     // expiry by injected clock (TTL is 120 s)
-    const justIn = codes.mint();
-    const justOut = codes.mint();
+    const justIn = await mintCode();
+    const justOut = await mintCode();
     T += 119_999;
     const inTime = await raw(portA, "POST", "/api/session", { body: { code: justIn } });
     T += 2;
     const late = await raw(portA, "POST", "/api/session", { body: { code: justOut } });
     assert("a code redeemed at 119.999 s works", inTime.status === 200, `status ${inTime.status}`);
     assert("a code redeemed at 120.001 s is refused (TTL 120 s)", late.status === 401, `status ${late.status}`);
-    assert("an expired code is deleted by the failed redemption", !readdirSync(join(SBHOME, "login-codes")).includes(`${sha256(justOut)}.json`));
+    const lateAgain = await raw(portA, "POST", "/api/session", { body: { code: justOut } });
+    assert("an expired code stays refused (nothing revives it)", lateAgain.status === 401, `status ${lateAgain.status}`);
 
-    // only hashes at rest
-    const stored = codes.mint();
-    const files = readdirSync(join(SBHOME, "login-codes"));
-    const allText = files.map((f) => readFileSync(join(SBHOME, "login-codes", f), "utf8")).join("\n");
-    assert("a minted code is stored under its sha256 file name", files.includes(`${sha256(stored)}.json`));
-    assert("the plaintext code appears in no file content or name", !allText.includes(stored) && !files.some((f) => f.includes(stored)));
+    // memory only: replaces "stored only as sha256 files under login-codes/"
+    const stored = await mintCode();
+    assert("a minted code is memory only: there is no login-codes directory under SWITCHBOARD_HOME", !existsSync(join(SBHOME, "login-codes")));
+    const scan = filesUnder(SBHOME);
+    assert("the plaintext code and the session ids appear in no file name or content under SWITCHBOARD_HOME", !scan.some((f) => f.name.includes(stored) || f.text.includes(stored) || f.text.includes(sess.sid) || f.text.includes(second.sid)), `${scan.length} files scanned`);
 
-    // a code minted AFTER the gateway started is honoured (re-read on redemption); 120 s TTL exact
-    const lateMint = new LoginCodeStore({ clock }).mint();
-    const rl = await raw(portA, "POST", "/api/session", { body: { code: lateMint } });
-    assert("a code minted by another store instance after startup redeems (file-backed, re-read)", rl.status === 200, `status ${rl.status}`);
+    // the old file-backed handoff does not work any more: replaces "a code minted by another store instance redeems"
+    const foreign = new LoginCodeStore({ clock }).mint();
+    const rForeign = await raw(portA, "POST", "/api/session", { body: { code: foreign } });
+    assert("a code minted by another LoginCodeStore instance is not honoured (only this gateway's own memory counts)", rForeign.status === 401, `status ${rForeign.status}`);
+    const plantedCode = b64url(randomBytes(32));
+    mkdirSync(join(SBHOME, "login-codes"), { recursive: true });
+    writeFileSync(join(SBHOME, "login-codes", `${sha256(plantedCode)}.json`), JSON.stringify({ expires: T + 100_000 }));
+    const rPlanted = await raw(portA, "POST", "/api/session", { body: { code: plantedCode } });
+    rmSync(join(SBHOME, "login-codes"), { recursive: true, force: true });
+    assert("a login code file written by hand is not honoured either (the files are not a credential)", rPlanted.status === 401, `status ${rPlanted.status}`);
 
-    // session expiry (12 h) by injected clock; sessions persisted hashed and surviving a restart
+    // sessions are memory only: replaces "sessions.json lists the hashed id" and "a session survives a restart"
     const s2 = await login(portA);
-    const sessionsFile = readFileSync(join(SBHOME, "sessions.json"), "utf8");
-    assert("sessions.json lists the hashed session id", sessionsFile.includes(sha256(s2.sid)));
-    assert("sessions.json never holds a plaintext session id or csrf", !sessionsFile.includes(s2.sid) && !sessionsFile.includes(s2.csrf));
+    assert("sessions are memory only: no sessions.json exists", !existsSync(join(SBHOME, "sessions.json")));
+    const plantedSid = b64url(randomBytes(32));
+    writeFileSync(join(SBHOME, "sessions.json"), JSON.stringify({ sessions: [{ hash: sha256(plantedSid), id: sha256(plantedSid), expires: T + 1e9, csrf: "c".repeat(43) }] }));
+    const rPlantedSid = await raw(portA, "GET", "/api/state", { session: plantedSid });
+    rmSync(join(SBHOME, "sessions.json"), { force: true });
+    assert("a hand-written sessions.json grants no session", rPlantedSid.status === 401, `status ${rPlantedSid.status}`);
     await hA.close();
-    const gwA2 = new Gateway(cfgA);
+    const gwA2 = mkGateway(cfgA);
     hA = await startDashboard(gwA2, cfgA, undefined, { clock });
     handles.push(hA);
-    const afterRestart = await raw(portA, "GET", "/api/state", { cookie: s2.cookie });
-    const meAgain = await raw(portA, "GET", "/api/session", { cookie: s2.cookie });
-    assert("a session survives a gateway restart (persisted hash)", afterRestart.status === 200, `status ${afterRestart.status}`);
-    assert("the csrf value is stable across the restart", json(meAgain).csrf === s2.csrf);
+    const afterRestart = await raw(portA, "GET", "/api/state", { session: s2.sid });
+    assert("a gateway restart ends every session (nothing was persisted)", afterRestart.status === 401, `status ${afterRestart.status}`);
+
+    // session expiry (12 h) by injected clock, on a session of the restarted gateway
+    const s2b = await login(portA);
     T += 12 * 3600_000 - 1000;
-    const near = await raw(portA, "GET", "/api/state", { cookie: s2.cookie });
+    const near = await raw(portA, "GET", "/api/state", { session: s2b.sid });
     T += 2000;
-    const gone = await raw(portA, "GET", "/api/state", { cookie: s2.cookie });
+    const gone = await raw(portA, "GET", "/api/state", { session: s2b.sid });
     assert("a session is still valid just before 12 h", near.status === 200, `status ${near.status}`);
     assert("a session is refused after 12 h", gone.status === 401, `status ${gone.status}`);
 
     // logout
     const s3 = await login(portA);
-    const outNoCsrf = await raw(portA, "DELETE", "/api/session", { cookie: s3.cookie });
-    assert("DELETE /api/session without CSRF is 403 and keeps the session", outNoCsrf.status === 403 && (await raw(portA, "GET", "/api/state", { cookie: s3.cookie })).status === 200);
-    const out = await raw(portA, "DELETE", "/api/session", { cookie: s3.cookie, headers: { "x-switchboard-csrf": s3.csrf } });
-    const clear = (out.headers["set-cookie"] ?? []).join(";");
-    assert("DELETE /api/session with CSRF logs out and expires the cookie", out.status === 200 && /switchboard_session=;/.test(clear) && /Max-Age=0/.test(clear), `status ${out.status}`);
-    const after = await raw(portA, "GET", "/api/state", { cookie: s3.cookie });
-    assert("the logged-out cookie no longer works", after.status === 401, `status ${after.status}`);
-
-    // OwnerSessions unit: a corrupt persisted file fails closed
-    writeFileSync(join(tmp, "corrupt-sessions.json"), "{not json");
-    const bad = new OwnerSessions({ path: join(tmp, "corrupt-sessions.json"), clock });
-    assert("a corrupt sessions file means nobody is logged in (fail closed)", bad.lookup(randomBytes(32).toString("base64url")) === null);
+    const outNoCsrf = await raw(portA, "DELETE", "/api/session", { session: s3.sid });
+    assert("DELETE /api/session without CSRF is 403 and keeps the session", outNoCsrf.status === 403 && (await raw(portA, "GET", "/api/state", { session: s3.sid })).status === 200);
+    const out = await raw(portA, "DELETE", "/api/session", { session: s3.sid, headers: { "x-switchboard-csrf": s3.csrf } });
+    assert("DELETE /api/session with CSRF logs out (the session is revoked; no cookie is set or cleared)", out.status === 200 && (out.headers["set-cookie"] ?? []).length === 0, `status ${out.status}`);
+    const after = await raw(portA, "GET", "/api/state", { session: s3.sid });
+    assert("the logged-out session no longer works", after.status === 401, `status ${after.status}`);
   }
 
   // ---- real CLI: dashboard login against the running gateway ----
+  // Adapted for design 3.15. The code is minted INSIDE the gateway, after the gateway's own presence check (here an
+  // injected provider: no real prompt), so the CLI only asks. The caller can no longer pick the presence method or
+  // switch it off with an environment variable, so the three old `--presence` checks (none without the env flag, tty
+  // without a terminal, a bogus value) become one: `--presence` is not an option at all. The CLI runs asynchronously
+  // because the gateway lives in this process.
   {
-    T = Date.now(); // the CLI child mints with the wall clock, so freeze the gateway clock at wall time
+    T = Date.now();
     const cfgPath = writeCliCfg(portA, "cli-a.yaml");
-    const ok = runCli(["-c", cfgPath, "dashboard", "login", "--presence", "none", "--no-open"], { env: { SWITCHBOARD_INSECURE_APPROVAL: "1" } });
+    presence.prompts.length = 0;
+    presence.ok = true;
+    const ok = await runCliAsync(["-c", cfgPath, "dashboard", "login", "--no-open"]);
     const urlLine = (ok.stdout ?? "").split(/\r?\n/).map((l) => l.trim()).find((l) => l.startsWith("http://")) ?? "";
     const re = new RegExp(`^http://127\\.0\\.0\\.1:${portA}/#login=([A-Za-z0-9_-]{43})$`);
-    assert("CLI `dashboard login --presence none --no-open` exits 0", ok.status === 0, `exit ${ok.status} ${String(ok.stderr).slice(0, 160)}`);
+    assert("CLI `dashboard login --no-open` exits 0", ok.status === 0, `exit ${ok.status} ${String(ok.stderr).slice(0, 160)}`);
     assert("CLI prints http://127.0.0.1:<port>/#login=<code>", re.test(urlLine), urlLine);
+    assert("the gateway asked its own presence check before it minted the code", presence.prompts.length === 1 && /Sign in to the MCP Switchboard dashboard/.test(presence.prompts[0]), presence.prompts.join(" | "));
     const code = urlLine.match(re)?.[1];
     const redeem = await raw(portA, "POST", "/api/session", { body: { code } });
-    assert("the CLI-minted code is redeemed by the running gateway (cross-process)", redeem.status === 200 && typeof json(redeem).csrf === "string", `status ${redeem.status}`);
+    assert("the CLI-minted code is redeemed by the running gateway (cross-process)", redeem.status === 200 && typeof json(redeem).csrf === "string" && typeof json(redeem).session === "string", `status ${redeem.status}`);
     const again = await raw(portA, "POST", "/api/session", { body: { code } });
     assert("the CLI-minted code is single use", again.status === 401, `status ${again.status}`);
 
-    const before = existsSync(join(SBHOME, "login-codes")) ? readdirSync(join(SBHOME, "login-codes")).length : 0;
-    const noEnv = runCli(["-c", cfgPath, "dashboard", "login", "--presence", "none", "--no-open"]);
-    assert("--presence none without SWITCHBOARD_INSECURE_APPROVAL=1 is refused (exit non-zero)", noEnv.status !== 0 && noEnv.status !== null, `exit ${noEnv.status}`);
-    assert("a refused presence prints no login URL", !/#login=/.test(noEnv.stdout ?? ""));
-    const tty = runCli(["-c", cfgPath, "dashboard", "login", "--presence", "tty", "--no-open"]);
-    assert("--presence tty without a terminal is refused (a script cannot approve itself)", tty.status !== 0 && tty.status !== null && !/#login=/.test(tty.stdout ?? ""), `exit ${tty.status}`);
-    const bogus = runCli(["-c", cfgPath, "dashboard", "login", "--presence", "bogus", "--no-open"]);
-    assert("an unknown --presence value is refused", bogus.status !== 0 && bogus.status !== null, `exit ${bogus.status}`);
-    const afterCount = existsSync(join(SBHOME, "login-codes")) ? readdirSync(join(SBHOME, "login-codes")).length : 0;
-    assert("refused logins mint no code", afterCount === before, `${before} -> ${afterCount}`);
+    presence.ok = false;
+    const declined = await runCliAsync(["-c", cfgPath, "dashboard", "login", "--no-open"]);
+    assert("a declined presence check is refused (exit non-zero)", declined.status !== 0 && declined.status !== null, `exit ${declined.status}`);
+    assert("a refused presence prints no login URL", !/#login=/.test(declined.stdout ?? ""));
+    presence.ok = true;
+    const promptsBefore = presence.prompts.length;
+    const flagged = await runCliAsync(["-c", cfgPath, "dashboard", "login", "--presence", "none", "--no-open"], { env: { SWITCHBOARD_INSECURE_APPROVAL: "1" } });
+    assert("`--presence` is not an option any more: the caller cannot pick the method, even with SWITCHBOARD_INSECURE_APPROVAL=1 (exit non-zero, no URL)", flagged.status !== 0 && flagged.status !== null && !/#login=/.test(flagged.stdout ?? ""), `exit ${flagged.status}`);
+    assert("and the refused command minted nothing: the gateway was not even asked", presence.prompts.length === promptsBefore, `${promptsBefore} -> ${presence.prompts.length}`);
   }
 
   // ---- fail loudly on a busy port ----
@@ -571,7 +638,7 @@ try {
   await hA.close();
   const portB = await freePort();
   const cfgB = mkCfg(portB, { oauth_server: { enabled: true, public_url: PUBLIC_B, consent: true, access_token_ttl: 3600, refresh_token_ttl: 1209600 } });
-  const gwB = new Gateway(cfgB);
+  const gwB = mkGateway(cfgB);
   const hB = await startDashboard(gwB, cfgB, undefined, { clock });
   handles.push(hB);
 
@@ -587,17 +654,17 @@ try {
     assert("a foreign Origin through the public host is 403", mcpBadOrigin.status === 403, `status ${mcpBadOrigin.status}`);
     const sB = await login(portB);
     for (const [label, path] of [["/api/state", "/api/state"], ["the dashboard page", "/"], ["/app.js", "/app.js"], ["/healthz", "/healthz"], ["/oauth/callback", "/oauth/callback"], ["/api/settings", "/api/settings"]]) {
-      const r = await raw(portB, "GET", path, { host: pub, cookie: sB.cookie });
+      const r = await raw(portB, "GET", path, { host: pub, session: sB.sid });
       assert(`public host is refused on ${label} (public routes are /mcp and OAuth only)`, r.status === 403, `status ${r.status}`);
     }
-    const postPub = await raw(portB, "POST", "/api/apikeys", { host: pub, origin: PUBLIC_B, cookie: sB.cookie, headers: { "x-switchboard-csrf": sB.csrf }, body: { name: "x" } });
+    const postPub = await raw(portB, "POST", "/api/apikeys", { host: pub, origin: PUBLIC_B, session: sB.sid, headers: { "x-switchboard-csrf": sB.csrf }, body: { name: "x" } });
     assert("public host plus issuer Origin plus a valid session still cannot reach the admin API", postPub.status === 403, `status ${postPub.status}`);
-    const pubOriginOnDash = await raw(portB, "POST", "/api/apikeys", { origin: PUBLIC_B, cookie: sB.cookie, headers: { "x-switchboard-csrf": sB.csrf }, body: { name: "x" } });
+    const pubOriginOnDash = await raw(portB, "POST", "/api/apikeys", { origin: PUBLIC_B, session: sB.sid, headers: { "x-switchboard-csrf": sB.csrf }, body: { name: "x" } });
     assert("the issuer Origin is refused on dashboard routes even via a loopback Host", pubOriginOnDash.status === 403, `status ${pubOriginOnDash.status}`);
     const loopbackOauth = await raw(portB, "GET", "/.well-known/oauth-authorization-server");
     assert("loopback host also reaches the OAuth metadata", loopbackOauth.status === 200, `status ${loopbackOauth.status}`);
 
-    // ---- consent needs an owner session ----
+    // ---- consent needs an owner session (admin API, design 3.15) ----
     const clientMeta = { client_name: "verify-http-security", redirect_uris: ["http://127.0.0.1:7777/callback"], token_endpoint_auth_method: "none", grant_types: ["authorization_code", "refresh_token"], response_types: ["code"] };
     let accepted = 0; // clients registered on this instance so far
     const register = async () => {
@@ -616,54 +683,66 @@ try {
     const form = (o) => new URLSearchParams(o).toString();
 
     assert("DCR returns a client_id", typeof cl.client_id === "string", JSON.stringify(cl).slice(0, 120));
+    // Adapted for design 3.15: there is no consent page or form any more. /authorize answers 401 with a page that only
+    // points the owner at the dashboard; the decision is made through the admin API (GET /api/oauth/pending/:id and
+    // POST /api/oauth/consent) with the session header and the CSRF header. The old checks (form fields, a form csrf
+    // field, an inline form for a signed-in owner) become their counterparts on that API. What they proved is kept: no
+    // decision without the owner session, none without CSRF or from a foreign Origin, single use, deny works, an unknown
+    // id is refused.
+    const csrfH = { "x-switchboard-csrf": sB.csrf };
+    const consent = (extra, body) => raw(portB, "POST", "/api/oauth/consent", { ...extra, body });
     const p1 = pkce();
     const a1 = await raw(portB, "GET", authPath(cl.client_id, p1.challenge, "s1"));
-    const pend1 = a1.body.match(/pending_id=([A-Za-z0-9_-]+)/)?.[1];
-    assert("/authorize without an owner session is 401, not a consent form", a1.status === 401 && !/name="decision"/.test(a1.body) && !/name="pending_id"/.test(a1.body), `status ${a1.status}`);
-    assert("the sign-in page says how to sign in and links to the loopback resume URL", a1.body.includes("switchboard dashboard login") && !!pend1 && a1.body.includes(`http://127.0.0.1:${portB}/oauth/consent?pending_id=`));
+    const pend1 = a1.body.match(/#\/oauth\/([A-Za-z0-9_-]+)/)?.[1];
+    assert("/authorize without an owner session is 401, not a consent form", a1.status === 401 && !/name="decision"/.test(a1.body) && !/name="pending_id"/.test(a1.body) && !/<form/.test(a1.body), `status ${a1.status}`);
+    assert("the sign-in page says how to sign in and links to the dashboard view of the pending request", a1.body.includes("switchboard dashboard login") && !!pend1 && a1.body.includes(`http://127.0.0.1:${portB}/#/oauth/`));
 
-    const noSessPost = await raw(portB, "POST", "/oauth/consent", { headers: formHeaders, body: form({ pending_id: pend1, decision: "approve" }) });
-    assert("POST /oauth/consent without a session is refused: 401, no redirect, no code", noSessPost.status === 401 && !noSessPost.headers.location, `status ${noSessPost.status}`);
-    const apiKeyConsent = await raw(portB, "POST", "/oauth/consent", { headers: { ...formHeaders, authorization: "Bearer sb_not_an_owner" }, body: form({ pending_id: pend1, decision: "approve" }) });
-    assert("an Authorization header does not stand in for the owner session on consent", apiKeyConsent.status === 401 && !apiKeyConsent.headers.location, `status ${apiKeyConsent.status}`);
-    const noCsrf = await raw(portB, "POST", "/oauth/consent", { cookie: sB.cookie, headers: formHeaders, body: form({ pending_id: pend1, decision: "approve" }) });
-    assert("consent with a session but no CSRF is 403, no redirect", noCsrf.status === 403 && !noCsrf.headers.location, `status ${noCsrf.status}`);
-    const badCsrf = await raw(portB, "POST", "/oauth/consent", { cookie: sB.cookie, headers: formHeaders, body: form({ pending_id: pend1, decision: "approve", csrf: "nope" }) });
-    assert("consent with a wrong CSRF is 403", badCsrf.status === 403 && !badCsrf.headers.location, `status ${badCsrf.status}`);
-    const evilOrigin = await raw(portB, "POST", "/oauth/consent", { cookie: sB.cookie, origin: "https://evil.example", headers: formHeaders, body: form({ pending_id: pend1, decision: "approve", csrf: sB.csrf }) });
-    assert("consent with a foreign Origin is 403 even with session and CSRF", evilOrigin.status === 403 && !evilOrigin.headers.location, `status ${evilOrigin.status}`);
+    const noSessPost = await consent({}, { pending_id: pend1, decision: "approve" });
+    assert("POST /api/oauth/consent without a session is refused: 401, no redirect, no code", noSessPost.status === 401 && json(noSessPost).redirect === undefined, `status ${noSessPost.status}`);
+    const apiKeyConsent = await consent({ headers: { authorization: "Bearer sb_not_an_owner" } }, { pending_id: pend1, decision: "approve" });
+    assert("an Authorization header does not stand in for the owner session on consent", apiKeyConsent.status === 401 && json(apiKeyConsent).redirect === undefined, `status ${apiKeyConsent.status}`);
+    const oldRoute = await raw(portB, "POST", "/oauth/consent", { session: sB.sid, headers: { ...formHeaders, ...csrfH }, body: form({ pending_id: pend1, decision: "approve" }) });
+    assert("the old POST /oauth/consent route decides nothing, even with a session and CSRF (no handler, no redirect)", oldRoute.status >= 400 && !oldRoute.headers.location, `status ${oldRoute.status}`);
+    const noCsrf = await consent({ session: sB.sid }, { pending_id: pend1, decision: "approve" });
+    assert("consent with a session but no CSRF is 403, no redirect", noCsrf.status === 403 && json(noCsrf).redirect === undefined, `status ${noCsrf.status}`);
+    const badCsrf = await consent({ session: sB.sid, headers: { "x-switchboard-csrf": "nope" } }, { pending_id: pend1, decision: "approve" });
+    assert("consent with a wrong CSRF is 403", badCsrf.status === 403 && json(badCsrf).redirect === undefined, `status ${badCsrf.status}`);
+    const bodyCsrf = await consent({ session: sB.sid }, { pending_id: pend1, decision: "approve", csrf: sB.csrf });
+    assert("the CSRF value in the body is not accepted (only the header counts): 403", bodyCsrf.status === 403 && json(bodyCsrf).redirect === undefined, `status ${bodyCsrf.status}`);
+    const evilOrigin = await consent({ session: sB.sid, origin: "https://evil.example", headers: csrfH }, { pending_id: pend1, decision: "approve" });
+    assert("consent with a foreign Origin is 403 even with session and CSRF", evilOrigin.status === 403 && json(evilOrigin).redirect === undefined, `status ${evilOrigin.status}`);
 
-    // resume with a session: GET the loopback consent page, then approve with the form csrf field
-    const resume = await raw(portB, "GET", `/oauth/consent?pending_id=${pend1}`, { cookie: sB.cookie });
-    assert("a signed-in owner gets the consent form for the pending request", resume.status === 200 && /name="decision"/.test(resume.body) && resume.body.includes(`name="csrf" value="${sB.csrf}"`), `status ${resume.status}`);
-    const resumeAnon = await raw(portB, "GET", `/oauth/consent?pending_id=${pend1}`);
-    assert("the same URL without a session shows no form", resumeAnon.status === 401 && !/name="decision"/.test(resumeAnon.body), `status ${resumeAnon.status}`);
-    const approve = await raw(portB, "POST", "/oauth/consent", { cookie: sB.cookie, origin: `http://127.0.0.1:${portB}`, headers: formHeaders, body: form({ pending_id: pend1, decision: "approve", csrf: sB.csrf }) });
-    const loc = approve.headers.location ?? "";
+    // the owner's view of the pending request, then the decision
+    const pendAnon = await raw(portB, "GET", `/api/oauth/pending/${pend1}`);
+    const pendOwner = await raw(portB, "GET", `/api/oauth/pending/${pend1}`, { session: sB.sid });
+    assert("a pending request is described only to a signed-in owner: 401 without a session", pendAnon.status === 401 && !pendAnon.body.includes("verify-http-security"), `status ${pendAnon.status}`);
+    assert("a signed-in owner sees the client name, the scopes and the audience of the pending request", pendOwner.status === 200 && json(pendOwner).client_name === "verify-http-security" && Array.isArray(json(pendOwner).scopes) && typeof json(pendOwner).resource === "string", `status ${pendOwner.status} ${pendOwner.body.slice(0, 120)}`);
+    const approve = await consent({ session: sB.sid, origin: `http://127.0.0.1:${portB}`, headers: csrfH }, { pending_id: pend1, decision: "approve" });
+    const loc = json(approve).redirect ?? "";
     const authCode = new URL(loc || "http://x/", "http://x").searchParams.get("code");
-    assert("the owner approves with the form csrf field: 302 with a code and the original state", approve.status === 302 && !!authCode && new URL(loc).searchParams.get("state") === "s1", `status ${approve.status}`);
+    assert("the owner approves with the session and CSRF headers: 200 with a redirect carrying a code and the original state", approve.status === 200 && !!authCode && new URL(loc).searchParams.get("state") === "s1", `status ${approve.status}`);
     const tok = await raw(portB, "POST", "/token", { headers: formHeaders, body: form({ grant_type: "authorization_code", code: authCode, redirect_uri: clientMeta.redirect_uris[0], client_id: cl.client_id, code_verifier: p1.verifier, resource: `${PUBLIC_B}/mcp` }) });
     assert("the code from an owner-approved consent exchanges for a token", tok.status === 200 && typeof json(tok).access_token === "string", `status ${tok.status}`);
-    const replay = await raw(portB, "POST", "/oauth/consent", { cookie: sB.cookie, headers: formHeaders, body: form({ pending_id: pend1, decision: "approve", csrf: sB.csrf }) });
-    assert("a pending consent is single use", replay.status === 400 && !replay.headers.location, `status ${replay.status}`);
+    const replay = await consent({ session: sB.sid, headers: csrfH }, { pending_id: pend1, decision: "approve" });
+    assert("a pending consent is single use", replay.status === 404 && json(replay).redirect === undefined, `status ${replay.status}`);
 
-    // signed in from the start: the consent form is rendered inline; header CSRF is accepted; deny works
+    // signed in from the start: /authorize still renders no form (nothing to leak), the CSRF header is the only way, deny works
     const p2 = pkce();
-    const a2 = await raw(portB, "GET", authPath(cl.client_id, p2.challenge, "s2"), { cookie: sB.cookie });
-    const pend2 = a2.body.match(/name="pending_id"\s+value="([^"]+)"/)?.[1];
-    assert("/authorize with an owner session renders the consent form with csrf", a2.status === 200 && !!pend2 && a2.body.includes(`name="csrf" value="${sB.csrf}"`), `status ${a2.status}`);
-    const viaHeader = await raw(portB, "POST", "/oauth/consent", { cookie: sB.cookie, headers: { ...formHeaders, "x-switchboard-csrf": sB.csrf }, body: form({ pending_id: pend2, decision: "approve" }) });
-    assert("consent accepts the CSRF value in the X-Switchboard-CSRF header", viaHeader.status === 302 && /[?&]code=/.test(viaHeader.headers.location ?? ""), `status ${viaHeader.status}`);
+    const a2 = await raw(portB, "GET", authPath(cl.client_id, p2.challenge, "s2"), { session: sB.sid });
+    const pend2 = a2.body.match(/#\/oauth\/([A-Za-z0-9_-]+)/)?.[1];
+    assert("/authorize renders no consent form even for a signed-in owner, and the page never contains the CSRF value or the session id", a2.status === 401 && !!pend2 && !/<form/.test(a2.body) && !a2.body.includes(sB.csrf) && !a2.body.includes(sB.sid), `status ${a2.status}`);
+    const viaHeader = await consent({ session: sB.sid, headers: csrfH }, { pending_id: pend2, decision: "approve" });
+    assert("consent accepts the CSRF value in the X-Switchboard-CSRF header", viaHeader.status === 200 && /[?&]code=/.test(json(viaHeader).redirect ?? ""), `status ${viaHeader.status}`);
     const p3 = pkce();
-    const a3 = await raw(portB, "GET", authPath(cl.client_id, p3.challenge, "s3"), { cookie: sB.cookie });
-    const pend3 = a3.body.match(/name="pending_id"\s+value="([^"]+)"/)?.[1];
-    const deny = await raw(portB, "POST", "/oauth/consent", { cookie: sB.cookie, headers: formHeaders, body: form({ pending_id: pend3, decision: "deny", csrf: sB.csrf }) });
-    assert("the owner can deny: 302 with error=access_denied and no code", deny.status === 302 && /error=access_denied/.test(deny.headers.location ?? "") && !/[?&]code=/.test(deny.headers.location ?? ""), `status ${deny.status}`);
-    const unknownPending = await raw(portB, "GET", "/oauth/consent?pending_id=does-not-exist", { cookie: sB.cookie });
-    assert("an unknown or expired pending id is 400", unknownPending.status === 400, `status ${unknownPending.status}`);
+    const a3 = await raw(portB, "GET", authPath(cl.client_id, p3.challenge, "s3"), { session: sB.sid });
+    const pend3 = a3.body.match(/#\/oauth\/([A-Za-z0-9_-]+)/)?.[1];
+    const deny = await consent({ session: sB.sid, headers: csrfH }, { pending_id: pend3, decision: "deny" });
+    assert("the owner can deny: 200 with a redirect carrying error=access_denied and no code", deny.status === 200 && /error=access_denied/.test(json(deny).redirect ?? "") && !/[?&]code=/.test(json(deny).redirect ?? ""), `status ${deny.status}`);
+    const unknownPending = await raw(portB, "GET", "/api/oauth/pending/does-not-exist", { session: sB.sid });
+    assert("an unknown or expired pending id is 404", unknownPending.status === 404, `status ${unknownPending.status}`);
 
     // ---- a client API key authenticates /mcp here (auth is required on this instance) ----
-    const keyRes = await raw(portB, "POST", "/api/apikeys", { cookie: sB.cookie, headers: { "x-switchboard-csrf": sB.csrf }, body: { name: "b-key" } });
+    const keyRes = await raw(portB, "POST", "/api/apikeys", { session: sB.sid, headers: { "x-switchboard-csrf": sB.csrf }, body: { name: "b-key" } });
     const bKey = json(keyRes).token ?? "sb_issuance_failed";
     const mcpKey = await raw(portB, "POST", "/mcp", { headers: { ...MCP_HEADERS, authorization: `Bearer ${bKey}` }, body: INIT });
     assert("a client API key authenticates /mcp (MCP only, never the admin API)", mcpKey.status === 200, `status ${mcpKey.status}`);

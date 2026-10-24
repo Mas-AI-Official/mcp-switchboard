@@ -89,8 +89,10 @@ clients:
 - When `clients` is non-empty, `/mcp` requires a principal on every request regardless of bind host.
 - Listing and calling are both filtered by the principal's client profile. The effective ceiling is the
   tightest of server, active profile and client. Audit rows carry `principal` and `client`.
-- stdio serve mode takes `--client <id>`; it is recorded as `via: "stdio"` (an assertion by the launching
-  process, documented as such). The bridge is the authenticated path.
+- stdio serve mode takes `--client <id>`; it is recorded as `via: "stdio"`. Since wave 3 (3.15) it also needs the
+  client's key: the stored key file must hold a token the key store accepts for that client, so revoking a client
+  (`client rm`) revokes it on stdio too. It is still the launching process that names the client, and the key file is
+  readable by every process of the OS user (see 3.15, "What this does not do"). The bridge is the authenticated path.
 
 Implementation notes (step 2, `src/principal.ts`, `clientconfig.ts`, `clientadmin.ts`; oracle `verify:principals`). Where the
 code makes a choice the text above leaves open, it is recorded here:
@@ -107,12 +109,14 @@ code makes a choice the text above leaves open, it is recorded here:
 - stdio: with clients configured, `serve` without `--client` does not serve stdio (HTTP, if enabled, continues); stdio only
   and no `--client` exits 1. `--client` must name a configured client.
 - OAuth: the token's OAuth client maps to a client only by exact equality of its registered `client_name` and a client id.
-- Live changes: the key store is re-read on every request. A gateway watches the config file's mtime, size and inode and, on a
-  change, re-parses the whole file through the strict schema and swaps in only `clients` with one assignment; an invalid file
-  is ignored and the previous clients stay. Everything else in the config still needs a restart. `client add|rotate|rm` and
+- Live changes: the key store is re-read on every request. A watcher looks at the config file's mtime, size and inode and, on a
+  change, re-parses the whole file through the strict schema; an invalid file is ignored and the previous clients stay.
+  An ordinary watcher (the CLI, a library caller) swaps in only `clients` with one assignment. A RUNNING GATEWAY's watcher is
+  pinned (3.15): it reports the difference and does not apply it. Everything else in the config still needs a restart. `client add|rotate|rm` and
   the admin API edit the YAML in place (comments and order kept), validate before writing, and write atomically with a `.bak`.
-- Every change to the client set writes an audit row (`client.add`, `client.update`, `client.rotate`, `client.remove`,
-  principal `owner:cli` or `owner:dashboard`), never with a token.
+- Every change to the client set writes an audit row (`client.add`, `client.update`, `client.rotate`, `client.remove`),
+  never with a token. The principal is `owner:dashboard` (an owner session), `owner:cli` (a gateway-side presence check
+  passed, named in the reason) or, when nothing proved the owner, `local:cli` (3.15).
 
 ### 3.2 HTTP hardening
 
@@ -121,14 +125,15 @@ code makes a choice the text above leaves open, it is recorded here:
 - Origin: if present it must match the allowlist (scheme + host + port) on every non-GET route and on
   `/mcp`; otherwise 403.
 - Admin API (every route that mutates state or executes a tool, and the GET routes that reveal settings,
-  audit, usage, keys or tools) requires an owner session: an HttpOnly, SameSite=Strict cookie issued by
-  `POST /api/session` in exchange for a one-time login code. `switchboard dashboard login` mints the code
-  after an owner-presence check and opens the browser at `/#login=<code>`. Codes live 120 s and work once.
-  Client API keys are never accepted on admin routes.
+  audit, usage, keys or tools) requires an owner session: a session id sent in the `X-Switchboard-Session` header,
+  issued by `POST /api/session` in exchange for a one-time login code (no cookie, see 3.15). `switchboard dashboard login`
+  asks the RUNNING gateway, which performs the owner-presence check itself, mints the code in its own memory and opens
+  the browser at `/#login=<code>`. Codes live 120 s and work once. Client API keys are never accepted on admin routes.
 - Mutating admin requests also require the header `X-Switchboard-CSRF` equal to the session's CSRF value.
 - Security headers on every response: `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
   `X-Frame-Options: DENY`, a restrictive CSP for the SPA; `x-powered-by` disabled.
-- OAuth AS consent (`/oauth/consent`) requires an owner session. DCR is rate limited and capped.
+- OAuth AS consent is decided in the dashboard (`GET /api/oauth/pending/:id`, `POST /api/oauth/consent`) with an owner
+  session and the CSRF value, never on a page of its own (3.15). DCR is rate limited and capped.
 - `listen` errors (port in use) fail loudly and exit non-zero instead of shadowing.
 - `GET /mcp` (wave 2): the endpoint is stateless, so there is no session for a standalone GET to attach an event stream
   to, and the SDK would hold the socket open for as long as the caller likes. After authentication a GET gets 405 with
@@ -289,8 +294,10 @@ approval: the dashboard route does it, and so does `switchboard kill off`, which
 (`POST /api/control/kill/off`, control token) instead of deleting the file itself. A caller that can only run the
 CLI, such as an agent with a shell, therefore cannot undo the owner's emergency stop. No gateway reachable: exit 1 and
 the file stays (starting a gateway is safe, it refuses every call while the file exists). Nothing to clear: no gateway
-needed. `kill on` and `kill status` need none. The control API has no other kill-switch route. Both doors write
-`kill.off` and `kill.off_refused` audit rows under `owner:dashboard` or `owner:cli`.
+needed. `kill on` and `kill status` need none. The control API's kill-switch routes are `kill/off` (presence) and, since wave 3, `kill/on`. Both doors write
+`kill.off` and `kill.off_refused` audit rows under `owner:dashboard` or `owner:cli`. Wave 3 (3.15) adds the latch: the
+gateway keeps the switch on in memory once it has seen it, so deleting the KILL file does not turn it off, and the control
+API gains `POST /api/control/kill/on`.
 
 ### 3.9 Storage
 
@@ -445,6 +452,78 @@ Eleven findings from the wave 1 adversarial review, each reproduced before it wa
   discover` and `local-llm`. The stored `client_name` is not altered: the client mapping of 3.1 compares it exactly.
 - **Webhook.** The `error` carried by a webhook payload is scrubbed with the audit's `redactSecretShapes` before it is
   handed over; the audit row scrubs its own copy, so the two never differ in what they hide.
+
+### 3.15 Wave 3 hardening (identity and approvals review, oracle `verify:hardening-3`)
+
+Six findings from the wave 2 identity and installer reviews, reproduced on 6deb12f (HEAD of this branch) against the
+adversary this document names: a process of the SAME OS user, such as an agent with a shell, that can run the CLI,
+read and write every file under SWITCHBOARD_HOME and reach the loopback ports. Two of them are one defect (the kill
+file). Every defect below was reproduced before it was closed; the oracle replays each attack and fails on the old code.
+
+- **The gateway mints the login code (finding 1; 3.2 already said the code is minted after an owner-presence check).**
+  0.1.0 did the check inside `switchboard dashboard login`, a process the caller controls: `--presence none` plus
+  `SWITCHBOARD_INSECURE_APPROVAL=1` in the caller's own environment passed it, and the code was a file under
+  `SWITCHBOARD_HOME/login-codes/`, as were the sessions (`sessions.json`), both writable by the caller. Now
+  `POST /api/control/login` (control token) makes THIS gateway ask `approvals.verifyPresence` ("Sign in to the MCP
+  Switchboard dashboard"), mint the code and return it; the CLI has no `--presence` option and no environment variable
+  of the caller reaches the check. One prompt at a time (a second request while one is open is 429 `SB_PRESENCE_BUSY`).
+  Codes (120 s, once) and sessions (12 h) are in the gateway's memory only; `login-codes/` and `sessions.json` are not
+  read, not written, and a restart signs the owner out. Audit: `dashboard.login` and `dashboard.login_refused`.
+- **The session is a header, not a cookie (finding 4).** A cookie is not scoped by port (RFC 6265, and SameSite does not
+  separate ports): after sign-in, a browser visit to any other listener on `127.0.0.1` handed it a working owner session
+  (observed in Chromium), and the CSRF value was derived from the session id and returned to a cookie-only caller, so the
+  cookie alone could mint a full-privilege client key. Now `POST /api/session` answers `{session, csrf, expires_at}` and sets
+  no cookie; the SPA keeps both in `sessionStorage` (scoped to the origin, port included, never sent by the browser on its
+  own) and sends `X-Switchboard-Session` on every call and `X-Switchboard-CSRF` on every mutating one. The CSRF value is
+  random per session and `GET /api/session` does not return it. A Cookie header is never read. Consent for the OAuth server
+  moves the same way: `/authorize` renders no form (a navigation cannot carry a header), it links to `#/oauth/<id>` in the
+  dashboard, and the decision is `POST /api/oauth/consent` with the session and CSRF headers; the `/oauth/consent` page and
+  form route are gone. A session lives in one tab: open the consent link in the tab that `dashboard login` opened.
+- **The kill switch is latched in the gateway (findings 2 and 6; 3.8 says an agent with a shell cannot undo the stop).**
+  The file alone was the state, so `rm KILL` re-opened every tool, with no audit row. Now the first time the gateway
+  process sees the switch on (the file, or `setKillFile(true)` in this process) it latches it in memory; from then on it is on
+  whatever the file says. The only way back is `setKillFile(false)`, which the gateway calls after its own presence check
+  (the dashboard toggle and `POST /api/control/kill/off`, which also clears a latch whose file is already gone). A file that
+  vanishes while latched writes one `kill.tamper` audit row and one error log line and keeps refusing; a file seen for the
+  first time writes `kill.latched`. `kill on` against a running gateway goes through `POST /api/control/kill/on`, which writes the
+  file and latches in one step (a delete right after cannot win a race), and a 250 ms timer in the gateway latches a CLI-made
+  file even when nobody is calling. `switchboard kill status` and `kill off` also ask the gateway what it is doing. Residual:
+  the latch is memory, so a restart starts without it (a file still present latches again at the first look).
+- **Clients are administered through the gateway (finding 3).** `client add|rotate` and the client registration of
+  `install` go through the running gateway: `POST /api/control/clients/:id/add|rotate` show the owner the exact grant in the
+  presence prompt ("Register client 'x': servers *, max_scope full, max_risk high"), check that what was shown is still what
+  will be done after the prompt, then act inside the gateway (live at once, key file written). `client rm` (a revocation) needs no
+  presence, like deny. With no gateway running there is nothing to ask: the CLI writes the files, and the audit row is
+  `local:cli` with "no owner presence proven", never `owner:cli`. The running gateway's client watcher is pinned: the YAML file is
+  writable by the caller, so a client added or widened there (plus a key written to the key store) would be a full-privilege client
+  nobody approved. The gateway applies a client change only from ClientAdmin and at start; a file that differs is reported once
+  (warning and a `client.drift_ignored` audit row), shown by `client list`, and loaded by the next restart. `serve --client` now
+  needs the client's key, which makes `client rm` revoke stdio as well (a revoked client used to stay serveable by assertion).
+  The dashboard's client routes are unchanged: their proof is the owner session, which now exists only after presence.
+- **One approval, one upstream call (finding 5).** `applyArgTransforms` let the later key win after the reverse rename while
+  the approval hash ignores key order, so `{to, recipient}` and `{recipient, to}` were one approval and two upstream calls.
+  Two arguments that map to the same upstream name are now refused with `SB_BAD_REQUEST` (`ArgCollisionError`), in the router
+  BEFORE the governor, the approval request and any approval (nothing to approve, nothing to spend), and again inside
+  `applyArgTransforms`. The rename lookup is a Map (an argument named `constructor` was renamed to the source text of
+  `Object`), and an own `__proto__` argument stays an own key. With no collision the mapping is injective, so the approval hash
+  determines the upstream arguments.
+
+What this does NOT do (stated plainly, and recorded as open):
+
+- **Same-user agents are not isolated from each other.** Decision 7 promises distinct identities, and they are distinct against
+  mistakes and against a caller that has no key, but they are not a boundary between processes of one OS user: a client key file is
+  DPAPI user-scope, which separates nothing between two processes of that user, so a process that is `lowmodel` can run
+  `switchboard bridge --client boss` and be `boss`; `apikey new --client boss` prints a token for it as well. Closing that needs an
+  OS boundary this design does not have: a separate OS account or a sandbox per agent, or a per-launch secret handed only to the
+  process a client starts. Until then Switchboard governs what a well-behaved agent may do and stops an agent from raising its own
+  ceiling or minting a client (which needs the owner present); it does not stop agent A from acting as agent B.
+- Everything on disk under SWITCHBOARD_HOME and the config file is trusted at gateway start. An agent that can stop and restart
+  the gateway can load an edited config and forget a latch. The gateway's presence checks are the boundary while it runs.
+- A login prompt cannot name who asked. An agent that calls the control login route gets a Windows Hello prompt that says "Sign in
+  to the MCP Switchboard dashboard"; if the owner approves a prompt they did not start, the agent receives the code. That is a
+  confused-deputy risk of any presence prompt; the prompt text and the 429 on a second request are the mitigation.
+- `/oauth/consent` stays in the public-route allowlist of `isPublicRoutePath` with no handler behind it (404); it is harmless and
+  left to keep two oracles that pin that list unchanged.
 
 ## 4. Order of work
 

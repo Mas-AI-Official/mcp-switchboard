@@ -554,19 +554,23 @@ const leftovers = (dir, target) => readdirSync(dir).filter((f) => f !== target &
   }
   assert("config: a write that dies before the rename leaves the config byte-identical and no temp file", cr.threw && Buffer.compare(keep, readFileSync(cfgPath)) === 0 && leftovers(cfgDir, "switchboard.config.yaml").length === 0);
 
-  // owner sessions and login codes: atomic, no .bak (a code is one use; a backup would keep revoked session hashes)
+  // owner sessions and login codes. Adapted for design 3.15: they are memory only. A file under SWITCHBOARD_HOME is
+  // writable by every process of the same OS user, so a code or a session kept there is not a credential: the old
+  // checks (stored under its hash, atomic temp-file write, no .bak) described files that no longer exist. The new ones
+  // prove the same care in the new form: one use, nothing written anywhere, nothing survives a restart.
   const sdir = freshDir("sessions");
+  const sbHome = process.env.SWITCHBOARD_HOME;
   let T = 1_000_000;
   const clock = () => T;
-  const codes = new LoginCodeStore({ dir: sdir, clock });
-  const sessions = new OwnerSessions({ path: join(sdir, "sessions.json"), clock, codes });
+  const codes = new LoginCodeStore({ clock });
+  const sessions = new OwnerSessions({ clock, codes });
   const code = codes.mint();
-  const codeFile = join(sdir, "login-codes", `${sha256(code)}.json`);
-  assert("login code: stored under its hash, complete JSON, no temp file", existsSync(codeFile) && !!JSON.parse(text(codeFile)).expires && readdirSync(join(sdir, "login-codes")).every((f) => f.endsWith(".json")));
+  assert("login code: held in memory only (no login-codes directory under SWITCHBOARD_HOME, nothing in a scratch directory)", !existsSync(join(sbHome, "login-codes")) && readdirSync(sdir).length === 0);
   const login = sessions.login(code);
   assert("session: a login code redeems once", !!login && sessions.login(code) === null);
-  assert("session: sessions.json is valid JSON holding the hashed session only", JSON.parse(text(join(sdir, "sessions.json"))).sessions.length === 1 && !text(join(sdir, "sessions.json")).includes(login.sid));
-  assert("session: no .bak and no temp file beside sessions.json", !existsSync(join(sdir, "sessions.json.bak")) && readdirSync(sdir).every((f) => f === "sessions.json" || f === "login-codes"));
+  assert("session: memory only (no sessions.json, no .bak, no temp file under SWITCHBOARD_HOME)", !existsSync(join(sbHome, "sessions.json")) && !existsSync(join(sbHome, "sessions.json.bak")) && !existsSync(join(sbHome, "login-codes")));
+  assert("session: a restart (a fresh OwnerSessions) knows neither the session nor the code", new OwnerSessions({ clock }).lookup(login.sid) === null && !new OwnerSessions({ clock }).login(code));
+  assert("session: the session works on the instance that made it and expires with the clock", sessions.lookup(login.sid) !== null && ((T += 13 * 3600_000), sessions.lookup(login.sid) === null));
 }
 
 // ── footer ───────────────────────────────────────────────────────────────────────────────────────────────

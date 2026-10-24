@@ -5,7 +5,7 @@
  *   switchboard init                 scaffold a config + home dir
  *   switchboard serve                run the gateway (stdio and/or HTTP per config)
  *   switchboard dashboard            run only the HTTP endpoint + web console
- *   switchboard dashboard login      mint a one-time owner login code (owner-presence checked)
+ *   switchboard dashboard login      sign in: the RUNNING gateway checks you are present, then hands out a one-time login code
  *   switchboard list                 mount everything and print the governed tool list
  *   switchboard doctor               check the environment + config
  *   switchboard catalog              list OAuth providers + connection status
@@ -13,7 +13,7 @@
  *   switchboard install <client>     register MCP Switchboard in an MCP client (bridge by default; preview, backup, probe, rollback)
  *   switchboard uninstall <client>   remove only the Switchboard entry from an MCP client (backup first)
  *   switchboard bridge --client <id> relay a client's stdio to the shared HTTP gateway as that client
- *   switchboard client add|list|rotate|rm   register clients (who may call /mcp) and manage their keys
+ *   switchboard client add|list|rotate|rm   register clients (who may call /mcp) and manage their keys (a running gateway checks you are present before it grants one)
  *   switchboard local-llm            detect a local LLM server for the offline council
  *   switchboard local-llm wire       wire a detected local server into the council
  *   switchboard toolkits sync        rebuild the integration catalog from open indexes
@@ -35,7 +35,7 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import { loadConfig, writeConfig, starterConfig } from "./config.js";
-import type { SwitchboardConfig } from "./types.js";
+import type { ClientConfig, SwitchboardConfig } from "./types.js";
 import {
   applyProfileEnvOverride,
   describeProfile,
@@ -43,8 +43,7 @@ import {
 } from "./profiles.js";
 import { createGateway } from "./gateway.js";
 import { startDashboard, type DashboardHandle } from "./dashboard.js";
-import { LoginCodeStore, assertPortFree } from "./httpsec.js";
-import { randomChallenge, verifyOwnerPresence, type PresenceMethod } from "./presence.js";
+import { assertPortFree } from "./httpsec.js";
 import { runExpose, TUNNEL_KINDS, type TunnelKind } from "./expose.js";
 import { ensureDir } from "./atomicfile.js";
 import { Vault, HOME_DIR } from "./vault.js";
@@ -53,7 +52,8 @@ import { ApiKeyStore } from "./apikeys.js";
 import { ClientAdmin, ClientAdminError, NEW_CLIENT_DEFAULTS, type ClientSpec } from "./clientadmin.js";
 import { ClientConfigWatcher } from "./clientconfig.js";
 import { APPROVAL_ID_RE, APPROVALS_FILE, summarizeArgs, type ApprovalView } from "./approvals.js";
-import { readControlKey } from "./controlkey.js";
+import { ControlError, askGateway, controlRequest } from "./controlclient.js";
+import { readClientKey } from "./clientkeys.js";
 import { readJsonFileSync } from "./atomicfile.js";
 import { BAD_CLIENT_ID, isValidClientId, type Principal } from "./principal.js";
 import { inferScope } from "./policy.js";
@@ -167,15 +167,17 @@ program
 program
   .command("serve")
   .description("run the gateway (transports come from config)")
-  .option("--client <id>", "act as this registered client on the stdio transport (an assertion by the launching process; use `bridge` for an authenticated path)")
+  .option("--client <id>", "serve this registered client on the stdio transport (needs the client's key, the same one `bridge` reads: a client whose keys were revoked is not served)")
   .action(async (opts: { client?: string }) => {
     const path = configPath();
     const cfg = bootConfig(path);
     const wantsHttp = cfg.gateway.transport.includes("http");
     let wantsStdio = cfg.gateway.transport.includes("stdio");
 
-    // Who the stdio transport speaks to (design 3.1). It is the launching process's own assertion, recorded as
-    // via "stdio". Clients configured and no --client: stdio is not served unidentified.
+    // Who the stdio transport speaks to (design 3.1 and 3.15). The launching process names the client, and the
+    // client's key must still be valid: an entry whose keys were revoked (`client rm`) or never issued is not served,
+    // so revoking a client revokes it on stdio too. Recorded as via "stdio". Clients configured and no --client:
+    // stdio is not served unidentified.
     let stdioPrincipal: Principal | undefined;
     if (opts.client !== undefined) {
       if (!isValidClientId(opts.client)) {
@@ -184,6 +186,17 @@ program
       }
       if (!Object.prototype.hasOwnProperty.call(cfg.clients ?? {}, opts.client)) {
         log.error(`client '${opts.client}' is not configured: run \`switchboard client add ${opts.client}\` first`);
+        process.exit(1);
+      }
+      let keyOk = false;
+      try {
+        const stored = readClientKey(opts.client);
+        keyOk = stored !== null && new ApiKeyStore().inspect(stored)?.client === opts.client;
+      } catch {
+        keyOk = false; // unreadable or foreign key file: not a working key
+      }
+      if (!keyOk) {
+        log.error(`client '${opts.client}' has no working key, so stdio does not serve it (a key is revoked by \`client rm\`, replaced by \`client rotate\`): issue one with \`switchboard client add ${opts.client}\``);
         process.exit(1);
       }
       stdioPrincipal = { id: opts.client, client: opts.client, via: "stdio" };
@@ -197,7 +210,7 @@ program
     }
 
     if (!wantsHttp) {
-      log.warn("the HTTP listener is off (gateway.transport has no http): calls that need approval cannot be approved, because approvals are decided on the dashboard or with `switchboard approvals` against the running listener, and `switchboard kill off` cannot clear the kill switch for the same reason (`kill on` still works)");
+      log.warn("the HTTP listener is off (gateway.transport has no http): calls that need approval cannot be approved, because approvals are decided on the dashboard or with `switchboard approvals` against the running listener, and `switchboard kill off`, `switchboard dashboard login` and the client grants of `switchboard client` and `install` cannot reach this gateway for the same reason (`kill on` still works)");
     }
     if (wantsHttp) await requireFreeHttpPort(cfg);
     const gateway = await createGateway(cfg);
@@ -242,41 +255,30 @@ function openInBrowser(url: string): void {
 
 dashboardCmd
   .command("login")
-  .description("mint a one-time owner login code for the dashboard, after an owner-presence check")
-  .option("--presence <method>", "owner presence check: auto | hello | tty | none (none needs SWITCHBOARD_INSECURE_APPROVAL=1)", "auto")
+  .description("sign in to the dashboard: the running gateway checks you are present (Windows Hello, or a challenge at its own console), then a one-time login code opens it")
   .option("--no-open", "print the login URL but do not open the browser")
-  .action(async (opts: { presence: string; open: boolean }) => {
-    const methods = ["auto", "hello", "tty", "none"];
-    if (!methods.includes(opts.presence)) {
-      log.error(`unknown --presence '${opts.presence}': choose one of ${methods.join(", ")}`);
-      process.exitCode = 1;
-      return;
-    }
-    const cfg = loadConfig(configPath());
-    const presence = await verifyOwnerPresence(
-      opts.presence as PresenceMethod | "auto",
-      "Sign in to the MCP Switchboard dashboard",
-      randomChallenge(4),
-    );
-    if (!presence.ok) {
-      log.error(`owner presence check failed (${presence.method}): ${presence.reason}`);
-      process.exitCode = 1;
-      return;
-    }
-    const code = new LoginCodeStore().mint();
-    const url = `http://127.0.0.1:${cfg.gateway.http.port}/#login=${code}`;
-    log.ok(`login code minted (presence: ${presence.method}); it works once and expires in 120 seconds`);
-    out("");
-    out(`  ${url}`);
-    out("");
-    try {
-      // Explicit local probe of our own gateway: loopback is permitted for this one call, nothing else.
-      await guardedFetch(`http://127.0.0.1:${cfg.gateway.http.port}/healthz`, { timeoutMs: 1500, allowLoopback: true });
-    } catch {
-      log.warn(`no gateway answered on 127.0.0.1:${cfg.gateway.http.port}: start it with \`switchboard dashboard\` or \`switchboard serve\` before the code expires`);
-    }
-    if (opts.open) openInBrowser(url);
-  });
+  .action(
+    approvalAction(async (opts: { open: boolean }) => {
+      const cfg = loadConfig(configPath());
+      out("asking the gateway to verify you are present (Windows Hello on this machine, or a challenge at the gateway's terminal)...");
+      let r;
+      try {
+        r = await controlCall("POST", "/login", 150_000);
+      } catch (err) {
+        if (err instanceof CliFail && /no gateway answered|no control key/.test(err.message)) {
+          throw new CliFail(`${err.message} The login code is minted inside the running gateway, after its own presence check, so there is nothing to sign in to until one runs: start it with \`switchboard dashboard\` or \`switchboard serve\`, then run this again.`);
+        }
+        throw err;
+      }
+      if (r.status !== 200 || typeof r.body.code !== "string") throw new CliFail(String(r.body.error ?? `the gateway answered ${r.status}`));
+      const url = `http://127.0.0.1:${cfg.gateway.http.port}/#login=${r.body.code}`;
+      log.ok(`login code minted (presence: ${String(r.body.presence)}); it works once and expires in ${String(r.body.expires_in)} seconds`);
+      out("");
+      out(`  ${url}`);
+      out("");
+      if (opts.open) openInBrowser(url);
+    }),
+  );
 
 program
   .command("expose")
@@ -320,7 +322,8 @@ program
     }
 
     const gateway = await createGateway(cfg);
-    const clientWatcher = new ClientConfigWatcher(cfg, configPath());
+    // Pinned (design 3.15): this process has no control API to ask, so a client changed in the file waits for a restart.
+    const clientWatcher = new ClientConfigWatcher(cfg, configPath(), { pinned: true });
     try {
       await runExpose(gateway, cfg, apiKeys, {
         tunnel,
@@ -746,6 +749,18 @@ llmCmd
     },
   );
 
+/** Is the gateway on this config's port refusing calls? true or false from its own /healthz, null when nothing answers. */
+async function gatewayKillState(cfg: SwitchboardConfig | undefined): Promise<boolean | null> {
+  if (!cfg) return null;
+  try {
+    const res = await guardedFetch(`http://127.0.0.1:${cfg.gateway.http.port}/healthz`, { timeoutMs: 1500, allowLoopback: true });
+    const body = (await res.json()) as { service?: unknown; kill_switch?: unknown };
+    return body.service === "switchboard" ? body.kill_switch === true : null;
+  } catch {
+    return null;
+  }
+}
+
 program
   .command("kill <action>")
   .description("kill switch: refuse every tool call, resource read and prompt get until cleared (on | off | status). Turning it off needs the running gateway to verify you are present")
@@ -763,34 +778,60 @@ program
       } catch {
         cfg = undefined;
       }
-      const report = () => {
-        const st = killStatus(cfg);
-        out(`kill switch: ${st.active ? "ON" : "OFF"}`);
+      // This process is not the gateway: it looks at the file and the config only (passive), and asks the gateway what
+      // IT is doing, because a gateway that has seen the switch on keeps refusing even when the file is gone (design 3.15).
+      const report = async () => {
+        const st = killStatus(cfg, undefined, { passive: true });
+        const gw = await gatewayKillState(cfg);
+        const on = st.active || gw === true;
+        out(`kill switch: ${on ? "ON" : "OFF"}`);
         out(`  file:   ${killFilePath()} (${st.file ? `present${st.since ? `, since ${st.since}` : ""}` : "absent"})`);
         out(`  config: gateway.kill_switch is ${st.config ? "true" : cfg ? "not set" : "unknown (no readable config)"}`);
-        return st;
+        if (gw !== null) {
+          out(`  gateway: ${gw ? "refusing every call" : "answering calls"}${gw && !st.file && !st.config ? " (latched in its memory although the KILL file is gone: deleting the file is not a way to turn it off)" : ""}`);
+        }
+        return { ...st, active: on, gateway: gw };
       };
       const configStillHolds = () => {
         log.error("the KILL file is cleared but gateway.kill_switch is still true in the config: set it to false and restart the gateway");
         process.exitCode = 1;
       };
       if (action === "status") {
-        report();
+        await report();
         return;
       }
       if (action === "on") {
-        const { changed } = setKillFile(true);
-        log.warn(changed ? "kill switch ON: every tool call, resource read and prompt get is now refused" : "kill switch was already on");
-        out("a running gateway sees the file on its next call; no restart needed. Clear it with 'switchboard kill off' (the gateway asks you to prove you are present).");
-        report();
+        const wasOn = killStatus(cfg, undefined, { passive: true }).file;
+        // A running gateway writes the file AND latches the switch in its own memory in one step, so a delete of the
+        // file right afterwards cannot beat it. No gateway, or any failure to ask: the file alone still stops it.
+        let viaGateway = false;
+        if (cfg) {
+          try {
+            const g = await askGateway(cfg.gateway.http.port, "POST", "/kill/on", 10_000);
+            viaGateway = g !== null && g.status === 200;
+          } catch {
+            viaGateway = false;
+          }
+        }
+        if (!viaGateway) setKillFile(true);
+        log.warn(wasOn ? "kill switch was already on" : "kill switch ON: every tool call, resource read and prompt get is now refused");
+        out(
+          viaGateway
+            ? "the running gateway has latched it in its own memory too: deleting the KILL file does not turn it off. Clear it with 'switchboard kill off' (the gateway asks you to prove you are present)."
+            : "a running gateway sees the file on its next call and latches it in memory from then on; no restart needed. Clear it with 'switchboard kill off' (the gateway asks you to prove you are present).",
+        );
+        await report();
         return;
       }
       // OFF re-opens every tool, so it is the one direction that needs the owner present. The CLI cannot show a trusted
       // prompt itself (anything that can run this command could run a copy of it that skipped the prompt), so it asks the
       // RUNNING gateway, which performs the presence check (Windows Hello, or a challenge at its own console) and clears
-      // the file. With nothing to clear there is nothing to protect, so that case needs no gateway.
-      if (!killStatus(cfg).file) {
-        const st = report();
+      // the file and its own latch. With nothing to clear (no file, and no gateway refusing) there is nothing to protect,
+      // so that case needs no gateway.
+      const before = killStatus(cfg, undefined, { passive: true });
+      const gateway = await gatewayKillState(cfg);
+      if (!before.file && gateway !== true) {
+        const st = await report();
         if (st.active) configStillHolds();
         else log.ok("kill switch was already off");
         return;
@@ -808,7 +849,7 @@ program
         throw err;
       }
       if (r.status !== 200) throw new CliFail(String(r.body.error ?? `the gateway answered ${r.status}`));
-      const st = report();
+      const st = await report();
       if (st.active) configStillHolds();
       else log.ok("kill switch OFF: calls are allowed again");
     }),
@@ -827,44 +868,21 @@ class CliFail extends Error {}
  * Call the RUNNING gateway's control API. The CLI never decides anything itself: `approve` makes the gateway ask
  * for owner presence (Windows Hello, or a challenge at the gateway's own console) and sign the decision. The
  * control token that authenticates this call is a convenience, not the security boundary: anything that runs as
- * this OS user can read it, so the presence prompt inside the gateway is the real gate.
+ * this OS user can read it, so the presence prompt inside the gateway is the real gate (controlclient.ts).
  */
 async function controlCall(
   method: "GET" | "POST",
   path: string,
   timeoutMs: number,
+  body?: unknown,
 ): Promise<{ status: number; body: Record<string, unknown> }> {
   const cfg = loadConfig(configPath());
-  const port = cfg.gateway.http.port;
-  let token: string | null;
   try {
-    token = readControlKey();
+    return await controlRequest(cfg.gateway.http.port, method, path, timeoutMs, body);
   } catch (err) {
-    throw new CliFail(err instanceof Error ? err.message : String(err));
+    if (err instanceof ControlError) throw new CliFail(err.message);
+    throw err;
   }
-  if (token === null) throw new CliFail(`no control key in ${HOME_DIR}: no gateway has started here. Start one with \`switchboard dashboard\` or \`switchboard serve\`.`);
-  let res;
-  try {
-    // Explicit local call to our own gateway: loopback is permitted for this one request, nothing else.
-    res = await guardedFetch(`http://127.0.0.1:${port}/api/control${path}`, {
-      method,
-      headers: { authorization: `Bearer ${token}` },
-      timeoutMs,
-      allowLoopback: true,
-    });
-  } catch {
-    throw new CliFail(`no gateway answered on 127.0.0.1:${port} (or the request timed out). Is it running?`);
-  }
-  let body: Record<string, unknown> = {};
-  try {
-    body = (await res.json()) as Record<string, unknown>;
-  } catch {
-    /* an empty or non-JSON body is reported by status */
-  }
-  if (res.status === 401) {
-    throw new CliFail("the gateway rejected the control token: it was restarted since the key was read, or another gateway shares this SWITCHBOARD_HOME. Run the command again.");
-  }
-  return { status: res.status, body };
 }
 
 function checkApprovalId(id: string): void {
@@ -1206,13 +1224,17 @@ const clientCmd = program
   .command("client")
   .description("register the clients that may call /mcp (servers, tools, scope ceiling) and manage their keys");
 
-/** Run a client subcommand: a failure is one clear line and exit code 1, never a stack. */
-function clientAction<A extends unknown[]>(fn: (admin: ClientAdmin, cfg: SwitchboardConfig, ...args: A) => void): (...args: A) => void {
-  return (...args: A) => {
+/**
+ * Run a client subcommand: a failure is one clear line and exit code 1, never a stack. The ClientAdmin it hands over
+ * is the OFFLINE one, used only when no gateway answers: nothing there proves the owner, and its audit row says so.
+ * With a gateway running every grant (add, rotate) goes through the gateway instead, which checks presence first.
+ */
+function clientAction<A extends unknown[]>(fn: (admin: ClientAdmin, cfg: SwitchboardConfig, ...args: A) => Promise<void>): (...args: A) => Promise<void> {
+  return async (...args: A) => {
     try {
       const path = configPath();
       const cfg = loadConfig(path);
-      fn(new ClientAdmin({ cfg, configPath: path, apiKeys: new ApiKeyStore() }), cfg, ...args);
+      await fn(new ClientAdmin({ cfg, configPath: path, apiKeys: new ApiKeyStore(), actor: "cli" }), cfg, ...args);
     } catch (err) {
       log.error(err instanceof ClientAdminError || err instanceof Error ? err.message : String(err));
       process.exitCode = 1;
@@ -1221,6 +1243,25 @@ function clientAction<A extends unknown[]>(fn: (admin: ClientAdmin, cfg: Switchb
 }
 
 const csv = (v: string): string[] => v.split(",").map((x) => x.trim()).filter(Boolean);
+
+/** Is a gateway running that this CLI can ask? Its answer to the (presence-free) list request, or null. */
+async function runningGateway(cfg: SwitchboardConfig): Promise<Record<string, unknown> | null> {
+  const r = await askGateway(cfg.gateway.http.port, "GET", "/clients", 15_000);
+  if (r === null) return null;
+  if (r.status !== 200) throw new CliFail(String(r.body.error ?? `the gateway answered ${r.status}`));
+  return r.body;
+}
+
+/** A change request to the running gateway. A refusal (presence, validation) is an error with the gateway's words. */
+async function gatewayChange(path: string, body: unknown, prompt: boolean): Promise<Record<string, unknown>> {
+  if (prompt) out("asking the gateway to verify you are present (Windows Hello on this machine, or a challenge at the gateway's terminal)...");
+  const r = await controlCall("POST", path, 150_000, body);
+  if (r.status !== 200) throw new CliFail(String(r.body.error ?? `the gateway answered ${r.status}`));
+  return r.body;
+}
+
+const OFFLINE_NOTE =
+  "no gateway answered: the config file and the key store are written, and a gateway that starts later loads them. A gateway that is already running ignores file edits (it applies a change only when this command reaches it, after its presence check), so run this again while it is up if it is.";
 
 function showToken(token: string): void {
   out("");
@@ -1233,13 +1274,13 @@ function showToken(token: string): void {
 
 clientCmd
   .command("add <id>")
-  .description("create or update a client and issue its key (stored for `switchboard bridge --client <id>`; printed only with --print)")
+  .description("create or update a client and issue its key (stored for `switchboard bridge --client <id>`; printed only with --print). A running gateway checks you are present first")
   .option("--servers <list>", `comma separated server id globs the client may see and call (new client default: ${NEW_CLIENT_DEFAULTS.servers.join(",")})`)
   .option("--max-scope <scope>", `scope ceiling: read | write | full (new client default: ${NEW_CLIENT_DEFAULTS.max_scope})`)
   .option("--max-risk <risk>", `highest risk it may request: low | medium | high (new client default: ${NEW_CLIENT_DEFAULTS.max_risk}; a call above it is refused, high still needs an approval)`)
   .option("--print", "print the token once (otherwise it goes only to the client key file)")
   .action(
-    clientAction((admin, _cfg, id: string, opts: { servers?: string; maxScope?: string; maxRisk?: string; print?: boolean }) => {
+    clientAction(async (admin, cfg, id: string, opts: { servers?: string; maxScope?: string; maxRisk?: string; print?: boolean }) => {
       const spec: ClientSpec = {};
       if (opts.servers !== undefined) spec.servers = csv(opts.servers);
       if (opts.maxScope !== undefined) {
@@ -1250,7 +1291,14 @@ clientCmd
         if (!["low", "medium", "high"].includes(opts.maxRisk)) throw new Error("--max-risk must be low, medium or high");
         spec.max_risk = opts.maxRisk as ClientSpec["max_risk"];
       }
-      const r = admin.add(id, spec);
+      let r: { created: boolean; client: ClientConfig; keyKept: boolean; token?: string; revoked: number; keyFile: string };
+      let offline = false;
+      if ((await runningGateway(cfg)) !== null) {
+        r = (await gatewayChange(`/clients/${encodeURIComponent(id)}/add`, { spec, print: opts.print === true }, true)) as typeof r;
+      } else {
+        r = admin.add(id, spec);
+        offline = true;
+      }
       const c = r.client;
       log.ok(`client '${id}' ${r.created ? "created" : "updated"}: servers ${c.servers.join(",") || "(none)"}, max_scope ${c.max_scope ?? "(server ceiling)"}, max_risk ${c.max_risk ?? "high"}`);
       if (r.keyKept) {
@@ -1260,16 +1308,33 @@ clientCmd
         out(`  key: issued and stored for the bridge (${r.keyFile})${r.revoked ? `; replaced ${r.revoked} earlier key(s)` : ""}`);
         if (opts.print && r.token) showToken(r.token);
       }
-      out(`  next: \`switchboard bridge --client ${id}\`. A running gateway picks this client and its key up without a restart.`);
+      out(`  next: \`switchboard bridge --client ${id}\`. ${offline ? OFFLINE_NOTE : "The running gateway has this client and its key now."}`);
     }),
   );
 
 clientCmd
   .command("list")
-  .description("list registered clients and their keys (no secrets)")
+  .description("list registered clients and their keys (no secrets); a running gateway's view when one answers")
   .action(
-    clientAction((admin) => {
-      const { clients, orphan_keys } = admin.list();
+    clientAction(async (admin, cfg) => {
+      const live = await runningGateway(cfg);
+      type Row = { id: string; config: ClientConfig; keys: { id: string; created: string; last_used?: string }[]; key_file: boolean };
+      let clients: Row[];
+      let orphan_keys: { id: string; client?: string }[];
+      if (live) {
+        const rows = (live.clients ?? []) as (ClientConfig & { id: string; keys: Row["keys"]; key_file: boolean })[];
+        clients = rows.map(({ id, keys, key_file, ...config }) => ({ id, config: config as ClientConfig, keys, key_file }));
+        orphan_keys = (live.orphan_keys ?? []) as typeof orphan_keys;
+        out("(the running gateway's view: these are the clients in force)");
+        if (live.drift === true) {
+          log.warn("the config file differs from these clients (it was edited behind the running gateway's back): the file is not applied until the gateway restarts; review it before you restart");
+        }
+      } else {
+        const l = admin.list();
+        clients = l.clients;
+        orphan_keys = l.orphan_keys;
+        out("(no gateway answered: this is the config file and the key store)");
+      }
       if (clients.length === 0) {
         out("no clients registered: /mcp is in single-user mode. Register one with `switchboard client add <id>`.");
       }
@@ -1289,25 +1354,41 @@ clientCmd
 
 clientCmd
   .command("rotate <id>")
-  .description("issue a new key for a client; its earlier keys stop working at once, on a running gateway too")
+  .description("issue a new key for a client; its earlier keys stop working at once. A running gateway checks you are present first")
   .option("--print", "print the token once (otherwise it goes only to the client key file)")
   .action(
-    clientAction((admin, _cfg, id: string, opts: { print?: boolean }) => {
-      const r = admin.rotate(id);
+    clientAction(async (admin, cfg, id: string, opts: { print?: boolean }) => {
+      let r: { token?: string; revoked: number; keyFile: string };
+      let offline = false;
+      if ((await runningGateway(cfg)) !== null) {
+        r = (await gatewayChange(`/clients/${encodeURIComponent(id)}/rotate`, { print: opts.print === true }, true)) as typeof r;
+      } else {
+        r = admin.rotate(id);
+        offline = true;
+      }
       log.ok(`rotated the key of client '${id}': new key stored (${r.keyFile}), ${r.revoked} earlier key(s) revoked`);
-      if (opts.print) showToken(r.token);
+      if (opts.print && r.token) showToken(r.token);
+      if (offline) out(`  ${OFFLINE_NOTE}`);
     }),
   );
 
 clientCmd
   .command("rm <id>")
-  .description("revoke a client's keys and delete its key file; the config entry is removed only with --purge")
+  .description("revoke a client's keys and delete its key file; the config entry is removed only with --purge (no presence check: revoking is always safe)")
   .option("--purge", "also remove the client from the config file")
   .action(
-    clientAction((admin, _cfg, id: string, opts: { purge?: boolean }) => {
-      const r = admin.remove(id, { purge: opts.purge === true });
+    clientAction(async (admin, cfg, id: string, opts: { purge?: boolean }) => {
+      let r: { revokedKeys: number; keyFileRemoved: boolean; purged: boolean };
+      let offline = false;
+      if ((await runningGateway(cfg)) !== null) {
+        r = (await gatewayChange(`/clients/${encodeURIComponent(id)}/rm`, { purge: opts.purge === true }, false)) as typeof r;
+      } else {
+        r = admin.remove(id, { purge: opts.purge === true });
+        offline = true;
+      }
       log.ok(`client '${id}': ${r.revokedKeys} key(s) revoked, key file ${r.keyFileRemoved ? "removed" : "was absent"}${r.purged ? ", config entry removed" : ""}`);
       if (!r.purged) out("  the config entry stays (it grants nothing without a key); add --purge to remove it too.");
+      if (offline) out(`  ${OFFLINE_NOTE}`);
     }),
   );
 

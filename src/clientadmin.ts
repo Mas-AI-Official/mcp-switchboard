@@ -1,10 +1,12 @@
 /**
  * clientadmin.ts: create, change, rotate and remove registered clients (design 3.1).
  *
- * One implementation behind both owner channels: `switchboard client ...` (the CLI, which has a config file and
- * the key stores but no running gateway) and the dashboard's /api/clients (the live gateway). A client is two
- * things that must stay in step: an entry under `clients:` in the config file, and keys in the API key store
- * bound to it, one of which is mirrored into `<SWITCHBOARD_HOME>/clients/<id>.key` for the bridge.
+ * One implementation behind every owner channel: the dashboard's /api/clients (the live gateway, after an owner
+ * session), the control API that `switchboard client ...` and `switchboard install` use when a gateway is running
+ * (the gateway checks owner presence first, design 3.15), and `switchboard client ...` on its own when no gateway
+ * is running (nothing there proves the owner, and the audit row says so). A client is two things that must stay in
+ * step: an entry under `clients:` in the config file, and keys in the API key store bound to it, one of which is
+ * mirrored into `<SWITCHBOARD_HOME>/clients/<id>.key` for the bridge.
  *
  * The token exists only inside this module's return value and the key file. Callers decide whether to show it
  * (the CLI does with `--print`; the admin API never does).
@@ -42,8 +44,24 @@ export interface ClientAdminOptions {
   apiKeys: ApiKeyStore;
   /** The gateway's watcher, so an edit is visible at once; one is made when omitted. */
   watcher?: ClientConfigWatcher;
-  /** Who is acting, for the audit row of each change: "cli" or "dashboard". Default "cli". */
+  /** The door a change comes through, for the audit row of each change: "cli" or "dashboard". Default "cli". */
   actor?: string;
+  /**
+   * What proved the owner for changes made without a per-call `by`: a presence method ("hello", "tty", "none") or
+   * "session". Default none: nothing is proven, and the audit row is labelled `local:<actor>`, not `owner:<actor>`.
+   */
+  proof?: string;
+}
+
+/** Who a single change is attributed to, and what proved it (see {@link ClientAdminOptions}). */
+export interface ChangeBy {
+  actor: string;
+  proof?: string;
+}
+
+/** One line for an owner prompt or a log: what a client may see and do. */
+export function clientSummaryLine(c: ClientConfig): string {
+  return `servers ${c.servers.join(",") || "(none)"}, max_scope ${c.max_scope ?? "server ceiling"}, max_risk ${c.max_risk ?? "high"}`;
 }
 
 export class ClientAdminError extends Error {
@@ -62,9 +80,11 @@ export class ClientAdmin {
   private readonly apiKeys: ApiKeyStore;
   private readonly watcher: ClientConfigWatcher;
   private readonly actor: string;
+  private readonly proof: string | undefined;
 
   constructor(opts: ClientAdminOptions) {
     this.actor = opts.actor ?? "cli";
+    this.proof = opts.proof;
     this.cfg = opts.cfg;
     this.configPath = opts.configPath;
     this.apiKeys = opts.apiKeys;
@@ -80,11 +100,21 @@ export class ClientAdmin {
   /**
    * One audit row per change to who may call the gateway (a client added, changed, rotated or removed), so a
    * policy change leaves a trace in the tamper-evident log. Never carries a token. A failing audit write costs the
-   * row (logged), never the change the owner asked for.
+   * row (logged), never the change the owner asked for. The row says `owner:<door>` only when something proved the
+   * owner (a presence check the gateway made, or an owner session); otherwise `local:<door>` and the reason says that
+   * nothing was proven, because a process that merely ran the CLI is not necessarily the owner.
    */
-  private record(action: string, id: string, reason: string): void {
+  private record(action: string, id: string, reason: string, by: ChangeBy = { actor: this.actor, proof: this.proof }): void {
+    const proven = by.proof !== undefined;
     try {
-      audit({ server: "switchboard", tool: `client.${action}`, scope: "full", decision: "allow", reason: `client '${id}' ${reason}`, principal: `owner:${this.actor}` });
+      audit({
+        server: "switchboard",
+        tool: `client.${action}`,
+        scope: "full",
+        decision: "allow",
+        reason: `client '${id}' ${reason}${proven ? (by.proof === "session" ? " (owner session)" : ` (owner presence: ${by.proof})`) : " (no owner presence proven)"}`,
+        principal: `${proven ? "owner" : "local"}:${by.actor}`,
+      });
     } catch (err) {
       log.error(`audit write failed for client.${action} '${id}': ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -102,22 +132,45 @@ export class ClientAdmin {
     }
   }
 
-  /** Persist `entry` as client `id` (or remove it when null), then make the running config match. */
+  /**
+   * Persist `entry` as client `id` (or remove it when null), then make the running config match. The running map is
+   * set from what is in force plus this one change, not re-read from the file: a gateway's watcher is pinned and
+   * would not apply the file, and the file may hold edits nobody approved that must not ride along.
+   */
   private commit(id: string, entry: ClientConfig | null): void {
+    const next = { ...this.clients() };
+    if (entry) next[id] = entry;
+    else delete next[id];
     if (this.configPath) {
       try {
         editConfigFile(this.configPath, (doc) => (entry ? writeClientEntry(doc, id, entry) : deleteClientEntry(doc, id)));
       } catch (err) {
         throw new ClientAdminError(err instanceof Error ? err.message : String(err), 400);
       }
-      this.watcher.sync();
+      this.watcher.adopt(next);
       return;
     }
-    const next = { ...(this.cfg.clients ?? {}) };
-    if (entry) next[id] = entry;
-    else delete next[id];
     if (Object.keys(next).length > 0) this.cfg.clients = next;
     else delete this.cfg.clients;
+  }
+
+  /**
+   * What `add(id, spec)` would make of the client, without changing anything: the merged, validated entry and whether
+   * it is new. The control API shows the owner exactly this in the presence prompt before it calls `add`.
+   */
+  preview(id: string, spec: ClientSpec = {}): { created: boolean; client: ClientConfig } {
+    this.requireId(id);
+    const current = this.clients()[id];
+    const base: ClientSpec = current ? current : { ...NEW_CLIENT_DEFAULTS, servers: [...NEW_CLIENT_DEFAULTS.servers] };
+    const merged: Record<string, unknown> = { ...base };
+    for (const [k, v] of Object.entries(spec)) if (v !== undefined) merged[k] = v;
+    return { created: !current, client: this.validate(id, merged) };
+  }
+
+  /** True while the config file holds clients that differ from the ones in force (a pinned gateway watcher). */
+  get drifted(): boolean {
+    this.watcher.sync();
+    return this.watcher.drifted;
   }
 
   list(): { clients: ClientSummary[]; orphan_keys: PublicApiKey[] } {
@@ -141,13 +194,9 @@ export class ClientAdmin {
    * is issued unless the stored key file already holds a token the key store accepts for this client (so running
    * `add` twice does not strand a working key). Returns the token only when a key was issued.
    */
-  add(id: string, spec: ClientSpec = {}): { created: boolean; client: ClientConfig; keyKept: boolean; token?: string; key?: PublicApiKey; revoked: number; keyFile: string } {
-    this.requireId(id);
-    const current = this.clients()[id];
-    const base: ClientSpec = current ? current : { ...NEW_CLIENT_DEFAULTS, servers: [...NEW_CLIENT_DEFAULTS.servers] };
-    const merged: Record<string, unknown> = { ...base };
-    for (const [k, v] of Object.entries(spec)) if (v !== undefined) merged[k] = v;
-    const client = this.validate(id, merged);
+  add(id: string, spec: ClientSpec = {}, by?: ChangeBy): { created: boolean; client: ClientConfig; keyKept: boolean; token?: string; key?: PublicApiKey; revoked: number; keyFile: string } {
+    const { created: isNew, client } = this.preview(id, spec);
+    const current = isNew ? undefined : client;
     this.commit(id, client);
 
     let keyKept = false;
@@ -161,16 +210,16 @@ export class ClientAdmin {
     }
     const keyFile = clientKeyPath(id);
     if (keyKept) {
-      this.record("add", id, `${current ? "updated" : "created"}, existing key kept`);
-      return { created: !current, client, keyKept: true, revoked: 0, keyFile };
+      this.record("add", id, `${current ? "updated" : "created"}, existing key kept`, by);
+      return { created: isNew, client, keyKept: true, revoked: 0, keyFile };
     }
     const issued = this.issue(id);
-    this.record("add", id, `${current ? "updated" : "created"}, key ${issued.record.id} issued${issued.revoked ? `, ${issued.revoked} earlier key(s) revoked` : ""}`);
-    return { created: !current, client, keyKept: false, token: issued.token, key: issued.record, revoked: issued.revoked, keyFile };
+    this.record("add", id, `${current ? "updated" : "created"}, key ${issued.record.id} issued${issued.revoked ? `, ${issued.revoked} earlier key(s) revoked` : ""}`, by);
+    return { created: isNew, client, keyKept: false, token: issued.token, key: issued.record, revoked: issued.revoked, keyFile };
   }
 
   /** Change fields of an existing client (`null` clears an optional field). The keys are untouched. */
-  update(id: string, spec: Record<string, unknown>): ClientConfig {
+  update(id: string, spec: Record<string, unknown>, by?: ChangeBy): ClientConfig {
     this.requireId(id);
     const current = this.clients()[id];
     if (!current) throw new ClientAdminError(`no client '${id}'`, 404);
@@ -181,16 +230,16 @@ export class ClientAdmin {
     }
     const client = this.validate(id, merged);
     this.commit(id, client);
-    this.record("update", id, `changed (${Object.keys(spec).join(", ") || "nothing"})`);
+    this.record("update", id, `changed (${Object.keys(spec).join(", ") || "nothing"})`, by);
     return client;
   }
 
   /** Issue a fresh key for an existing client; every earlier key of it stops working at once. */
-  rotate(id: string): { token: string; key: PublicApiKey; revoked: number; keyFile: string } {
+  rotate(id: string, by?: ChangeBy): { token: string; key: PublicApiKey; revoked: number; keyFile: string } {
     this.requireId(id);
     if (!this.clients()[id]) throw new ClientAdminError(`no client '${id}': add it first with \`switchboard client add ${id}\``, 404);
     const issued = this.issue(id);
-    this.record("rotate", id, `key rotated, new key ${issued.record.id}, ${issued.revoked} earlier key(s) revoked`);
+    this.record("rotate", id, `key rotated, new key ${issued.record.id}, ${issued.revoked} earlier key(s) revoked`, by);
     return { token: issued.token, key: issued.record, revoked: issued.revoked, keyFile: clientKeyPath(id) };
   }
 
@@ -198,7 +247,7 @@ export class ClientAdmin {
    * Revoke the client's keys and delete its key file. The config entry stays unless `purge` (the entry without
    * a key is harmless: nobody can authenticate as it). Idempotent; an unknown client with leftovers is cleaned.
    */
-  remove(id: string, opts: { purge?: boolean } = {}): { revokedKeys: number; keyFileRemoved: boolean; purged: boolean } {
+  remove(id: string, opts: { purge?: boolean } = {}, by?: ChangeBy): { revokedKeys: number; keyFileRemoved: boolean; purged: boolean } {
     this.requireId(id);
     const exists = Object.prototype.hasOwnProperty.call(this.clients(), id);
     const revokedKeys = this.apiKeys.revokeClientKeys(id);
@@ -209,7 +258,7 @@ export class ClientAdmin {
       this.commit(id, null);
       purged = true;
     }
-    this.record("remove", id, `removed: ${revokedKeys} key(s) revoked, key file ${keyFileRemoved ? "deleted" : "absent"}${purged ? ", config entry purged" : ", config entry kept"}`);
+    this.record("remove", id, `removed: ${revokedKeys} key(s) revoked, key file ${keyFileRemoved ? "deleted" : "absent"}${purged ? ", config entry purged" : ", config entry kept"}`, by);
     return { revokedKeys, keyFileRemoved, purged };
   }
 

@@ -184,14 +184,19 @@ The admin API behind the dashboard (settings, audit, API keys, running tools, ad
 process also looks like localhost. Sign in from a terminal on the machine that runs Switchboard:
 
 ```bash
-switchboard dashboard login          # checks you are present (Windows Hello, else a typed code), then opens the dashboard signed in
+switchboard dashboard login          # the RUNNING gateway checks you are present (Windows Hello, else a typed code at its console), then opens the dashboard signed in
 switchboard dashboard login --no-open   # print the one-time URL instead of opening a browser
 ```
 
-The URL carries a login code that works once and expires after 120 seconds; it is exchanged for an
-HttpOnly, SameSite=Strict session cookie that lasts 12 hours. Every mutating call also needs a CSRF
-header, which the dashboard handles for you. Client API keys authenticate `/mcp` only and are never
-accepted by the admin API. Every request must also carry a Host header that names this listener
+The command asks the running gateway; the gateway performs the presence check itself and mints the login code in its
+own memory (nothing the caller sets, such as an environment variable or a flag, reaches that check, and no file in
+`~/.switchboard` can create a code or a session). The URL carries a code that works once and expires after 120
+seconds; it is exchanged for a session that lasts 12 hours and is forgotten when the gateway restarts. The session is
+**not a cookie**: a cookie is sent to every port of the same host, so another local web UI you visit in the same
+browser would receive it. The dashboard keeps the session in this tab's `sessionStorage` (scoped to the origin, port
+included) and sends it as the `X-Switchboard-Session` header, with a random per-session CSRF value in
+`X-Switchboard-CSRF` on every mutating call. Sign in again in each tab. Client API keys authenticate `/mcp` only and are
+never accepted by the admin API. Every request must also carry a Host header that names this listener
 (`127.0.0.1`, `localhost` or `[::1]` with the right port, plus the public issuer host on `/mcp` and the
 OAuth routes), and a browser Origin on writes must match it; anything else gets a 403. If the port is
 already taken, `switchboard serve`, `dashboard` and `expose` print the reason and exit non-zero.
@@ -215,7 +220,7 @@ node dist/cli.js uninstall claude-code             # removes only the switchboar
 Every install runs the same steps: it **builds the plan and prints it** (the exact entry and the target file
 or the client's own CLI command), **refuses a file that does not parse** (nothing is touched), **asks you to
 confirm** (`--yes` skips the question), registers the client with the gateway when it is not yet configured
-(the equivalent of `switchboard client add <id>`: all servers, `max_scope write`, `max_risk high`),
+(the equivalent of `switchboard client add <id>`: all servers, `max_scope write`, `max_risk high`; a running gateway shows you that grant in its own presence prompt first),
 **backs the target up** to `<file>.bak-switchboard-<timestamp>` (for `claude mcp` the previous entry is
 recorded instead), **writes** (through the client's own CLI when it is on PATH: `claude mcp add-json`,
 `codex mcp add`, `agy mcp add`; otherwise an atomic temp-file-and-rename edit that keeps every other entry),
@@ -343,10 +348,13 @@ node dist/cli.js kill off       # asks the RUNNING gateway, which checks you are
 It works by creating `~/.switchboard/KILL` (or `$SWITCHBOARD_HOME/KILL`), which the gateway checks on every
 call. `gateway.kill_switch: true` in the config does the same from startup. `/healthz` and `/api/health`
 report it as `kill_switch`. Listing tools, resources and prompts still works; calling them does not.
-Turning it **off** re-opens every tool, so it needs you at the machine: `kill off` and the dashboard toggle both
-make the gateway run its own owner-presence check before the file is removed, so a process that can only run the
-CLI cannot undo your emergency stop. With no gateway reachable `kill off` exits 1 and leaves the switch on
-(starting a gateway is safe: it refuses every call while the file exists). `kill on` and `kill status` need no gateway.
+The gateway **latches** the switch in memory the first time it sees it, so deleting the file does not turn it off: the
+gateway keeps refusing, writes a `kill.tamper` audit row and logs an error. Turning it **off** re-opens every tool, so it
+needs you at the machine: `kill off` and the dashboard toggle both make the gateway run its own owner-presence check, then
+it removes the file and drops the latch, so a process that can only run the CLI or delete files cannot undo your emergency
+stop. With no gateway reachable `kill off` exits 1 and leaves the switch on (starting a gateway is safe: it refuses every
+call while the file exists). `kill on` and `kill status` need no gateway; against a running one, `kill on` has the gateway
+latch it at once. A gateway restart starts without a latch (a file still on disk latches again at the first look).
 
 **Server ids and packages.** A server id is 1 to 64 characters of `a-z 0-9 - _`, starting with a letter or digit, with no
 `__` (it separates the id from the tool name), and unique in the file; the config will not load otherwise. An `npx`
@@ -801,15 +809,25 @@ clients:
   `loopback-anonymous:loopback`) and `client`.
 - **OAuth.** A token maps to a client only when the OAuth client registered with a `client_name` equal to a configured
   client id; the owner's consent is what makes that name trustworthy. Any other token is 403 while clients exist.
-- **stdio.** `switchboard serve --client <id>` runs the stdio transport as that client. It is the launching process's own
-  assertion (`via: stdio`), not an authentication; use `bridge` for an authenticated path. With clients configured,
-  stdio without `--client` is not served.
-- **No restart needed.** A running gateway re-reads keys on every request and watches the config file: when its
-  mtime, size or inode changes it re-parses the whole file through the strict schema and swaps in **only the `clients`
-  section**, atomically. A file that does not parse or validate is ignored (a warning says why) and the previous clients
-  stay in force. Servers, settings and the gateway block still need a restart. The file is therefore authoritative at
-  runtime for who may call: protect it like the key store (a process running as you can edit both).
-- **Admin API** (owner session + CSRF, never a client key, never returns a token): `GET /api/clients`,
+- **stdio.** `switchboard serve --client <id>` runs the stdio transport as that client (`via: stdio`). The launching
+  process names the client, and the client's key must be valid (the stored key file must hold a token the key store
+  accepts), so `client rm` revokes stdio too. Use `bridge` against a running gateway for the shared-gateway path. With
+  clients configured, stdio without `--client` is not served.
+- **Changes while a gateway runs.** `client add`, `client rotate` and the client registration of `install` ask the running
+  gateway, which shows you the exact grant in its own presence prompt (Windows Hello) and then applies it in memory and
+  in the file, live at once. `client rm` (a revocation) needs no prompt. With no gateway running the command writes the
+  config and key store directly and the audit row says `local:cli`, not `owner:cli`: nothing proved you. A running
+  gateway **does not apply edits made to the config file behind its back** (a process running as you can edit the file
+  and the key store, so a file-applied client would be a client nobody approved): it reports the difference once (a
+  warning and a `client.drift_ignored` audit row), `client list` says so, and a restart loads the file as it is.
+  Servers, settings and the gateway block need a restart as before.
+- **Same-user agents are not isolated from each other.** Clients are distinct identities with ceilings, and a client
+  cannot raise its own ceiling or mint another client (that needs you present). But a client's key file is protected for
+  your OS user, which separates nothing between two processes running as you: an agent that is `lowmodel` can run
+  `switchboard bridge --client boss` and act as `boss`. For a real boundary between agents run each under its own OS account
+  or sandbox (or hand each a secret only its own process can read); until then treat all agents that share your account as
+  one trust domain with separate ceilings, not as isolated principals.
+- **Admin API** (owner session header + CSRF, never a client key, never returns a token): `GET /api/clients`,
   `POST /api/clients`, `PUT /api/clients/:id`, `POST /api/clients/:id/rotate`, `DELETE /api/clients/:id`.
 
 `switchboard client list` shows clients and keys without secrets, `client rotate <id>` replaces the key (the old one
@@ -823,7 +841,7 @@ stops working at once, on a running gateway too), `client rm <id>` revokes its k
 | `switchboard init` | Scaffold `switchboard.config.yaml` + the `~/.switchboard` home |
 | `switchboard serve` | Run the gateway (stdio and/or HTTP, per config); `--client <id>` runs the stdio transport as a registered client |
 | `switchboard dashboard` | Run only the HTTP endpoint + web console |
-| `switchboard dashboard login` | Mint a one-time owner login code (after an owner-presence check) and open the dashboard signed in; `--presence` takes auto, hello, tty or none; `--no-open` only prints the URL |
+| `switchboard dashboard login` | Ask the running gateway to check you are present and mint a one-time login code, then open the dashboard signed in; `--no-open` only prints the URL |
 | `switchboard install <client>` | Register MCP Switchboard in a client (`claude-code`, `claude-desktop`, `codex`, `gemini`, `antigravity`, `dsh`, `cursor`, `vscode`): preview, back up, write, probe, roll back on failure. `--mode bridge\|http` / `--scope user\|project` / `--yes` / `--dry-run` / `--dsh-profile` / `--dir` / `--name` |
 | `switchboard uninstall <client>` | Remove only the Switchboard entry from a client (backup first); the registered client and its key stay |
 | `switchboard client add <id>\|list\|rotate <id>\|rm <id>` | Register clients (who may call `/mcp`, with which servers, tools and ceiling) and manage their keys: `add` takes `--servers`, `--max-scope`, `--max-risk`, `--print`; `rm` takes `--purge` |

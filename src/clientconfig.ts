@@ -3,12 +3,18 @@
  *
  * Two jobs, both about a file that several processes share:
  *
- *  - {@link ClientConfigWatcher} keeps a running gateway's `cfg.clients` current. The YAML is otherwise read once
- *    at startup; this watches the file's identity (mtime, size, inode) and, when it changed, re-parses the WHOLE
- *    file through the strict schema and swaps in only its `clients` section with a single assignment. A file that
- *    does not parse or validate is ignored (the previous clients stay in force and a warning says why), so a bad
- *    edit can never open the gateway up or lock every client out. Nothing else in the config is touched: servers,
- *    settings and the gateway block keep the values they started with and still need a restart.
+ *  - {@link ClientConfigWatcher} watches the file's identity (mtime, size, inode) and, when it changed, re-parses the
+ *    WHOLE file through the strict schema. A file that does not parse or validate is ignored (the previous clients
+ *    stay in force and a warning says why), so a bad edit can never open the gateway up or lock every client out.
+ *    Nothing else in the config is touched: servers, settings and the gateway block keep the values they started
+ *    with and still need a restart. What happens to a valid change depends on who is watching:
+ *      - an ordinary watcher (the CLI, a library caller) swaps in the file's `clients` section with one assignment;
+ *      - a PINNED watcher (a running gateway, design 3.15) does not. The YAML file is writable by every process of
+ *        the same OS user, so a client added or widened in it behind a running gateway's back, together with a key
+ *        written to the key store, would otherwise be a full-privilege client no owner ever approved. The gateway
+ *        changes its clients only through ClientAdmin (the dashboard, or the control API after its own presence
+ *        check) and at start. A file that differs is reported once (a warning and `onDrift`), never applied, and
+ *        takes effect at the next restart, which is the owner's act.
  *
  *  - {@link editConfigFile} changes the file for `switchboard client ...` and the admin API. It edits the YAML
  *    document in place so comments and key order survive, validates the result (re-parsed from the text it is
@@ -26,19 +32,58 @@ type Clients = Record<string, ClientConfig>;
 
 const canon = (c: Clients | undefined): string => JSON.stringify(c ? Object.keys(c).sort().map((k) => [k, c[k]]) : []);
 
+/** What differs between the clients in force and the ones in the file: ids only, never values. */
+export interface ClientDrift {
+  added: string[];
+  removed: string[];
+  changed: string[];
+}
+
+export interface ClientConfigWatcherOptions {
+  /** A running gateway: valid changes in the file are reported, not applied (see the file header). */
+  pinned?: boolean;
+  /** Called once per distinct state of the file that differs from the clients in force (pinned watchers only). */
+  onDrift?: (drift: ClientDrift) => void;
+}
+
+function driftOf(live: Clients | undefined, file: Clients | undefined): ClientDrift {
+  const a = live ?? {};
+  const b = file ?? {};
+  return {
+    added: Object.keys(b).filter((k) => !Object.prototype.hasOwnProperty.call(a, k)).sort(),
+    removed: Object.keys(a).filter((k) => !Object.prototype.hasOwnProperty.call(b, k)).sort(),
+    changed: Object.keys(b)
+      .filter((k) => Object.prototype.hasOwnProperty.call(a, k) && JSON.stringify(a[k]) !== JSON.stringify(b[k]))
+      .sort(),
+  };
+}
+
 export class ClientConfigWatcher {
   /** undefined = never looked, so the first sync() reads the file even if it never changes afterwards. */
   private stamp: string | null | undefined = undefined;
+  private driftNow = false;
+  private readonly pinned: boolean;
+  private readonly onDrift?: (drift: ClientDrift) => void;
 
   /** `path` undefined = nothing to watch (an in-memory configuration). */
   constructor(
     private readonly cfg: SwitchboardConfig,
     readonly path: string | undefined,
-  ) {}
+    opts: ClientConfigWatcherOptions = {},
+  ) {
+    this.pinned = opts.pinned === true;
+    this.onDrift = opts.onDrift;
+  }
+
+  /** True while the file holds a valid `clients` section that differs from the clients in force (pinned watchers). */
+  get drifted(): boolean {
+    return this.driftNow;
+  }
 
   /**
-   * Bring `cfg.clients` up to date with the file. Cheap when nothing changed (one stat), so it is called on
-   * every /mcp request and before every admin write. Returns true when the clients map was replaced.
+   * Bring `cfg.clients` up to date with the file (ordinary watcher) or notice that it differs (pinned). Cheap when
+   * nothing changed (one stat), so it is called on every /mcp request and before every admin write. Returns true
+   * when the clients map was replaced.
    */
   sync(): boolean {
     if (!this.path) return false;
@@ -56,7 +101,24 @@ export class ClientConfigWatcher {
       log.warn(`ignoring the change to ${this.path}, keeping the clients already loaded: ${err instanceof Error ? err.message.split("\n").slice(0, 3).join(" ") : String(err)}`);
       return false;
     }
-    if (canon(next) === canon(this.cfg.clients)) return false;
+    if (canon(next) === canon(this.cfg.clients)) {
+      this.driftNow = false;
+      return false;
+    }
+    if (this.pinned) {
+      this.driftNow = true;
+      const d = driftOf(this.cfg.clients, next);
+      const parts = [d.added.length ? `added ${d.added.join(", ")}` : "", d.removed.length ? `removed ${d.removed.join(", ")}` : "", d.changed.length ? `changed ${d.changed.join(", ")}` : ""].filter(Boolean);
+      log.warn(
+        `the clients section of ${this.path} was changed behind this running gateway's back (${parts.join("; ")}): the change is NOT applied. Clients change only through \`switchboard client\` (which asks this gateway, and checks you are present) or the dashboard; restart the gateway to load the file as it is`,
+      );
+      try {
+        this.onDrift?.(d);
+      } catch (err) {
+        log.error(`drift notice failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return false;
+    }
     const before = new Set(Object.keys(this.cfg.clients ?? {}));
     // One assignment: a request in flight sees the old map or the new one, never a mix.
     if (next && Object.keys(next).length > 0) this.cfg.clients = next;
@@ -70,6 +132,17 @@ export class ClientConfigWatcher {
         (removed.length ? `, removed ${removed.join(", ")}` : ""),
     );
     return true;
+  }
+
+  /**
+   * Make `next` the clients in force (one assignment) after the owner-authorised change that produced it was written
+   * to the file, and look at the file again at the next sync() so a difference that was already there is still reported.
+   */
+  adopt(next: Clients): void {
+    if (Object.keys(next).length > 0) this.cfg.clients = next;
+    else delete this.cfg.clients;
+    this.stamp = undefined;
+    this.driftNow = false;
   }
 }
 

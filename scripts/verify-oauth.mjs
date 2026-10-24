@@ -13,7 +13,7 @@ process.env.SWITCHBOARD_HOME = mkdtempSync(join(tmpdir(), "sb-oauth-"));
 
 const { Gateway } = await import("../dist/gateway.js");
 const { startDashboard } = await import("../dist/dashboard.js");
-const { LoginCodeStore } = await import("../dist/httpsec.js");
+const { ownerSession, loopback } = await import("./lib/owner.mjs");
 
 const PORT = 8099;
 const PUBLIC = `http://127.0.0.1:${PORT}`; // loopback http is fine for this offline oracle
@@ -65,33 +65,28 @@ try {
   const client = await reg.json();
   assert("DCR returns a client_id", reg.status === 201 && typeof client.client_id === "string", `${reg.status} ${client.client_id ?? client.error}`);
 
-  // 4b) Consent is the OWNER's decision (design vNext 3.2): sign in the way `switchboard dashboard login`
-  // does, by redeeming a one-time login code for the owner session cookie + CSRF value.
-  const loginRes = await fetch(`${PUBLIC}/api/session`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code: new LoginCodeStore().mint() }) });
-  const owner = await loginRes.json();
-  const ownerCookie = (loginRes.headers.get("set-cookie") ?? "").split(";")[0];
-  assert("owner session established for the consent step", loginRes.status === 200 && ownerCookie.startsWith("switchboard_session=") && typeof owner.csrf === "string", String(loginRes.status));
+  // 4b) Consent is the OWNER's decision (design vNext 3.2 and 3.15): sign in the way `switchboard dashboard login`
+  // does, by asking the gateway for a login code (its own presence check, "none" under this harness) and redeeming
+  // it for the owner session id + CSRF value. Adapted: the session is a header, not a cookie.
+  const owner = await ownerSession(PORT);
+  assert("owner session established for the consent step", owner.status === 200 && owner.sid !== "" && owner.csrf !== "" && owner.setCookie === undefined, String(owner.status));
 
-  // 5) /authorize with PKCE → consent page (consent:true)
+  // 5) /authorize with PKCE → (consent:true) a page that points the owner at the dashboard, never a form
   const verifier = b64url(randomBytes(32));
   const challenge = b64url(createHash("sha256").update(verifier).digest());
   const state = b64url(randomBytes(8));
   const authUrl = `${PUBLIC}/authorize?response_type=code&client_id=${encodeURIComponent(client.client_id)}&redirect_uri=${encodeURIComponent(redirectUri)}&code_challenge=${challenge}&code_challenge_method=S256&state=${state}&scope=read&resource=${encodeURIComponent(`${PUBLIC}/mcp`)}`;
-  const authRes = await fetch(authUrl, { redirect: "manual", headers: { cookie: ownerCookie } });
+  const authRes = await fetch(authUrl, { redirect: "manual", headers: owner.hdr });
   const authHtml = await authRes.text();
-  const pendingMatch = authHtml.match(/name="pending_id"\s+value="([^"]+)"/);
-  assert("/authorize renders consent page with pending_id", authRes.status === 200 && !!pendingMatch, pendingMatch ? "pending_id found" : `status ${authRes.status}`);
+  const pendingMatch = authHtml.match(/#\/oauth\/([A-Za-z0-9_-]+)/);
+  assert("/authorize shows the owner where to decide (a dashboard link with the pending id) and renders no form", authRes.status === 401 && !!pendingMatch && !/<form/.test(authHtml), pendingMatch ? "pending id found" : `status ${authRes.status}`);
 
-  // 6) Approve consent → 302 back to redirect_uri with ?code=
-  const consentRes = await fetch(`${PUBLIC}/oauth/consent`, {
-    method: "POST", redirect: "manual",
-    headers: { "content-type": "application/x-www-form-urlencoded", cookie: ownerCookie },
-    body: new URLSearchParams({ pending_id: pendingMatch[1], decision: "approve", csrf: owner.csrf }).toString(),
-  });
-  const loc = consentRes.headers.get("location") ?? "";
-  const code = new URL(loc, PUBLIC).searchParams.get("code");
-  const returnedState = new URL(loc, PUBLIC).searchParams.get("state");
-  assert("consent approve 302s to redirect_uri with code", (consentRes.status === 302 || consentRes.status === 303) && !!code, `${consentRes.status} loc=${loc}`);
+  // 6) Approve consent through the admin API (session + CSRF headers) → the redirect_uri with ?code=
+  const consentRes = await loopback(PORT, "POST", "/api/oauth/consent", { headers: owner.hdrC, body: { pending_id: pendingMatch[1], decision: "approve" } });
+  const loc = JSON.parse(consentRes.body || "{}").redirect ?? "";
+  const code = loc ? new URL(loc, PUBLIC).searchParams.get("code") : null;
+  const returnedState = loc ? new URL(loc, PUBLIC).searchParams.get("state") : null;
+  assert("consent approve answers with the redirect_uri and a code", consentRes.status === 200 && !!code, `${consentRes.status} loc=${loc}`);
   assert("authorization code preserves state", returnedState === state, `${returnedState} vs ${state}`);
 
   // 7) Token exchange (authorization_code + PKCE verifier + resource)

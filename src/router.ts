@@ -65,6 +65,8 @@ import { deliverWebhook, type SecretResolver, type WebhookEvent } from "./webhoo
 import {
   shapeExposedTool,
   applyArgTransforms,
+  ArgCollisionError,
+  assertNoArgCollision,
   applyResponseRedaction,
   removedRequiredNotInjected,
   injectedArgKeys,
@@ -567,6 +569,17 @@ export class Router {
     if (verdict.decision === "deny") {
       rec({ server: server.id, tool: toolName, scope: verdict.scope, decision: "deny", reason: verdict.reason, error_code: SB_ERR.POLICY_DENY });
       return this.error(`denied by policy: ${verdict.reason}`, SB_ERR.POLICY_DENY);
+    }
+
+    // Ambiguous arguments (design 3.15): an exposed name and the upstream name it replaces, both sent, would reach
+    // the upstream as ONE parameter whose value depended on key order, while the approval hash does not. Refused
+    // here, before a governor token, an approval request or an approval is spent on it.
+    try {
+      assertNoArgCollision(args, server.config, override);
+    } catch (err) {
+      if (!(err instanceof ArgCollisionError)) throw err;
+      rec({ server: server.id, tool: toolName, scope: verdict.scope, decision: "deny", reason: `ambiguous arguments: ${err.message}`, error_code: SB_ERR.BAD_REQUEST });
+      return this.error(`could not prepare arguments for '${exposedName}': ${err.message}`, SB_ERR.BAD_REQUEST);
     }
 
     // Rate limits + spend budgets — charged BEFORE the approval gate so a throttled call never wakes

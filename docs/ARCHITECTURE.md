@@ -56,7 +56,7 @@ mount time. **Credentials never go over the network to us — there is no "us."*
 Every tool call is classified and checked:
 - **Scope:** `read` < `write` < `full`. Default = least privilege (`default_policy`, starter = `read`).
 - **Scope inference:** the tool name is tokenized; `read` only when the first token is a read verb and no token is a write or exec verb, `full` when any token is destructive (`delete/drop/revoke…`), else `write`. Upstream annotations only tighten (`destructiveHint: true` raises to `full`). Design vNext 3.5.
-- **Kill switch:** the `$SWITCHBOARD_HOME/KILL` file or `gateway.kill_switch` refuses every tool call, resource read and prompt get (`SB_KILL_SWITCH`). Design vNext 3.8.
+- **Kill switch:** the `$SWITCHBOARD_HOME/KILL` file or `gateway.kill_switch` refuses every tool call, resource read and prompt get (`SB_KILL_SWITCH`). The gateway latches it in memory the first time it sees it, so deleting the file does not turn it off; only the presence-checked off route does. Design vNext 3.8 and 3.15.
 - **Resources and prompts** run through the same policy, profile, kill-switch and governor gates at read scope. Design vNext 3.10.
 - **Per-tool overrides:** block `delete_repo`, allow `create_issue`, etc.
 - **Risk and approval gates:** a second axis, risk (`low`/`medium`/`high`: read, write, full by default, raised by a server's

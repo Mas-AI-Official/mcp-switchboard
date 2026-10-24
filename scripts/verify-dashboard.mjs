@@ -27,8 +27,10 @@
 //                           behaviour is still pinned here.
 //   admin gating (wiring) : a STATIC scan of the compiled dist/dashboard.js proves the owner-session gate
 //                           (`app.use("/api", ownerSessionGate(...))`) is registered before every /api
-//                           route except liveness, health and the login exchange, and that /oauth/consent
-//                           needs an owner session + CSRF. Behaviour is proven by verify-http-security.mjs;
+//                           route except liveness, health, the login exchange and the control API, and that
+//                           the OAuth consent decision (/api/oauth/consent) sits behind that gate (session
+//                           header + CSRF; the old cookie-and-form /oauth/consent routes are gone, design
+//                           3.15). Behaviour is proven by verify-http-security.mjs;
 //                           this is the cheap regression guard against a route registered ahead of the gate.
 // Zero deps (node stdlib + the package's compiled output). Build first.
 import { readFileSync } from "node:fs";
@@ -279,6 +281,8 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
     ["post", "/api/connect/:provider"],
     ["post", "/api/servers/:id/toggle"],
     ["delete", "/api/servers/:id"],
+    ["post", "/api/oauth/consent"],
+    ["get", "/api/oauth/pending/:id"],
   ];
   for (const [verb, path] of MUST_GATE) {
     assert(`mutator ${verb.toUpperCase()} ${path} is owner-session-gated`, gatedOf(verb, path) === true, gatedOf(verb, path) === null ? "ROUTE NOT FOUND" : "");
@@ -302,11 +306,14 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
     assert(`${verb.toUpperCase()} ${path} is deliberately outside the owner gate`, gatedOf(verb, path) === false, gatedOf(verb, path) === null ? "ROUTE NOT FOUND" : "");
   }
 
-  // The OAuth consent step used to be satisfied by the requester (defect D3). It now needs an owner
-  // session AND the CSRF value, and still carries no peer-address test (a tunnel peer is loopback too).
-  const consentIdx = routes.findIndex((r) => r.verb === "post" && r.path === "/oauth/consent");
+  // The OAuth consent step used to be satisfied by the requester (defect D3). It needs an owner session AND the
+  // CSRF value, and carries no peer-address test (a tunnel peer is loopback too). Adapted for design 3.15: the
+  // decision is now POST /api/oauth/consent, behind the owner gate (which enforces the session header and the
+  // CSRF value on every mutating call), instead of a /oauth/consent form route that read a cookie by itself.
+  const consentIdx = routes.findIndex((r) => r.verb === "post" && r.path === "/api/oauth/consent");
   const consentSrc = consentIdx === -1 ? "" : src.slice(routes[consentIdx].index, consentIdx + 1 < routes.length ? routes[consentIdx + 1].index : src.length);
-  assert("OAuth POST /oauth/consent requires an owner session and a CSRF value (not a peer-address test)", consentIdx !== -1 && consentSrc.includes("sessions.fromRequest(req)") && consentSrc.includes("csrfMatches(") && !consentSrc.includes("isLocalRequest("), consentIdx === -1 ? "ROUTE NOT FOUND" : "");
+  assert("OAuth POST /api/oauth/consent is behind the owner gate and carries no peer-address test", consentIdx !== -1 && gatedOf("post", "/api/oauth/consent") === true && !consentSrc.includes("isLocalRequest("), consentIdx === -1 ? "ROUTE NOT FOUND" : "");
+  assert("the old cookie-and-form routes GET and POST /oauth/consent no longer exist", !routes.some((r) => r.path === "/oauth/consent"));
 }
 
 const failed = checks.filter((c) => !c.ok);

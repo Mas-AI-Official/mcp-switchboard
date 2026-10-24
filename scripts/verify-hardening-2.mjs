@@ -106,7 +106,7 @@ const NG = await import(dist("netguard.js"));
 const { buildDoctorReport } = await import(dist("doctor.js"));
 const { buildHttpToolServer } = await import(dist("httptool.js"));
 const { buildOpenApiServer } = await import(dist("openapi.js"));
-const { LoginCodeStore } = await import(dist("httpsec.js"));
+const { ownerSession } = await import("./lib/owner.mjs");
 const CKEY = await import(dist("controlkey.js"));
 const { loadCatalog } = await import(dist("catalog.js"));
 const { log } = await import(dist("logger.js"));
@@ -740,12 +740,13 @@ try {
     gateways.push(gw);
     const dash = await startDashboard(gw, cfg, cfgPath);
     handles.push(dash);
-    const code = new LoginCodeStore().mint();
-    const sessRes = await raw(port, "POST", "/api/session", { body: { code } });
-    const sid = /switchboard_session=([^;]+)/.exec(sessRes.headers["set-cookie"]?.[0] ?? "")?.[1];
-    const withS = { cookie: `switchboard_session=${sid}` };
-    const withC = { cookie: `switchboard_session=${sid}`, headers: { "x-switchboard-csrf": jsonOf(sessRes).csrf } };
-    assert("setup: an owner session was established", !!sid && !!jsonOf(sessRes).csrf);
+    // Adapted (design 3.15): the gateway mints the login code after ITS presence check (the injected provider below),
+    // and the session is a header, not a cookie. The login's own presence prompt is not one of this section's prompts.
+    const owner = await ownerSession(port);
+    prompts.length = 0;
+    const withS = { headers: owner.hdr };
+    const withC = { headers: owner.hdrC };
+    assert("setup: an owner session was established", !!owner.sid && !!owner.csrf);
 
     // ---- 8. PUT /api/settings --------------------------------------------------------------------------------------
     const fileHash = () => sha(readFileSync(cfgPath));
@@ -854,8 +855,13 @@ try {
     assert("10 control API: with presence it clears the switch, after exactly one presence prompt about the kill switch", c2.status === 200 && !existsSync(killPath) && prompts.length === pc + 1 && /kill switch/i.test(prompts.at(-1)), `${c2.status} ${c2.body.slice(0, 160)}`);
     const killRows = recentAudit(300);
     assert("10 the control-API decisions are audited as the CLI owner (refused and cleared)", killRows.some((r) => r.tool === "kill.off_refused" && r.principal === "owner:cli") && killRows.some((r) => r.tool === "kill.off" && r.principal === "owner:cli"));
+    // Adapted (design 3.15): the control API used to have no route that turns the switch on. It now has kill/on, which
+    // the gateway answers by writing the file AND latching the switch in its own memory (so a delete right after cannot
+    // beat it). Turning ON needs no presence, so the route needs only the control token, and it is audited as local:cli.
+    const onNoTok = await raw(port, "POST", "/api/control/kill/on", { body: {} });
     const onTry = await raw(port, "POST", "/api/control/kill/on", { ...ctl, body: {} });
-    assert("10 the control API has no route that turns the switch on", onTry.status >= 400 && !existsSync(killPath), `${onTry.status}`);
+    assert("10 control API: kill/on needs the control token (401 without), and with it the gateway turns the switch on, latched (200, file written, audited local:cli)", onNoTok.status === 401 && onTry.status === 200 && existsSync(killPath) && recentAudit(100).some((r) => r.tool === "kill.on" && r.principal === "local:cli"), `${onNoTok.status} ${onTry.status}`);
+    KS.setKillFile(false);
 
     // the real CLI (a separate process) against this gateway
     const cliOff = (...a) => runCli(["-c", cfgPath, "kill", ...a]);

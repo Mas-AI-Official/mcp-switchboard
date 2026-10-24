@@ -86,7 +86,7 @@ const { verifyOwnerPresence } = await import(dist("presence.js"));
 const { defaultPresence } = AP;
 const CKEY = await import(dist("controlkey.js"));
 const { isOsProtected } = await import(dist("oscrypt.js"));
-const { LoginCodeStore } = await import(dist("httpsec.js"));
+const { ownerSession } = await import("./lib/owner.mjs");
 const { SB_ERR, SB_HINTS } = await import(dist("errors.js"));
 const { Server } = await import("@modelcontextprotocol/sdk/server/index.js");
 const { ListToolsRequestSchema, CallToolRequestSchema, ListResourcesRequestSchema, ReadResourceRequestSchema } = await import("@modelcontextprotocol/sdk/types.js");
@@ -837,15 +837,13 @@ try {
     await gw.registry.mountLocal(scfg, up.server);
     const dash = await startDashboard(gw, cfg);
     handles.push(dash);
-    const login = async () => {
-      const code = new LoginCodeStore().mint();
-      const r = await raw(port, "POST", "/api/session", { body: { code } });
-      const sid = /switchboard_session=([^;]+)/.exec(r.headers["set-cookie"]?.[0] ?? "")?.[1];
-      return { cookie: `switchboard_session=${sid}`, csrf: jsonOf(r).csrf };
-    };
-    const sess = await login();
-    const withS = { cookie: sess.cookie };
-    const withC = { cookie: sess.cookie, headers: { "x-switchboard-csrf": sess.csrf } };
+    // Adapted (design 3.15): the gateway mints the login code after ITS presence check (the injected provider above), and
+    // the session is a header, not a cookie. The login's own prompt is not one of this section's prompts, so the log
+    // restarts empty (the checks below count prompts from zero).
+    const sess = await ownerSession(port);
+    prompts.length = 0;
+    const withS = { headers: sess.hdr };
+    const withC = { headers: sess.hdrC };
     const mkPending = async (text) => parseSb(await gw.router.callTool("social__send_note", { text }, P("kc", "codex"))).approval_id;
 
     const idA = await mkPending("via dashboard");
@@ -932,7 +930,8 @@ try {
     assert("C8 a plain DELETE removes the client entirely (the Remove button)", rem.status === 200 && jsonOf(rem).purged === true && !jsonOf(await raw(port, "GET", "/api/clients", withS)).clients?.some((c) => c.id === "codex-test"));
 
     const so = await raw(port, "DELETE", "/api/session", { ...withC });
-    assert("C9 sign out drops the session server side (the Sign out button): the cookie stops working", so.status === 200 && (await raw(port, "GET", "/api/approvals", withS)).status === 401);
+    assert("C9 sign out drops the session server side (the Sign out button): the session stops working", so.status === 200 && (await raw(port, "GET", "/api/approvals", withS)).status === 401);
+    assert("C9 ...and signing in set no cookie at all (the session is a header, design 3.15)", sess.setCookie === undefined);
 
     await dash.close().catch(() => {});
     await gw.shutdown().catch(() => {});

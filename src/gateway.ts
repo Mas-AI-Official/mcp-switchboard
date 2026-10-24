@@ -32,6 +32,7 @@ import { Router } from "./router.js";
 import { TriggerManager } from "./triggers.js";
 import { setStdioActive } from "./approval.js";
 import { Approvals } from "./approvals.js";
+import { isKilled } from "./killswitch.js";
 import { buildCouncilServer, COUNCIL_SERVER_ID } from "./council.js";
 import { retryDelay, resolveMountRetry } from "./retry.js";
 import { unpinnedPackageWarnings } from "./packagespec.js";
@@ -57,6 +58,7 @@ export class Gateway {
   private readonly pendingRetries = new Set<NodeJS.Timeout>();
   private shuttingDown = false;
   private readonly sweepTimer: NodeJS.Timeout;
+  private readonly killTimer: NodeJS.Timeout;
 
   /** `opts.approvals` replaces the approvals manager (tests inject their own presence provider; production passes none). */
   constructor(private readonly cfg: SwitchboardConfig, opts: { approvals?: Approvals } = {}) {
@@ -78,6 +80,17 @@ export class Gateway {
       }
     }, 30_000);
     this.sweepTimer.unref();
+    // The kill switch latches the first time this process sees it (killswitch.ts). Looking every quarter second, not
+    // only when a call arrives, means a KILL file made by the CLI is latched, and a later delete of it is noticed and
+    // audited, even while nobody is calling. One stat per tick; unref'd like the sweep.
+    this.killTimer = setInterval(() => {
+      try {
+        isKilled(cfg);
+      } catch (err) {
+        log.warn(`kill switch check failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }, 250);
+    this.killTimer.unref();
   }
 
   /** Mount every enabled server. Failures are isolated so one bad server can't sink the rest. */
@@ -231,6 +244,7 @@ export class Gateway {
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
     clearInterval(this.sweepTimer);
+    clearInterval(this.killTimer);
     // Cancel every pending background remount so a dead server can't resurrect after shutdown.
     for (const timer of this.pendingRetries) clearTimeout(timer);
     this.pendingRetries.clear();

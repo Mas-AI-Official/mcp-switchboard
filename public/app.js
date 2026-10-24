@@ -22,11 +22,40 @@ function attr(s) {
 }
 
 // ----------------------------------------------------------------------------
-// Owner session. The admin API needs the HttpOnly session cookie (the browser sends it by itself) and,
-// on every mutating call, the CSRF value below. It is held in memory only; after a reload it is
-// recovered from GET /api/session. `switchboard dashboard login` opens this page at /#login=<code>.
+// Owner session (design 3.15). The admin API needs the session id in the X-Switchboard-Session header and, on every
+// mutating call, the CSRF value. Both come back once from the login exchange and are kept in THIS TAB's sessionStorage:
+// storage is scoped to the origin, port included, and the browser never sends it by itself, so no other local port
+// can receive it (a cookie is sent to every port of the same host, which is how an unrelated listener on another
+// port used to end up holding a working owner session). `switchboard dashboard login` opens this page at
+// /#login=<code>; the code is single use.
 // ----------------------------------------------------------------------------
-let csrfToken = null;
+const SESSION_STORE = { sid: "switchboard.session", csrf: "switchboard.csrf" };
+function storeGet(key) {
+  try {
+    return window.sessionStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+function storeSet(key, value) {
+  try {
+    if (value === null) window.sessionStorage.removeItem(key);
+    else window.sessionStorage.setItem(key, value);
+  } catch {
+    /* storage blocked: the session then lives in memory for this page load only */
+  }
+}
+let sessionId = storeGet(SESSION_STORE.sid);
+let csrfToken = storeGet(SESSION_STORE.csrf);
+function setSession(sid, csrf) {
+  sessionId = sid;
+  csrfToken = csrf;
+  storeSet(SESSION_STORE.sid, sid);
+  storeSet(SESSION_STORE.csrf, csrf);
+}
+function clearSession() {
+  setSession(null, null);
+}
 
 function showSignInBanner(detail) {
   let el = $("#auth-banner");
@@ -39,7 +68,7 @@ function showSignInBanner(detail) {
   }
   el.innerHTML =
     `<strong>Owner sign-in required.</strong> ${detail ? esc(detail) + " " : ""}` +
-    `Run <code>switchboard dashboard login</code> in a terminal on this machine; it opens this dashboard already signed in.`;
+    `Run <code>switchboard dashboard login</code> in a terminal on this machine; it checks you are present, then opens this dashboard already signed in.`;
 }
 
 function hideSignInBanner() {
@@ -47,21 +76,23 @@ function hideSignInBanner() {
   if (el) el.remove();
 }
 
-// The ONE place the SPA talks to the server. Always sends the session cookie; adds the CSRF header on
-// anything that is not a read; a 401 shows the sign-in banner. `quiet` skips the banner (the sign-in
-// probe handles its own 401).
+// The ONE place the SPA talks to the server. Sends the session header and no cookie; adds the CSRF header on anything
+// that is not a read; a 401 drops a session the server no longer knows and shows the sign-in banner. `quiet` skips the
+// banner (the sign-in probe handles its own 401).
 async function api(path, opts = {}) {
   const { quiet, ...init } = opts;
   const method = String(init.method || "GET").toUpperCase();
   const headers = { "content-type": "application/json", ...(init.headers || {}) };
+  if (sessionId) headers["X-Switchboard-Session"] = sessionId;
   if (method !== "GET" && method !== "HEAD" && csrfToken) headers["X-Switchboard-CSRF"] = csrfToken;
-  const res = await fetch(path, { ...init, method, headers, credentials: "same-origin" });
+  const res = await fetch(path, { ...init, method, headers, credentials: "omit" });
   let body = null;
   const text = await res.text();
   if (text) {
     try { body = JSON.parse(text); } catch { body = { raw: text }; }
   }
   if (!res.ok) {
+    if (res.status === 401 && sessionId && !(method === "POST" && path === "/api/session")) clearSession();
     if (res.status === 401 && !quiet) showSignInBanner();
     const msg = (body && body.error) || `${res.status} ${res.statusText}`;
     const err = new Error(msg);
@@ -72,26 +103,31 @@ async function api(path, opts = {}) {
   return body;
 }
 
-// Redeem a #login=<code> fragment (then drop it from the address bar at once, so the code never lingers
-// in history), or recover the CSRF value of an existing session. Never throws.
+// Redeem a #login=<code> fragment (then drop it from the address bar at once, so the code never lingers in history),
+// or check that the session kept in this tab is still valid. Never throws.
 async function establishSession() {
   const m = /^#login=([A-Za-z0-9_-]{16,200})$/.exec(location.hash);
   if (m) {
     history.replaceState(null, "", location.pathname + location.search);
     try {
       const r = await api("/api/session", { method: "POST", body: JSON.stringify({ code: m[1] }), quiet: true });
-      csrfToken = r.csrf;
+      setSession(r.session, r.csrf);
       hideSignInBanner();
     } catch {
+      clearSession();
       showSignInBanner("That login code is invalid, expired or already used.");
     }
     return;
   }
+  if (!sessionId) {
+    showSignInBanner();
+    return;
+  }
   try {
-    const r = await api("/api/session", { quiet: true });
-    csrfToken = r.csrf;
+    await api("/api/session", { quiet: true });
     hideSignInBanner();
   } catch {
+    clearSession();
     showSignInBanner();
   }
 }
@@ -1806,7 +1842,7 @@ function csvList(text) {
 //
 // Approving here does not just record a click. The gateway asks for owner presence (Windows Hello, or a
 // challenge at its own terminal) with the exact action, and signs the decision only if that succeeds, so a
-// script that steals the session cookie still cannot approve anything.
+// script that steals the owner session still cannot approve anything.
 // ============================================================================
 const approvalsUi = { poll: null, tick: null, busy: false, offsetMs: 0 };
 
@@ -2296,7 +2332,7 @@ $("#sign-out").addEventListener("click", async () => {
   } catch {
     /* already signed out */
   }
-  csrfToken = null;
+  clearSession();
   stopApprovalsTimers();
   paintKill(null);
   view().innerHTML = pageHead("Signed out", "Run switchboard dashboard login in a terminal on this machine to sign in again.");
@@ -2304,8 +2340,62 @@ $("#sign-out").addEventListener("click", async () => {
 });
 
 setInterval(() => {
-  if (csrfToken && !document.hidden) refreshChrome();
+  if (sessionId && !document.hidden) refreshChrome();
 }, 10000);
+
+// ============================================================================
+// VIEW: OAuth consent (design 3.15). A client asked to connect through the OAuth server; the owner decides here, with
+// the session header and the CSRF value (the old page and its cookie are gone). Reached from the link on the page the
+// client's browser shows: #/oauth/<pending id>.
+// ============================================================================
+async function renderOAuthConsent(pendingId) {
+  loadingView();
+  const head = pageHead("Authorize a client", "A client asked to connect to this MCP Switchboard.");
+  if (!sessionId) {
+    view().innerHTML =
+      head +
+      `<div class="panel"><div class="panel-title">Sign in first</div>
+        <p class="panel-sub">Only the owner of this machine can decide this. Run <code>switchboard dashboard login</code> in a terminal on this machine; it opens a dashboard tab already signed in. Then open this same address in that tab (this tab keeps no sign-in).</p></div>`;
+    return;
+  }
+  let p;
+  try {
+    p = await api(`/api/oauth/pending/${encodeURIComponent(pendingId)}`);
+  } catch (e) {
+    view().innerHTML = head + errorBanner(e);
+    return;
+  }
+  const scopes = (p.scopes || []).map((s) => `<li><code>${esc(s)}</code></li>`).join("");
+  const maps = p.maps_to_client
+    ? `<div class="error-banner">The name this client registered with is <strong>${esc(p.maps_to_client)}</strong>, the id of one of your configured clients. Approving gives it that client's access (servers and ceilings). Approve only if you started this connection yourself.</div>`
+    : "";
+  view().innerHTML =
+    head +
+    `<div class="panel">
+      <div class="panel-title">${esc(p.client_name)}</div>
+      <p class="panel-sub">wants an access token for <code>${esc(p.resource)}</code> with these scopes:</p>
+      <ul>${scopes}</ul>
+      ${maps}
+      <div class="row">
+        <button class="btn" id="oc-deny">Deny</button>
+        <button class="btn btn-primary" id="oc-approve">Approve</button>
+      </div>
+    </div>`;
+  const decide = async (decision) => {
+    $("#oc-deny").disabled = true;
+    $("#oc-approve").disabled = true;
+    try {
+      const r = await api("/api/oauth/consent", { method: "POST", body: JSON.stringify({ pending_id: pendingId, decision }) });
+      window.location.assign(r.redirect);
+    } catch (e) {
+      toast(e.message, "error");
+      $("#oc-deny").disabled = false;
+      $("#oc-approve").disabled = false;
+    }
+  };
+  $("#oc-deny").addEventListener("click", () => decide("deny"));
+  $("#oc-approve").addEventListener("click", () => decide("approve"));
+}
 
 // ============================================================================
 // Router
@@ -2342,7 +2432,8 @@ function setActiveNav(path) {
 
 async function router() {
   const path = currentPath();
-  const fn = routes[path] || routes["/catalog"];
+  const consent = /^\/oauth\/([A-Za-z0-9_-]{1,128})$/.exec(path);
+  const fn = consent ? () => renderOAuthConsent(consent[1]) : routes[path] || routes["/catalog"];
   stopApprovalsTimers();
   setActiveNav(path);
   window.scrollTo(0, 0);

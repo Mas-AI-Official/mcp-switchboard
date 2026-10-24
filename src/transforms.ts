@@ -15,6 +15,7 @@
  */
 
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import { safeText } from "./safetext.js";
 import type { ResponseRedaction, SchemaModifier, ServerConfig, ToolOverride } from "./types.js";
 
 /** Resolves a `${vault:..}`/`${env:..}` reference to its value; a literal with no `${...}` passes through. */
@@ -42,13 +43,55 @@ function mergeSchemaModifier(serverMod?: SchemaModifier, toolMod?: SchemaModifie
   };
 }
 
-/** exposed-name -> upstream-name. rename_params is keyed upstream->exposed, so this inverts it. */
-function reverseRenameMap(mod: SchemaModifier): Record<string, string> {
-  const out: Record<string, string> = {};
+/**
+ * exposed-name -> upstream-name. rename_params is keyed upstream->exposed, so this inverts it. A Map, not an
+ * object: a client may send an argument called `constructor` or `toString`, and a lookup on a plain object
+ * would answer with the inherited function and rename the argument to the function's source text.
+ */
+function reverseRenameMap(mod: SchemaModifier): Map<string, string> {
+  const out = new Map<string, string>();
   for (const [upstream, exposed] of Object.entries(mod.rename_params ?? {})) {
-    out[exposed] = upstream;
+    out.set(exposed, upstream);
   }
   return out;
+}
+
+/**
+ * Two arguments the client sent end up as the same upstream parameter: the exposed name of a rename
+ * (`to`) and the upstream name it replaces (`recipient`), both present. Which one reaches the upstream used to
+ * depend on the order the keys arrived in (the later one won), while the approval hash is blind to key order, so
+ * one approval covered two different upstream calls. Such a call is ambiguous and is refused, never resolved.
+ */
+export class ArgCollisionError extends Error {
+  constructor(
+    readonly upstream: string,
+    readonly keys: readonly [string, string],
+  ) {
+    super(
+      `arguments '${safeText(keys[0], 64)}' and '${safeText(keys[1], 64)}' both set the upstream parameter '${safeText(upstream, 64)}': send only one of them`,
+    );
+    this.name = "ArgCollisionError";
+  }
+}
+
+/** Map every argument name to the upstream name it will be sent under; throws {@link ArgCollisionError} when two share one. */
+function mapArgKeys(args: Record<string, unknown> | undefined, reverse: Map<string, string>): Map<string, { from: string; value: unknown }> {
+  const mapped = new Map<string, { from: string; value: unknown }>();
+  for (const [key, value] of Object.entries(args ?? {})) {
+    const target = reverse.get(key) ?? key;
+    const prev = mapped.get(target);
+    if (prev !== undefined) throw new ArgCollisionError(target, [prev.from, key]);
+    mapped.set(target, { from: key, value });
+  }
+  return mapped;
+}
+
+/**
+ * Throws {@link ArgCollisionError} when the arguments are ambiguous under this server's renames. Pure. The router
+ * calls it BEFORE the approval gate, so an ambiguous call never reaches the owner and never spends an approval.
+ */
+export function assertNoArgCollision(args: Record<string, unknown> | undefined, serverCfg: ServerConfig, override?: ToolOverride): void {
+  mapArgKeys(args, reverseRenameMap(mergeSchemaModifier(serverCfg.schema_modifiers, override?.schema_modifiers)));
 }
 
 /**
@@ -152,7 +195,9 @@ export function injectedArgKeys(serverCfg: ServerConfig, override?: ToolOverride
  * Transform agent-supplied arguments into what is actually sent upstream: first reverse-map renamed
  * keys back to their upstream names, then overlay injected values (server then tool, tool wins).
  * Injected values resolve `${vault:..}`/`${env:..}` refs (or pass a literal through) and ALWAYS win
- * over an agent-supplied value for the same key. Pure aside from `resolveSecret`.
+ * over an agent-supplied value for the same key. Two arguments that map to the same upstream name throw
+ * {@link ArgCollisionError}, so the result never depends on the order of the keys. Own keys such as
+ * `__proto__` stay own keys of the result. Pure aside from `resolveSecret`.
  */
 export function applyArgTransforms(
   args: Record<string, unknown>,
@@ -161,18 +206,17 @@ export function applyArgTransforms(
   resolveSecret: SecretResolver,
 ): Record<string, unknown> {
   const mod = mergeSchemaModifier(serverCfg.schema_modifiers, override?.schema_modifiers);
-  const reverse = reverseRenameMap(mod);
+  const mapped = mapArgKeys(args, reverseRenameMap(mod));
 
-  const out: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(args ?? {})) {
-    out[reverse[key] ?? key] = value;
-  }
+  const out = new Map<string, unknown>();
+  for (const [target, { value }] of mapped) out.set(target, value);
 
   const inject = { ...(serverCfg.inject_args ?? {}), ...(override?.inject_args ?? {}) };
   for (const [key, ref] of Object.entries(inject)) {
-    out[key] = resolveSecret(ref);
+    out.set(key, resolveSecret(ref));
   }
-  return out;
+  // fromEntries defines own data properties, so an own "__proto__" key stays a key and no prototype is rewritten.
+  return Object.fromEntries(out);
 }
 
 /**

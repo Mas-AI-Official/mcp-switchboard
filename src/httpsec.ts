@@ -7,21 +7,20 @@
  *   1. Host allowlist: a request whose Host header is not one of this listener's own names is refused,
  *      which is what defeats DNS rebinding (the browser still sends the attacker's hostname).
  *   2. Origin check: a browser always labels cross-site writes with an Origin; one that is not ours is refused.
- *   3. Owner session: the admin API needs an HttpOnly, SameSite=Strict cookie that is only obtainable by
- *      redeeming a single-use login code minted by `switchboard dashboard login` after an owner-presence
- *      check, plus a CSRF header on every mutating call. Client API keys are never accepted there.
+ *   3. Owner session: the admin API needs a session id sent in the X-Switchboard-Session header, only
+ *      obtainable by redeeming a single-use login code that the RUNNING GATEWAY mints after its own owner-presence
+ *      check (`switchboard dashboard login` asks it), plus a CSRF header on every mutating call. Codes and sessions
+ *      live in the gateway's memory only. The session id is never a cookie: a cookie is sent to every port of the
+ *      same host (it is not scoped by port), so any other local listener the browser visited would have held a
+ *      working credential. Client API keys are never accepted there.
  *
  * Everything here is plain functions and classes over node built-ins (no new dependency). Time is
  * injectable so the oracle can prove expiry without sleeping.
  */
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { readFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { connect } from "node:net";
-import { join } from "node:path";
 import type { ErrorRequestHandler, Request, RequestHandler, Response } from "express";
-import { atomicWriteFileSync, ensureDir, readJsonFileSync, writeJsonAtomic } from "./atomicfile.js";
-import { HOME_DIR } from "./vault.js";
 import { log } from "./logger.js";
 
 export type Clock = () => number;
@@ -211,95 +210,67 @@ function refuse(res: Response): void {
   res.status(403).type("text/plain").send("forbidden");
 }
 
-// ── single-use login codes (CLI mints, running gateway redeems) ───────────────────────────────────
+// ── single-use login codes (minted by the running gateway, redeemed by the running gateway) ──────
 
 export const LOGIN_CODE_TTL_MS = 120_000;
 const CODE_SHAPE = /^[A-Za-z0-9_-]{16,200}$/;
+/** More outstanding codes than this means something is minting in a loop: the oldest is dropped. */
+const MAX_OUTSTANDING_CODES = 32;
 
 export interface LoginCodeStoreOptions {
-  /** Home dir holding `login-codes/`. Defaults to SWITCHBOARD_HOME. */
-  dir?: string;
   ttlMs?: number;
   clock?: Clock;
 }
 
 /**
- * File-backed store of sha256(code): one file per code under `<home>/login-codes/`, named by the hash,
- * so the plaintext code never touches disk. It is deliberately a directory and not one JSON list: the
- * CLI process mints while the gateway process redeems, and a shared list would lose updates between
- * them (a redeemed code could be resurrected by a concurrent rewrite). Here redemption is `unlink`,
- * which succeeds for exactly one caller, so a code is single use across processes. Every redemption
- * re-reads the file, so a code minted after the gateway started is honoured.
+ * Login codes, in the memory of the process that serves the dashboard and nowhere else. A code used to be a file
+ * under SWITCHBOARD_HOME written by the CLI, which any process of the same OS user can write: planting
+ * `login-codes/<sha256(code)>.json` made a session with no owner anywhere near it. Now the gateway mints a code
+ * only after its own owner-presence check (the control API in dashboard.ts) and keeps only the hash. A code works
+ * once and for `ttlMs`. Nothing is written to disk, so there is nothing for another process to plant, and a
+ * restart forgets every code.
  */
 export class LoginCodeStore {
-  private readonly dir: string;
+  private readonly codes = new Map<string, number>();
   private readonly ttlMs: number;
   private readonly now: Clock;
 
   constructor(opts: LoginCodeStoreOptions = {}) {
-    this.dir = join(opts.dir ?? HOME_DIR, "login-codes");
     this.ttlMs = opts.ttlMs ?? LOGIN_CODE_TTL_MS;
     this.now = opts.clock ?? Date.now;
   }
 
-  private fileFor(code: string): string {
-    return join(this.dir, `${sha256(code)}.json`);
-  }
-
-  /** Mint a code valid for the TTL. Returns the plaintext code; only its hash is stored. */
+  /** Mint a code valid for the TTL. Returns the plaintext code; only its hash is kept. */
   mint(): string {
-    ensureDir(this.dir);
     this.purge();
+    while (this.codes.size >= MAX_OUTSTANDING_CODES) {
+      const oldest = this.codes.keys().next().value;
+      if (oldest === undefined) break;
+      this.codes.delete(oldest);
+    }
     const code = randomBytes(32).toString("base64url");
-    const rec = { created: this.now(), expires: this.now() + this.ttlMs };
-    // Temp file + fsync + rename: a redeemer never sees a half-written code. No .bak: a code is one use.
-    atomicWriteFileSync(this.fileFor(code), JSON.stringify(rec), { mode: 0o600 });
+    this.codes.set(sha256(code), this.now() + this.ttlMs);
     return code;
   }
 
   /** True exactly once per unexpired code. Unknown, malformed, expired and replayed codes are false. */
   redeem(code: unknown): boolean {
     if (typeof code !== "string" || !CODE_SHAPE.test(code)) return false;
-    const file = this.fileFor(code);
-    let raw: string;
-    try {
-      raw = readFileSync(file, "utf8");
-    } catch {
-      return false;
-    }
-    try {
-      unlinkSync(file); // the claim: of N concurrent redeemers exactly one gets past this line
-    } catch {
-      return false;
-    }
-    try {
-      const expires = Number((JSON.parse(raw) as { expires?: unknown }).expires);
-      return Number.isFinite(expires) && this.now() < expires;
-    } catch {
-      return false;
-    }
+    const h = sha256(code);
+    const expires = this.codes.get(h);
+    if (expires === undefined) return false;
+    this.codes.delete(h); // the claim: single use, whatever happens next
+    return this.now() < expires;
   }
 
-  /** Delete expired code files. Returns how many were removed. */
+  /** Forget expired codes. Returns how many were removed. */
   purge(): number {
     let removed = 0;
-    let names: string[];
-    try {
-      names = readdirSync(this.dir);
-    } catch {
-      return 0;
-    }
-    for (const n of names) {
-      if (!n.endsWith(".json")) continue;
-      const f = join(this.dir, n);
-      try {
-        const expires = Number((JSON.parse(readFileSync(f, "utf8")) as { expires?: unknown }).expires);
-        if (!Number.isFinite(expires) || expires <= this.now()) {
-          unlinkSync(f);
-          removed++;
-        }
-      } catch {
-        /* unreadable or racing with a redeemer: leave it */
+    const t = this.now();
+    for (const [h, expires] of this.codes) {
+      if (expires <= t) {
+        this.codes.delete(h);
+        removed++;
       }
     }
     return removed;
@@ -308,13 +279,11 @@ export class LoginCodeStore {
 
 // ── owner sessions ────────────────────────────────────────────────────────────────────────────────
 
-export const SESSION_COOKIE = "switchboard_session";
+/** The request header that carries the owner session id. Never a cookie (see the file header). */
+export const SESSION_HEADER = "x-switchboard-session";
 export const CSRF_HEADER = "x-switchboard-csrf";
 export const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const SID_SHAPE = /^[A-Za-z0-9_-]{20,128}$/;
-
-/** The CSRF value is derived from the session id, so it survives a page reload and a gateway restart. */
-const csrfFor = (sid: string): string => createHash("sha256").update(`switchboard-csrf-v1:${sid}`, "utf8").digest("base64url");
 
 export interface OwnerSession {
   csrf: string;
@@ -322,137 +291,81 @@ export interface OwnerSession {
 }
 
 export interface OwnerSessionsOptions {
-  /** Persisted list of hashed session ids. Defaults to `<SWITCHBOARD_HOME>/sessions.json`. */
-  path?: string;
   ttlMs?: number;
   clock?: Clock;
   codes?: LoginCodeStore;
 }
 
 /**
- * Owner sessions: an in-memory map of sha256(session id) to expiry, mirrored to a persisted list of the
- * same hashes so a gateway restart does not log the owner out. Only hashes are stored, so a copy of
- * the file cannot be turned into a cookie. A corrupt file means nobody is logged in (fail closed).
+ * Owner sessions: a map of sha256(session id) to expiry and CSRF value, in this process's memory only. Nothing is
+ * persisted (a session file is something another process of the same OS user could write), so a gateway restart
+ * signs the owner out. The CSRF value is random per session and is handed over once, in the login answer; it is
+ * not derived from the session id, so the id alone does not yield it.
  */
 export class OwnerSessions {
   readonly codes: LoginCodeStore;
-  private readonly path: string;
   private readonly ttlMs: number;
   private readonly now: Clock;
-  private readonly live = new Map<string, number>();
-  private diskMtime = -1;
+  private readonly live = new Map<string, { expires: number; csrf: string }>();
 
   constructor(opts: OwnerSessionsOptions = {}) {
-    this.path = opts.path ?? join(HOME_DIR, "sessions.json");
     this.ttlMs = opts.ttlMs ?? SESSION_TTL_MS;
     this.now = opts.clock ?? Date.now;
     this.codes = opts.codes ?? new LoginCodeStore({ clock: this.now });
-    this.loadDisk();
   }
 
   get sessionTtlMs(): number {
     return this.ttlMs;
   }
 
+  /** Mint a login code. Only the gateway's own presence-checked route calls this. */
+  mintLoginCode(): string {
+    return this.codes.mint();
+  }
+
   /** Redeem a login code for a new session. Null when the code is unknown, expired or already used. */
   login(code: unknown): { sid: string; csrf: string; expires: number } | null {
     if (!this.codes.redeem(code)) return null;
     const sid = randomBytes(32).toString("base64url");
+    const csrf = randomBytes(32).toString("base64url");
     const expires = this.now() + this.ttlMs;
     this.prune();
-    this.live.set(sha256(sid), expires);
-    this.persist();
-    return { sid, csrf: csrfFor(sid), expires };
+    this.live.set(sha256(sid), { expires, csrf });
+    return { sid, csrf, expires };
   }
 
   lookup(sid: string | undefined): OwnerSession | null {
     if (!sid || !SID_SHAPE.test(sid)) return null;
     const h = sha256(sid);
-    let expires = this.live.get(h);
-    if (expires === undefined) {
-      this.loadDisk();
-      expires = this.live.get(h);
-    }
-    if (expires === undefined) return null;
-    if (expires <= this.now()) {
+    const s = this.live.get(h);
+    if (s === undefined) return null;
+    if (s.expires <= this.now()) {
       this.live.delete(h);
-      this.persist();
       return null;
     }
-    return { csrf: csrfFor(sid), expires };
+    return { csrf: s.csrf, expires: s.expires };
   }
 
-  /** The session behind a request's cookie, or null. */
+  /** The session behind a request's session header, or null. */
   fromRequest(req: Request): OwnerSession | null {
-    return this.lookup(readCookie(req, SESSION_COOKIE));
+    return this.lookup(sessionIdOf(req));
   }
 
   revoke(sid: string | undefined): boolean {
     if (!sid || !SID_SHAPE.test(sid)) return false;
-    const had = this.live.delete(sha256(sid));
-    if (had) this.persist();
-    return had;
+    return this.live.delete(sha256(sid));
   }
 
   private prune(): void {
     const t = this.now();
-    for (const [h, e] of this.live) if (e <= t) this.live.delete(h);
-  }
-
-  private loadDisk(): void {
-    let mtime: number;
-    try {
-      mtime = statSync(this.path).mtimeMs;
-    } catch {
-      return; // no file yet
-    }
-    if (mtime === this.diskMtime) return;
-    this.diskMtime = mtime;
-    try {
-      const parsed = readJsonFileSync<{ sessions?: { h?: unknown; expires?: unknown }[] }>(this.path) ?? {};
-      const t = this.now();
-      for (const s of parsed.sessions ?? []) {
-        if (typeof s.h === "string" && typeof s.expires === "number" && s.expires > t && !this.live.has(s.h)) {
-          this.live.set(s.h, s.expires);
-        }
-      }
-    } catch (err) {
-      log.warn(`owner session file ${this.path} is unreadable (${err instanceof Error ? err.message : String(err)}); no sessions restored`);
-    }
-  }
-
-  private persist(): void {
-    try {
-      // Atomic replace (temp, fsync, rename). No .bak: a lost session only means logging in again, and a
-      // backup would keep revoked session hashes on disk.
-      writeJsonAtomic(this.path, { sessions: [...this.live].map(([h, expires]) => ({ h, expires })) }, { mode: 0o600, backup: false, space: 0 });
-      this.diskMtime = statSync(this.path).mtimeMs;
-    } catch (err) {
-      log.warn(`could not persist owner sessions: ${err instanceof Error ? err.message : String(err)}`);
-    }
+    for (const [h, s] of this.live) if (s.expires <= t) this.live.delete(h);
   }
 }
 
-export function readCookie(req: Request, name: string): string | undefined {
-  const raw = req.headers.cookie;
-  if (!raw) return undefined;
-  for (const part of raw.split(";")) {
-    const i = part.indexOf("=");
-    if (i > 0 && part.slice(0, i).trim() === name) return part.slice(i + 1).trim();
-  }
-  return undefined;
-}
-
-/** Set the owner cookie: HttpOnly, SameSite=Strict, Path=/, lifetime = the session TTL. */
-export function setSessionCookie(res: Response, sid: string, ttlMs: number, secure: boolean): void {
-  res.append(
-    "Set-Cookie",
-    `${SESSION_COOKIE}=${sid}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(ttlMs / 1000)}${secure ? "; Secure" : ""}`,
-  );
-}
-
-export function clearSessionCookie(res: Response, secure: boolean): void {
-  res.append("Set-Cookie", `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure ? "; Secure" : ""}`);
+/** The session id a request presents in the session header (a single string value), or undefined. */
+export function sessionIdOf(req: Request): string | undefined {
+  const v = req.headers[SESSION_HEADER];
+  return typeof v === "string" ? v.trim() : undefined;
 }
 
 /** Constant-time comparison of a presented CSRF value against the session's. */
@@ -464,9 +377,10 @@ export function csrfMatches(session: { csrf: string }, presented: unknown): bool
 }
 
 /**
- * Gate for every admin route: a valid owner session cookie is required, and mutating methods also need
- * the `X-Switchboard-CSRF` header to equal the session's CSRF value. Nothing else authenticates here:
- * Authorization headers and `x-api-key` are never read, so a client API key can never reach the admin API.
+ * Gate for every admin route: a valid owner session in the `X-Switchboard-Session` header is required, and mutating
+ * methods also need the `X-Switchboard-CSRF` header to equal the session's CSRF value. Nothing else authenticates
+ * here: cookies, Authorization headers and `x-api-key` are never read, so neither a cookie that another port received
+ * nor a client API key can reach the admin API.
  */
 export function ownerSessionGate(sessions: OwnerSessions): RequestHandler {
   return (req, res, next) => {

@@ -9,9 +9,10 @@
  * endpoint is not exposed to the network unless the operator deliberately changes it.
  *
  * Hardening (design vNext 3.2, see httpsec.ts): every route passes a Host allowlist and an Origin check;
- * every response carries the security headers; every `/api/*` route except `/healthz` and
- * `/api/health` needs an owner session cookie (plus a CSRF header when it mutates). Client API
- * keys authenticate `/mcp` only and are never read by the admin API.
+ * every response carries the security headers; every `/api/*` route except `/healthz`, `/api/health`, the
+ * login exchange and the control API needs an owner session in the X-Switchboard-Session header (plus a CSRF
+ * header when it mutates; never a cookie, see httpsec.ts). Client API keys authenticate `/mcp` only and are
+ * never read by the admin API.
  */
 
 import { createHmac } from "node:crypto";
@@ -31,7 +32,7 @@ import { DEFAULT_TTL_SECONDS, type ApprovalChannel, type ApprovalOutcome } from 
 import { bearerOf, controlTokenMatches, newControlToken, writeControlKey } from "./controlkey.js";
 import { activeProfileName, describeProfile } from "./profiles.js";
 import { ApiKeyStore } from "./apikeys.js";
-import { ClientAdmin, ClientAdminError } from "./clientadmin.js";
+import { ClientAdmin, ClientAdminError, clientSummaryLine, type ChangeBy } from "./clientadmin.js";
 import { ClientConfigWatcher } from "./clientconfig.js";
 import { establishPrincipal, isValidClientId } from "./principal.js";
 import { loadCatalog, queryCatalog, type CatalogSnapshot, type Toolkit } from "./catalog.js";
@@ -40,20 +41,16 @@ import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelconte
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { resolveOAuthServerOptions, SwitchboardAuthProvider, OAUTH_SCOPES_SUPPORTED } from "./authserver.js";
 import {
-  CSRF_HEADER,
   DcrLimiter,
   HostGuard,
   jsonErrorHandler,
+  LOGIN_CODE_TTL_MS,
   LoginCodeStore,
   OwnerSessions,
-  SESSION_COOKIE,
   assertPortFree,
-  clearSessionCookie,
-  csrfMatches,
   ownerSessionGate,
-  readCookie,
   securityHeaders,
-  setSessionCookie,
+  sessionIdOf,
   urlLengthGuard,
   type Clock,
 } from "./httpsec.js";
@@ -394,10 +391,29 @@ export async function startDashboard(
     codes: new LoginCodeStore({ clock, ttlMs: opts.loginCodeTtlMs }),
   });
   const apiKeys = new ApiKeyStore();
-  // The clients section follows the config file (design 3.1): `switchboard client add` on the CLI reaches this
-  // running gateway without a restart. Only `clients` is reloaded; every other setting needs a restart.
-  const clientWatcher = new ClientConfigWatcher(cfg, configPath);
-  const clientAdmin = new ClientAdmin({ cfg, configPath, apiKeys, watcher: clientWatcher, actor: "dashboard" });
+  // The clients in force change only through ClientAdmin (the dashboard routes below, after an owner session; the
+  // control API, after this gateway's own presence check) and at start (design 3.15). The YAML file is writable by
+  // any process of the same OS user, so the watcher is PINNED: an edit made behind our back is reported (a warning
+  // and one `client.drift_ignored` audit row), never applied, and a restart loads the file as it is.
+  const clientWatcher = new ClientConfigWatcher(cfg, configPath, {
+    pinned: true,
+    onDrift: (d) => {
+      const parts = [d.added.length ? `added ${d.added.join(", ")}` : "", d.removed.length ? `removed ${d.removed.join(", ")}` : "", d.changed.length ? `changed ${d.changed.join(", ")}` : ""].filter(Boolean);
+      try {
+        audit({
+          server: "switchboard",
+          tool: "client.drift_ignored",
+          scope: "full",
+          decision: "deny",
+          reason: `the clients section of the config file was changed behind the running gateway (${safeText(parts.join("; "), 300)}): not applied, it takes effect only at the next restart`,
+          principal: "file:config",
+        });
+      } catch (err) {
+        log.error(`audit write failed for client.drift_ignored: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    },
+  });
+  const clientAdmin = new ClientAdmin({ cfg, configPath, apiKeys, watcher: clientWatcher, actor: "dashboard", proof: "session" });
   const liveClients = (): Record<string, ClientConfig> | undefined => {
     clientWatcher.sync();
     return cfg.clients;
@@ -421,8 +437,7 @@ export async function startDashboard(
   let resourceMetadataUrl: string | undefined;
   if (oauthOpts) {
     oauthProvider = new SwitchboardAuthProvider(oauthOpts, cfg.settings?.auth_screen, {
-      sessionFor: (r) => sessions.fromRequest(r),
-      resumeUrl: (id) => `http://127.0.0.1:${port}/oauth/consent?pending_id=${encodeURIComponent(id)}`,
+      resumeUrl: (id) => `http://127.0.0.1:${port}/#/oauth/${encodeURIComponent(id)}`,
     });
     // The issuer host is reachable on /mcp and the OAuth routes only (never the dashboard or /api/*).
     guard.addPublicUrl(oauthOpts.publicUrl);
@@ -451,47 +466,9 @@ export async function startDashboard(
         clientRegistrationOptions: { clientSecretExpirySeconds: 0, rateLimit: false },
       }),
     );
-    // A signed-in owner who was bounced to the sign-in page resumes the pending request here.
-    app.get("/oauth/consent", (req: Request, res: Response) => {
-      const pendingId = typeof req.query.pending_id === "string" ? req.query.pending_id : "";
-      const owner = sessions.fromRequest(req);
-      res.set("Cache-Control", "no-store");
-      const html = owner ? oauthProvider!.renderPendingConsent(pendingId, owner.csrf) : oauthProvider!.renderOwnerRequired(pendingId);
-      if (!html) {
-        res.status(400).type("html").send(callbackPage("This authorization request expired. Start again from your client.", false, cfg.settings?.auth_screen));
-        return;
-      }
-      res.status(owner ? 200 : 401).type("html").send(html);
-    });
-    // The consent screen rendered by the provider's `authorize()` POSTs the owner's decision here. It needs
-    // an owner session AND the CSRF value (header or form field): the requester can never self-approve.
-    // Finalize it and 302 the user-agent back to the client with a code, or 400 an expired/unknown
-    // request with a themed page.
-    app.post("/oauth/consent", express.urlencoded({ extended: false }), (req: Request, res: Response) => {
-      const owner = sessions.fromRequest(req);
-      if (!owner) {
-        res
-          .status(401)
-          .type("html")
-          .send(callbackPage("Owner sign-in required: run `switchboard dashboard login` and approve from that browser.", false, cfg.settings?.auth_screen));
-        return;
-      }
-      const body = (req.body ?? {}) as { pending_id?: unknown; decision?: unknown; csrf?: unknown };
-      if (!csrfMatches(owner, req.get(CSRF_HEADER) ?? body.csrf)) {
-        res.status(403).type("html").send(callbackPage("This consent request was rejected: missing or invalid CSRF value.", false, cfg.settings?.auth_screen));
-        return;
-      }
-      const pendingId = typeof body.pending_id === "string" ? body.pending_id : "";
-      const url = oauthProvider!.completeConsent(pendingId, body.decision === "approve");
-      if (!url) {
-        res
-          .status(400)
-          .type("html")
-          .send(callbackPage("This authorization request expired — start again from your client.", false, cfg.settings?.auth_screen));
-        return;
-      }
-      res.redirect(url);
-    });
+    // There is no consent page or form route any more (design 3.15): the owner decides in the dashboard, through
+    // GET /api/oauth/pending/:id and POST /api/oauth/consent below the owner gate, with the session header and the
+    // CSRF value. A cookie cannot carry that decision: it would reach every other local port too.
     resourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(new URL(oauthOpts.canonicalResource));
     // A tunnel-fronted endpoint must NEVER serve `/mcp` unauthenticated. Force the gate on
     // regardless of the loopback `require_auth` heuristic — the public issuer implies exposure.
@@ -551,7 +528,10 @@ export async function startDashboard(
     res.status(report.status === "ok" ? 200 : 503).json({ ...report, kill_switch: killStatus(cfg) });
   });
 
-  // Exchange a one-time login code (minted by `switchboard dashboard login`) for the owner session.
+  // Exchange a one-time login code (minted by THIS gateway, after its own presence check, for `switchboard dashboard
+  // login`) for the owner session. The session id and the CSRF value come back in the body, once, for the SPA to keep
+  // in sessionStorage and send as headers. No cookie is set: a cookie is not scoped by port, so any other local
+  // listener the browser visited would receive a working credential.
   app.post("/api/session", (req: Request, res: Response) => {
     res.set("Cache-Control", "no-store");
     const body = (req.body ?? {}) as { code?: unknown };
@@ -560,8 +540,7 @@ export async function startDashboard(
       res.status(401).json({ error: "invalid, expired or already used login code", code: "SB_LOGIN_CODE" });
       return;
     }
-    setSessionCookie(res, session.sid, sessions.sessionTtlMs, req.secure);
-    res.json({ csrf: session.csrf, expires_at: new Date(session.expires).toISOString() });
+    res.json({ session: session.sid, csrf: session.csrf, expires_at: new Date(session.expires).toISOString() });
   });
 
   // ====================================================================
@@ -614,14 +593,34 @@ export async function startDashboard(
     insecure_presence: process.env.SWITCHBOARD_INSECURE_APPROVAL === "1",
   });
 
-  // Owner decisions are audited under the channel they came through (`owner:dashboard`, `owner:cli`).
-  const ownerAudit = (tool: string, reason: string, actor: "dashboard" | "cli"): void => {
+  // Owner decisions are audited under the channel they came through (`owner:dashboard`, `owner:cli`). A refusal is a
+  // deny row. `principal` overrides the label for an act nothing proved the owner for (`local:cli`).
+  const ownerAudit = (tool: string, reason: string, actor: "dashboard" | "cli", decision: "allow" | "deny" = "allow", principal?: string): void => {
     try {
-      audit({ server: "switchboard", tool, scope: "full", decision: "allow", reason, principal: `owner:${actor}` });
+      audit({ server: "switchboard", tool, scope: "full", decision, reason, principal: principal ?? `owner:${actor}` });
     } catch (err) {
       log.error(`audit write failed for ${tool}: ${err instanceof Error ? err.message : String(err)}`);
     }
   };
+
+  // Client administration helpers, shared by the control API (below) and the dashboard routes (further down).
+  const CLIENT_FIELDS = ["description", "servers", "tools", "exclude_tools", "max_scope", "max_risk", "limits"] as const;
+  const clientFields = (body: Record<string, unknown>, extra: readonly string[] = []): Record<string, unknown> => {
+    const unknown = Object.keys(body).filter((k) => !(CLIENT_FIELDS as readonly string[]).includes(k) && !extra.includes(k));
+    if (unknown.length > 0) throw new ClientAdminError(`unknown field '${safeText(unknown[0], 64)}'`, 400);
+    const out: Record<string, unknown> = {};
+    for (const k of CLIENT_FIELDS) if (k in body) out[k] = body[k];
+    return out;
+  };
+  const clientError = (res: Response, err: unknown): void => {
+    if (err instanceof ClientAdminError) {
+      res.status(err.status).json({ error: err.message });
+      return;
+    }
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  };
+  const bodyOf = (req: Request): Record<string, unknown> =>
+    req.body && typeof req.body === "object" && !Array.isArray(req.body) ? (req.body as Record<string, unknown>) : {};
   /**
    * Turn the kill switch OFF, the one kill-switch direction that re-opens every tool. It is performed by THIS gateway
    * after its own owner-presence check (Windows Hello, or a challenge at its console), whichever door the request came
@@ -636,13 +635,16 @@ export async function startDashboard(
         body: { error: "gateway.kill_switch is true in the config, which a running gateway cannot clear: set it to false and restart the gateway", code: "SB_KILL_CONFIG" },
       };
     }
+    // Nothing on (no file, nothing latched here): nothing to protect, so no prompt.
+    if (!killStatus(cfg).active) return { status: 200, body: { ...killStatus(cfg) } };
     const presence = await approvals.verifyPresence("Turn the MCP Switchboard kill switch OFF: tool calls will be allowed again");
     if (!presence.ok) {
-      ownerAudit("kill.off_refused", `presence check failed (${presence.method}): ${presence.reason}`, actor);
+      ownerAudit("kill.off_refused", `presence check failed (${presence.method}): ${presence.reason}`, actor, "deny");
       return { status: 403, body: { error: `owner presence was not verified (${presence.method}): ${presence.reason}`, code: "SB_PRESENCE_FAILED" } };
     }
-    const { changed } = setKillFile(false);
-    ownerAudit("kill.off", `${changed ? "kill switch turned OFF" : "kill switch was already off"} from the ${actor === "cli" ? "CLI" : "dashboard"} (presence ${presence.method})`, actor);
+    // Removes the file AND drops the latch: the only way back once the gateway has seen the switch on (design 3.15).
+    const { changed, unlatched } = setKillFile(false);
+    ownerAudit("kill.off", `${changed || unlatched ? "kill switch turned OFF" : "kill switch was already off"}${unlatched && !changed ? " (the KILL file was already gone: the latch was cleared)" : ""} from the ${actor === "cli" ? "CLI" : "dashboard"} (presence ${presence.method})`, actor);
     return { status: 200, body: { ...killStatus(cfg) } };
   };
 
@@ -674,8 +676,7 @@ export async function startDashboard(
   });
   control.post("/approvals/:id/approve", approveVia("cli"));
   control.post("/approvals/:id/deny", denyVia("cli"));
-  // `switchboard kill off`: the only kill-switch route here. Turning it ON needs no gateway, and the control API
-  // has no route that does anything else to the switch.
+  // `switchboard kill off`: clearing the switch, the one direction that re-opens every tool, needs presence.
   control.post("/kill/off", async (_req: Request, res: Response) => {
     try {
       const off = await killOff("cli");
@@ -684,11 +685,115 @@ export async function startDashboard(
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
   });
+  // `switchboard kill on` against a running gateway: the gateway writes the file AND latches the switch in its own
+  // memory in one step, so a delete of the file right afterwards cannot beat it. Turning ON needs no presence (anyone
+  // may stop the gateway; that is what a kill switch is for), so the row is not labelled as an owner act.
+  control.post("/kill/on", (_req: Request, res: Response) => {
+    try {
+      const { changed } = setKillFile(true);
+      ownerAudit("kill.on", changed ? "kill switch turned ON through the control API and latched in the gateway" : "kill switch was already on", "cli", "allow", "local:cli");
+      res.json({ ...killStatus(cfg) });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // `switchboard dashboard login`: the code is minted HERE, after THIS gateway's presence check. The caller supplies
+  // nothing that matters: no presence method, no environment. (A caller's own presence check proved nothing: it could
+  // set SWITCHBOARD_INSECURE_APPROVAL itself, and the old login-codes/ directory was writable by any process.) One
+  // prompt at a time: while one is open, another request is refused instead of queueing a second dialog.
+  let loginPrompt = false;
+  control.post("/login", async (_req: Request, res: Response) => {
+    if (loginPrompt) {
+      res.status(429).json({ error: "a sign-in prompt is already open on this machine: answer it first", code: "SB_PRESENCE_BUSY" });
+      return;
+    }
+    loginPrompt = true;
+    try {
+      const presence = await approvals.verifyPresence("Sign in to the MCP Switchboard dashboard");
+      if (!presence.ok) {
+        ownerAudit("dashboard.login_refused", `presence check failed (${presence.method}): ${presence.reason}`, "cli", "deny");
+        res.status(403).json({ error: `owner presence was not verified (${presence.method}): ${presence.reason}`, code: "SB_PRESENCE_FAILED" });
+        return;
+      }
+      const code = sessions.mintLoginCode();
+      ownerAudit("dashboard.login", `a one-time login code was minted after this gateway's presence check (${presence.method})`, "cli");
+      res.json({ code, expires_in: Math.round((opts.loginCodeTtlMs ?? LOGIN_CODE_TTL_MS) / 1000), presence: presence.method });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    } finally {
+      loginPrompt = false;
+    }
+  });
+
+  // Client administration for `switchboard client ...` and `switchboard install` while a gateway runs (design 3.15). A
+  // client's ceiling decides what an agent may do, so granting one (add, change, rotate a key) needs THIS gateway's
+  // presence check, with the exact grant in the prompt; revoking (rm) does not, like deny. The change is made here, in
+  // the gateway's own memory and the config file, so it is live at once and the pinned watcher has nothing to flag.
+  const cliBy = (proof: string | undefined): ChangeBy => ({ actor: "cli", proof });
+  const refusePresence = (res: Response, tool: string, id: string, presence: { method: string; reason: string }): void => {
+    ownerAudit(tool, `client '${id}': presence check failed (${presence.method}): ${presence.reason}`, "cli", "deny");
+    res.status(403).json({ error: `owner presence was not verified (${presence.method}): ${presence.reason}`, code: "SB_PRESENCE_FAILED" });
+  };
+  control.get("/clients", (_req: Request, res: Response) => {
+    try {
+      const { clients, orphan_keys } = clientAdmin.list();
+      res.json({ clients: clients.map((c) => ({ id: c.id, ...c.config, keys: c.keys, key_file: c.key_file })), orphan_keys, drift: clientAdmin.drifted });
+    } catch (err) {
+      clientError(res, err);
+    }
+  });
+  control.post("/clients/:id/add", async (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const body = bodyOf(req);
+      const spec = clientFields(body.spec && typeof body.spec === "object" && !Array.isArray(body.spec) ? (body.spec as Record<string, unknown>) : {});
+      const wantsToken = body.print === true;
+      const shown = clientAdmin.preview(id, spec);
+      const presence = await approvals.verifyPresence(`${shown.created ? "Register" : "Change"} client '${id}': ${clientSummaryLine(shown.client)}${wantsToken ? ". Its key is handed to the CLI" : ""}`);
+      if (!presence.ok) return refusePresence(res, "client.add_refused", id, presence);
+      // The prompt can stay open for minutes: what was shown must still be what will be done.
+      const now = clientAdmin.preview(id, spec);
+      if (now.created !== shown.created || JSON.stringify(now.client) !== JSON.stringify(shown.client)) {
+        res.status(409).json({ error: `client '${id}' changed while the presence prompt was open: nothing was done, run the command again`, code: "SB_CLIENT_CHANGED" });
+        return;
+      }
+      const r = clientAdmin.add(id, spec, cliBy(presence.method));
+      res.json({ created: r.created, client: r.client, keyKept: r.keyKept, revoked: r.revoked, keyFile: r.keyFile, ...(wantsToken && r.token ? { token: r.token } : {}) });
+    } catch (err) {
+      clientError(res, err);
+    }
+  });
+  control.post("/clients/:id/rotate", async (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const wantsToken = bodyOf(req).print === true;
+      if (!Object.prototype.hasOwnProperty.call(liveClients() ?? {}, id)) {
+        res.status(404).json({ error: `no client '${safeText(id, 64)}': add it first with \`switchboard client add ${safeText(id, 64)}\`` });
+        return;
+      }
+      const presence = await approvals.verifyPresence(`Rotate the key of client '${id}'${wantsToken ? ". The new key is handed to the CLI" : ""}`);
+      if (!presence.ok) return refusePresence(res, "client.rotate_refused", id, presence);
+      const r = clientAdmin.rotate(id, cliBy(presence.method));
+      res.json({ rotated: id, revoked: r.revoked, keyFile: r.keyFile, ...(wantsToken ? { token: r.token } : {}) });
+    } catch (err) {
+      clientError(res, err);
+    }
+  });
+  control.post("/clients/:id/rm", (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const r = clientAdmin.remove(id, { purge: bodyOf(req).purge === true }, cliBy(undefined));
+      res.json({ removed: id, purged: r.purged, revokedKeys: r.revokedKeys, keyFileRemoved: r.keyFileRemoved });
+    } catch (err) {
+      clientError(res, err);
+    }
+  });
   app.use("/api/control", control);
 
   // ====================================================================
-  // Owner gate: every /api route below needs a valid owner session cookie, and every mutating one the
-  // X-Switchboard-CSRF header. Client API keys are never read here (defect D4: a loopback peer is not
+  // Owner gate: every /api route below needs a valid owner session (the X-Switchboard-Session header, never a
+  // cookie), and every mutating one the X-Switchboard-CSRF header. Client API keys are never read here (defect D4: a loopback peer is not
   // the owner).
   // ====================================================================
   app.use("/api", ownerSessionGate(sessions));
@@ -698,18 +803,50 @@ export async function startDashboard(
     next();
   });
 
-  // Who am I: lets the SPA recover its CSRF value after a reload (the cookie is HttpOnly).
+  // Who am I: lets the SPA check that the session it kept is still valid after a reload. The CSRF value is not
+  // returned: the SPA keeps the one it got at login.
   app.get("/api/session", (_req: Request, res: Response) => {
     const owner = res.locals.ownerSession as { csrf: string; expires: number };
-    res.json({ authenticated: true, csrf: owner.csrf, expires_at: new Date(owner.expires).toISOString() });
+    res.json({ authenticated: true, expires_at: new Date(owner.expires).toISOString() });
   });
 
-  // Sign out: drops the session server side and expires the cookie.
+  // Sign out: drops the session server side.
   app.delete("/api/session", (req: Request, res: Response) => {
-    sessions.revoke(readCookie(req, SESSION_COOKIE));
-    clearSessionCookie(res, req.secure);
+    sessions.revoke(sessionIdOf(req));
     res.json({ ok: true });
   });
+
+  // --- OAuth consent (design 3.15). The owner decides here, with the session header and the CSRF value, not on a page
+  // of its own. A pending request is only ever described to, and decided by, a signed-in owner. ---
+  if (oauthProvider) {
+    app.get("/api/oauth/pending/:id", (req: Request, res: Response) => {
+      const id = String(req.params.id);
+      const p = oauthProvider!.describePending(id);
+      if (!p) {
+        res.status(404).json({ error: "this authorization request expired or does not exist: start again from the client", code: "SB_OAUTH_PENDING" });
+        return;
+      }
+      // The gateway maps an OAuth client to a configured client by exact name: the owner must see that before approving.
+      const maps = Object.prototype.hasOwnProperty.call(liveClients() ?? {}, p.client_name) ? p.client_name : null;
+      res.json({ pending_id: id, ...p, maps_to_client: maps });
+    });
+    app.post("/api/oauth/consent", (req: Request, res: Response) => {
+      const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? (req.body as Record<string, unknown>) : {};
+      const pendingId = typeof body.pending_id === "string" ? body.pending_id : "";
+      if (body.decision !== "approve" && body.decision !== "deny") {
+        res.status(400).json({ error: "decision must be \"approve\" or \"deny\"", code: "SB_BAD_REQUEST" });
+        return;
+      }
+      const pending = oauthProvider!.describePending(pendingId);
+      const url = oauthProvider!.completeConsent(pendingId, body.decision === "approve");
+      if (!url || !pending) {
+        res.status(404).json({ error: "this authorization request expired or was already decided: start again from the client", code: "SB_OAUTH_PENDING" });
+        return;
+      }
+      ownerAudit("oauth.consent", `OAuth client '${pending.client_name}' ${body.decision === "approve" ? "approved" : "denied"} in the dashboard`, "dashboard");
+      res.json({ redirect: url });
+    });
+  }
 
   // ====================================================================
   // JSON API for the dashboard
@@ -991,24 +1128,6 @@ export async function startDashboard(
   // CSRF as for every /api route. No route here ever returns a token: a new or rotated key goes only to the
   // client's key file (the bridge reads it), exactly as `switchboard client add` does without --print.
   // ====================================================================
-  const CLIENT_FIELDS = ["description", "servers", "tools", "exclude_tools", "max_scope", "max_risk", "limits"] as const;
-  const clientFields = (body: Record<string, unknown>, extra: readonly string[] = []): Record<string, unknown> => {
-    const unknown = Object.keys(body).filter((k) => !(CLIENT_FIELDS as readonly string[]).includes(k) && !extra.includes(k));
-    if (unknown.length > 0) throw new ClientAdminError(`unknown field '${unknown[0]}'`, 400);
-    const out: Record<string, unknown> = {};
-    for (const k of CLIENT_FIELDS) if (k in body) out[k] = body[k];
-    return out;
-  };
-  const clientError = (res: Response, err: unknown): void => {
-    if (err instanceof ClientAdminError) {
-      res.status(err.status).json({ error: err.message });
-      return;
-    }
-    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
-  };
-  const bodyOf = (req: Request): Record<string, unknown> =>
-    req.body && typeof req.body === "object" && !Array.isArray(req.body) ? (req.body as Record<string, unknown>) : {};
-
   app.get("/api/clients", (_req: Request, res: Response) => {
     const { clients, orphan_keys } = clientAdmin.list();
     res.json({

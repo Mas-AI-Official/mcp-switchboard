@@ -29,7 +29,7 @@
 
 import { join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
-import type { Request, Response } from "express";
+import type { Response } from "express";
 import type {
   OAuthServerProvider,
   AuthorizationParams,
@@ -127,14 +127,14 @@ interface PendingAuth {
 const emptyState = (): AuthServerState => ({ clients: {}, accessTokens: {}, refreshTokens: {} });
 
 /**
- * How the consent step learns who the owner is (design vNext 3.2). Consent used to be satisfied by whoever
- * was driving the browser, which includes the client that is asking for access. It now needs an owner
- * session, supplied by the dashboard process that owns the session store.
+ * Where the owner decides (design vNext 3.2 and 3.15). Consent used to be satisfied by whoever was driving the
+ * browser, which includes the client that is asking for access. It is now decided in the dashboard, through the
+ * admin API, with the owner session (a header held in the dashboard's sessionStorage: a browser cannot attach one
+ * to this page's own navigation, and an owner cookie would reach every other local port, see httpsec.ts). So
+ * `/authorize` never renders a decision form: it points the owner at the dashboard, where the pending request waits.
  */
 export interface OwnerConsentGate {
-  /** The owner session attached to this request (for its CSRF value), or null when not signed in. */
-  sessionFor(req: Request): { csrf: string } | null;
-  /** Loopback URL where a signed-in owner can finish a pending consent that began elsewhere. */
+  /** The dashboard address (loopback) where the owner decides a pending request. */
   resumeUrl(pendingId: string): string;
 }
 
@@ -304,31 +304,22 @@ export class SwitchboardAuthProvider implements OAuthServerProvider {
     });
     res.set("Content-Type", "text/html; charset=utf-8");
     res.set("Cache-Control", "no-store");
-    // Consent is the owner's decision, not the requester's. Without an owner session the page carries
-    // no form at all: it only says how to sign in, and the pending request waits for a signed-in owner.
-    const owner = this.ownerGate?.sessionFor(res.req);
-    if (this.ownerGate && !owner) {
-      res.status(401).send(this.ownerRequiredPage(this.ownerGate.resumeUrl(id), client.client_name ?? client.client_id));
+    // Consent is the owner's decision, not the requester's, and it is not made on this page: the page carries no
+    // form at all, only the way to the dashboard, where the pending request waits for the signed-in owner. A
+    // provider with no dashboard behind it has nowhere to decide, so it refuses (fail closed).
+    if (!this.ownerGate) {
+      res.status(503).send("owner consent is not available on this listener");
       return;
     }
-    res.send(this.consentPage(id, client, scopes, resource, owner?.csrf));
+    res.status(401).send(this.ownerRequiredPage(this.ownerGate.resumeUrl(id), client.client_name ?? client.client_id));
   }
 
-  /** The consent page for an already-pending request, for a signed-in owner. Null when unknown or expired. */
-  renderPendingConsent(pendingId: string, csrf: string): string | null {
+  /** What the owner needs to decide a pending request (client name, scopes, audience), or null when unknown or expired. */
+  describePending(pendingId: string): { client_name: string; scopes: string[]; resource: string } | null {
     this.gc();
     const p = this.pending.get(pendingId);
     if (!p) return null;
-    const stub = { client_id: p.clientId, client_name: p.clientName } as OAuthClientInformationFull;
-    return this.consentPage(pendingId, stub, p.scopes, p.resource, csrf);
-  }
-
-  /** Sign-in-required page for a pending request. Null when unknown or expired. */
-  renderOwnerRequired(pendingId: string): string | null {
-    this.gc();
-    const p = this.pending.get(pendingId);
-    if (!p || !this.ownerGate) return null;
-    return this.ownerRequiredPage(this.ownerGate.resumeUrl(pendingId), p.clientName);
+    return { client_name: safeText(p.clientName, 80), scopes: [...p.scopes], resource: p.resource };
   }
 
   /**
@@ -526,69 +517,7 @@ export class SwitchboardAuthProvider implements OAuthServerProvider {
     return granted.length ? granted : [...supported];
   }
 
-  /** Self-contained themed consent page (no framework, no external assets). */
-  private consentPage(
-    pendingId: string,
-    client: OAuthClientInformationFull,
-    scopes: string[],
-    resource: string,
-    csrf?: string,
-  ): string {
-    const accent = /^#[0-9a-fA-F]{3,8}$/.test(this.brand.accent_color ?? "") ? this.brand.accent_color! : "#2dd4bf";
-    const title = esc(this.brand.title || "Authorize access");
-    const clientName = esc(safeText(client.client_name ?? client.client_id, 80));
-    const logo =
-      this.brand.logo_url && /^https?:\/\//.test(this.brand.logo_url)
-        ? `<img src="${esc(this.brand.logo_url)}" alt="" style="height:40px;margin-bottom:18px"/>`
-        : `<div class="mark">⎔</div>`;
-    const support =
-      this.brand.support_url && /^https?:\/\//.test(this.brand.support_url)
-        ? `<a class="support" href="${esc(this.brand.support_url)}">Need help?</a>`
-        : "";
-    const scopeList = scopes
-      .map((s) => `<li><span class="dot"></span>${esc(s)}</li>`)
-      .join("");
-    return `<!doctype html><html lang="en"><head><meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>${title}</title><style>
-:root{--accent:${accent}}
-*{box-sizing:border-box}
-body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0d1117;color:#e6edf3;
-font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
-.card{width:min(440px,92vw);background:#161b22;border:1px solid #30363d;border-radius:14px;
-padding:32px;text-align:center;box-shadow:0 12px 40px rgba(0,0,0,.4)}
-.mark{font-size:40px;color:var(--accent);margin-bottom:18px}
-h1{font-size:19px;margin:0 0 6px}
-.sub{color:#8b949e;font-size:14px;margin:0 0 22px}
-.client{font-weight:600;color:var(--accent)}
-ul{list-style:none;padding:0;margin:0 0 24px;text-align:left;border:1px solid #30363d;border-radius:10px;overflow:hidden}
-li{padding:11px 16px;border-bottom:1px solid #21262d;display:flex;align-items:center;gap:10px;font-size:14px}
-li:last-child{border-bottom:0}
-.dot{width:7px;height:7px;border-radius:50%;background:var(--accent);flex:0 0 auto}
-.res{color:#6e7681;font-size:12px;word-break:break-all;margin:-12px 0 22px}
-.row{display:flex;gap:12px}
-button{flex:1;padding:12px;border-radius:9px;font-size:14px;font-weight:600;cursor:pointer;border:1px solid #30363d}
-.approve{background:var(--accent);color:#0d1117;border-color:var(--accent)}
-.deny{background:transparent;color:#e6edf3}
-.support{display:inline-block;margin-top:18px;color:#8b949e;font-size:12px}
-</style></head><body>
-<form class="card" method="post" action="/oauth/consent">
-${logo}
-<h1>${title}</h1>
-<p class="sub"><span class="client">${clientName}</span> wants to connect to your local MCP Switchboard.</p>
-<ul>${scopeList}</ul>
-<p class="res">Audience: ${esc(resource)}</p>
-<input type="hidden" name="pending_id" value="${esc(pendingId)}"/>
-${csrf ? `<input type="hidden" name="csrf" value="${esc(csrf)}"/>` : ""}
-<div class="row">
-<button class="deny" type="submit" name="decision" value="deny">Deny</button>
-<button class="approve" type="submit" name="decision" value="approve">Approve</button>
-</div>
-${support}
-</form></body></html>`;
-  }
-
-  /** Page shown when consent is requested without an owner session: instructions only, never a form. */
+  /** Page shown for a consent request: instructions only, never a form. The decision is made in the dashboard. */
   private ownerRequiredPage(resumeUrl: string, clientName: string): string {
     const accent = /^#[0-9a-fA-F]{3,8}$/.test(this.brand.accent_color ?? "") ? this.brand.accent_color! : "#2dd4bf";
     const title = esc(this.brand.title || "Owner sign-in required");
@@ -604,8 +533,8 @@ code{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:2px 6
 a{color:${accent};word-break:break-all}
 </style></head><body><div class="card">
 <h1>${title}</h1>
-<p><strong>${esc(safeText(clientName, 80))}</strong> asked to connect to this MCP Switchboard. Only the owner of this machine can approve that, and no owner session came with this request.</p>
-<p>On the machine that runs Switchboard, run <code>switchboard dashboard login</code>. Then open this link in the browser it opens:</p>
+<p><strong>${esc(safeText(clientName, 80))}</strong> asked to connect to this MCP Switchboard. Only the owner of this machine can approve that, and the decision is made in the dashboard, not on this page.</p>
+<p>On the machine that runs Switchboard, run <code>switchboard dashboard login</code> (it checks you are present and opens the dashboard signed in). Then, in that same browser tab, open this address to see the request and decide:</p>
 <p><a href="${esc(resumeUrl)}">${esc(resumeUrl)}</a></p>
 <p>The request stays pending for ten minutes.</p>
 </div></body></html>`;
