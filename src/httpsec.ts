@@ -130,7 +130,9 @@ export function isPublicRoutePath(path: string): boolean {
     p === "/register" ||
     p === "/revoke" ||
     p === "/oauth/consent" ||
-    p.startsWith("/.well-known/")
+    p.startsWith("/.well-known/") ||
+    // Ephemeral single-file media URLs (connectors/mediastage.ts): platforms fetch them from outside.
+    p.startsWith("/media/")
   );
 }
 

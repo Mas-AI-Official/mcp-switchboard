@@ -1,0 +1,65 @@
+{
+  "$schema": "../../schemas/provider.schema.json",
+  "slug": "scenario",
+  "name": "Scenario",
+  "categories": [
+    "uncategorized"
+  ],
+  "api_hosts": [
+    "api.cloud.scenario.com"
+  ],
+  "docs_url": "https://github.com/activepieces/activepieces/tree/6f4be340d7c4bef9fb6ff874ca72224e4933d3d2/packages/pieces/community/scenario/src",
+  "owner_setup": {
+    "console_url": "https://api.cloud.scenario.com/",
+    "steps": [
+      "Unverified seed: this definition was derived from another project's published auth settings and has not been tested against the provider. Read the provider's own developer documentation first.",
+      "Use the account's username and password, or an application password if the provider offers one.",
+      "Connect: switchboard connect scenario --auth basic --field username=<ref> --field password=<ref>"
+    ],
+    "redirect_uris": [],
+    "notes": [
+      "SEED, unverified. Facts (URLs, scope names, field names, a product name) were read from the Activepieces community piece 'scenario' at commit 6f4be340d7c4 (MIT; see NOTICE). Nothing here was tested against the provider and it never counts as working.",
+      "api_hosts are candidates harvested from request URL settings in the piece source. Review them before relying on them: they decide where a credential may be sent."
+    ]
+  },
+  "auth": [
+    {
+      "id": "basic",
+      "mode": "basic",
+      "label": "Username and password",
+      "default": true,
+      "inject": {
+        "in": "header",
+        "name": "Authorization",
+        "template": "Basic {basic}"
+      },
+      "fields": {
+        "auth_config_creation": [],
+        "connected_account_initiation": [
+          {
+            "name": "username",
+            "required": true,
+            "secret": false
+          },
+          {
+            "name": "password",
+            "required": true,
+            "secret": true
+          }
+        ]
+      }
+    }
+  ],
+  "provenance": {
+    "derived_from": [
+      "activepieces/activepieces@6f4be340d7c4bef9fb6ff874ca72224e4933d3d2 packages/pieces/community/scenario/src"
+    ],
+    "license": "MIT",
+    "attribution": "Copyright (c) 2020-2024 Activepieces Inc. (MIT Expat). Facts only: URLs, scope names, field names. See NOTICE."
+  },
+  "source": {
+    "activepieces_commit": "6f4be340d7c4bef9fb6ff874ca72224e4933d3d2",
+    "piece": "scenario"
+  },
+  "verification": "unverified_seed"
+}

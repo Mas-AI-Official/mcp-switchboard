@@ -36,12 +36,35 @@ export const DEFAULT_REQUIRE_FOR_RISK: readonly Risk[] = ["high"];
  * The risk of a call at `scope` on `server` (design 3.4). Precedence: the tool's own `risk` (the operator's
  * explicit word, in both directions) > the server's `risk_defaults` for that scope > the built-in default.
  * `outward: true` then raises write and full to high; it never lowers anything and never touches read.
+ *
+ * A connector action (CONNECTORS.md) carries its own facts, a `ToolHint`: its `risk` and its `outward` flag. They
+ * only RAISE what the server's defaults say (the toolkit's classification is a floor the server's `risk_defaults`
+ * cannot go under), and `outward` raises write and full to high exactly like the server flag. Only the operator's
+ * explicit per-tool `risk` can set a connector action's risk, in either direction.
  */
-export function resolveRisk(server: Pick<ServerConfig, "risk_defaults" | "outward">, scope: Scope, override?: Pick<ToolOverride, "risk">): Risk {
+export function resolveRisk(
+  server: Pick<ServerConfig, "risk_defaults" | "outward">,
+  scope: Scope,
+  override?: Pick<ToolOverride, "risk">,
+  hint?: ToolHint,
+): Risk {
   if (override?.risk) return override.risk;
   let risk: Risk = server.risk_defaults?.[scope] ?? DEFAULT_RISK_BY_SCOPE[scope];
-  if (server.outward === true && scope !== "read" && RISK_RANK[risk] < RISK_RANK.high) risk = "high";
+  const raise = (to: Risk): void => {
+    if (RISK_RANK[risk] < RISK_RANK[to]) risk = to;
+  };
+  if (server.outward === true && scope !== "read") raise("high");
+  if (hint?.risk) raise(hint.risk);
+  if (hint?.outward === true && scope !== "read") raise("high");
   return risk;
+}
+
+/** Facts a server supplies about one tool (a connector action): they can raise risk and force an approval, never lower either. */
+export interface ToolHint {
+  risk?: Risk;
+  outward?: boolean;
+  /** `always`: the call needs a human decision whatever `require_for_risk` says (a raw proxy request). */
+  approval?: "always";
 }
 
 /**
@@ -159,6 +182,7 @@ export function evaluate(
   annotations?: ToolAnnotationsLike,
   clientCeiling?: ClientCeiling,
   clientRiskCeiling?: ClientRiskCeiling,
+  hint?: ToolHint,
 ): PolicyDecision {
   const override = server.tools?.[toolName];
 
@@ -170,7 +194,7 @@ export function evaluate(
   // name-based inference, then upstream annotations tighten (never loosen) the result. The hint lets
   // OpenAPI HTTP verbs drive scope when the tool name alone (e.g. `findPetsByStatus`) would be misread.
   const scope: Scope = resolveToolScope(toolName, override, scopeHint, annotations);
-  const risk: Risk = resolveRisk(server, scope, override);
+  const risk: Risk = resolveRisk(server, scope, override, hint);
   // The effective ceiling is the TIGHTEST of the server/gateway cap, the active profile's cap and the
   // calling client's cap. A profile or a client can only ever LOWER the ceiling (read < write < full),
   // never raise it, so a `read` profile forces read-only even on a server configured for `full`.
@@ -211,6 +235,9 @@ export function evaluate(
   const requireForRisk = cfg.gateway.approval?.require_for_risk ?? DEFAULT_REQUIRE_FOR_RISK;
   const byScope = requireFor.includes(scope);
   const byRisk = requireForRisk.includes(risk);
+  if (hint?.approval === "always" && !byScope && !byRisk) {
+    return { decision: "approval_required", scope, risk, reason: `approval gate: '${toolName}' needs a human decision on every call` };
+  }
   if (byScope || byRisk) {
     return {
       decision: "approval_required",

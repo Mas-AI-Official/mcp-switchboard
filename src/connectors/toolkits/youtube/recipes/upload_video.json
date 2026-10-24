@@ -1,0 +1,112 @@
+{
+  "slug": "upload_video",
+  "title": "Upload video",
+  "description": "Upload a local video file to the connected YouTube channel with a resumable upload. Private by default. Returns the video id and watch URL.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "file": {
+        "type": "string",
+        "x-file": "upload",
+        "description": "The video file: an absolute local path inside an allowlisted folder, an https URL, or staged:<id>."
+      },
+      "title": {
+        "type": "string",
+        "description": "Video title (up to 100 characters)."
+      },
+      "description": {
+        "type": "string",
+        "description": "Video description."
+      },
+      "tags": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Keyword tags."
+      },
+      "category_id": {
+        "type": "string",
+        "description": "YouTube category id. Default 22 (People and Blogs)."
+      },
+      "privacy_status": {
+        "type": "string",
+        "enum": [
+          "private",
+          "unlisted",
+          "public"
+        ],
+        "description": "Default private."
+      },
+      "made_for_kids": {
+        "type": "boolean",
+        "description": "Whether the video is made for kids (self declared). Default false."
+      }
+    },
+    "required": [
+      "file",
+      "title"
+    ]
+  },
+  "scopes": [
+    "https://www.googleapis.com/auth/youtube.upload"
+  ],
+  "scope": "write",
+  "risk": "high",
+  "outward": true,
+  "idempotent": false,
+  "important": true,
+  "tags": [
+    "upload",
+    "publish",
+    "video",
+    "resumable"
+  ],
+  "files": {
+    "upload": [
+      "file"
+    ],
+    "download": []
+  },
+  "reconcile": "The upload may have completed. List your recent uploads (list_videos with mine, or search with forMine) and look for the title before uploading again.",
+  "steps": [
+    {
+      "type": "upload_resumable",
+      "bind": "uploaded",
+      "init": {
+        "method": "POST",
+        "url": "https://www.googleapis.com/upload/youtube/v3/videos",
+        "query": {
+          "part": "snippet,status",
+          "uploadType": "resumable"
+        },
+        "json": {
+          "snippet": {
+            "title": "{{input.title}}",
+            "description": "{{input.description | default:\"\"}}",
+            "tags": "{{input.tags}}",
+            "categoryId": "{{input.category_id | default:\"22\"}}"
+          },
+          "status": {
+            "privacyStatus": "{{input.privacy_status | default:\"private\"}}",
+            "selfDeclaredMadeForKids": "{{input.made_for_kids | default:false}}"
+          }
+        }
+      },
+      "file": "{{input.file}}"
+    },
+    {
+      "type": "assert",
+      "that": {
+        "path": "steps.uploaded.body.id",
+        "exists": true
+      },
+      "message": "YouTube accepted the upload but returned no video id"
+    }
+  ],
+  "result": {
+    "video_id": "{{steps.uploaded.body.id}}",
+    "url": "https://www.youtube.com/watch?v={{steps.uploaded.body.id}}",
+    "status": "{{steps.uploaded.body.status}}"
+  }
+}

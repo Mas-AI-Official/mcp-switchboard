@@ -61,7 +61,9 @@ export interface ChangeBy {
 
 /** One line for an owner prompt or a log: what a client may see and do. */
 export function clientSummaryLine(c: ClientConfig): string {
-  return `servers ${c.servers.join(",") || "(none)"}, max_scope ${c.max_scope ?? "server ceiling"}, max_risk ${c.max_risk ?? "high"}`;
+  // The connector accounts are part of what the owner grants (which identity a call runs as), so the prompt names them.
+  const accounts = Object.entries(c.accounts ?? {});
+  return `servers ${c.servers.join(",") || "(none)"}, max_scope ${c.max_scope ?? "server ceiling"}, max_risk ${c.max_risk ?? "high"}${accounts.length ? `, accounts ${accounts.map(([p, a]) => `${p}=${a}`).join(",")}` : ""}`;
 }
 
 export class ClientAdminError extends Error {

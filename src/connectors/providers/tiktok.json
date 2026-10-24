@@ -1,0 +1,71 @@
+{
+  "$schema": "../schemas/provider.schema.json",
+  "slug": "tiktok",
+  "name": "TikTok",
+  "categories": ["social", "video"],
+  "api_hosts": ["open.tiktokapis.com"],
+  "docs_url": "https://developers.tiktok.com/doc/oauth-user-access-token-management",
+  "owner_setup": {
+    "console_url": "https://developers.tiktok.com/apps/",
+    "steps": [
+      "Create a TikTok developer app and add the Login Kit and Content Posting API products",
+      "Register an https redirect URI that forwards to this gateway (TikTok requires https, static, no query or fragment, under 512 characters): run an https tunnel to the loopback callback and register its URL",
+      "Store the client key and secret: switchboard vault set tiktok_client_key and switchboard vault set tiktok_client_secret",
+      "Register them with the tunnel URL: switchboard authconfig add tiktok --client-id-ref tiktok_client_key --client-secret-ref tiktok_client_secret --redirect-uri https://YOUR-HTTPS-TUNNEL/oauth/callback",
+      "Connect: switchboard connect tiktok --account brand --scopes user.info.basic,video.publish"
+    ],
+    "redirect_uris": ["https://YOUR-HTTPS-TUNNEL/oauth/callback"],
+    "notes": [
+      "Observed 2026-10-23 (TikTok Login Kit web doc): authorize at https://www.tiktok.com/v2/auth/authorize/ with client_key (not client_id), response_type=code, a comma separated scope, redirect_uri and state; redirect URIs must begin with https. The doc does not mention PKCE for web apps.",
+      "Observed (TikTok user access token doc): POST https://open.tiktokapis.com/v2/oauth/token/ with client_key, client_secret, code, grant_type and redirect_uri; code_verifier is required only for mobile and desktop apps. Access tokens last 24 hours, refresh tokens 365 days, and the returned refresh_token may differ from the one sent so the newest must be kept. Revoke is POST https://open.tiktokapis.com/v2/oauth/revoke/ with client_key, client_secret and token.",
+      "Observed (TikTok user info doc): identity is GET https://open.tiktokapis.com/v2/user/info/?fields=open_id,display_name,avatar_url with a Bearer token and the user.info.basic scope.",
+      "ADR section 8 (Observed there): an unaudited client can only post privately (SELF_ONLY), at most 5 users may post in 24 hours and posting accounts must be private; public posting needs an audit you submit. Composio has no managed TikTok app either, so this app is always yours.",
+      "Scope names other than user.info.basic come from TikTok's scopes overview and were not re-fetched when this file was written."
+    ]
+  },
+  "identity_probe": {
+    "method": "GET",
+    "url": "https://open.tiktokapis.com/v2/user/info/",
+    "query": { "fields": "open_id,display_name,avatar_url" },
+    "id_path": "data.user.open_id",
+    "name_path": "data.user.display_name",
+    "avatar_path": "data.user.avatar_url"
+  },
+  "auth": [
+    {
+      "id": "oauth2",
+      "mode": "oauth2",
+      "label": "Login Kit (web)",
+      "default": true,
+      "oauth2": {
+        "authorize_url": "https://www.tiktok.com/v2/auth/authorize/",
+        "token_url": "https://open.tiktokapis.com/v2/oauth/token/",
+        "revoke": { "url": "https://open.tiktokapis.com/v2/oauth/revoke/", "auth": "client_body", "token_param": "token" },
+        "pkce": "unsupported",
+        "client_auth": "body",
+        "client_secret_at_exchange": "always",
+        "client_id_param": "client_key",
+        "scope_separator": ",",
+        "default_scopes": ["user.info.basic"],
+        "scope_catalog": [
+          { "scope": "user.info.basic", "description": "Avatar, display name and open_id" },
+          { "scope": "user.info.profile", "description": "Profile details" },
+          { "scope": "video.list", "description": "List the person's public videos" },
+          { "scope": "video.upload", "description": "Upload a video as a draft" },
+          { "scope": "video.publish", "description": "Publish a video directly" }
+        ],
+        "redirect": "https",
+        "accept_json": true,
+        "refresh": { "kind": "refresh_token", "rotates": true, "lifetime_s": 31536000 }
+      },
+      "inject": { "in": "header", "name": "Authorization", "template": "Bearer {token}" },
+      "fields": {
+        "auth_config_creation": [
+          { "name": "client_id", "label": "Client key", "required": true, "secret": false },
+          { "name": "client_secret", "label": "Client secret", "required": true, "secret": true }
+        ],
+        "connected_account_initiation": []
+      }
+    }
+  ]
+}

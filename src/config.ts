@@ -192,7 +192,7 @@ const envName = z.string().min(1).regex(/^[^=\s\x00]+$/, { message: "must be a p
 const serverConfig = z
   .object({
     id: z.string().refine(isValidServerId, { message: BAD_SERVER_ID }),
-    source: z.enum(["npx", "binary", "remote", "app2mcp", "http-tool"]),
+    source: z.enum(["npx", "binary", "remote", "app2mcp", "http-tool", "connector"]),
     enabled: z.boolean().default(true),
     policy: scope.optional(),
     package: z.string().optional(),
@@ -203,6 +203,8 @@ const serverConfig = z
     openapi: z.string().optional(),
     base_url: z.string().optional(),
     http_tools: z.array(httpToolDef).optional(),
+    toolkit: z.string().regex(/^[a-z][a-z0-9-]{0,31}$/, { message: "a toolkit slug: lowercase letters, digits and dashes" }).optional(),
+    account: z.string().min(1).optional(),
     auth_scheme: authScheme.optional(),
     schema_mode: z.enum(["full", "required_only"]).optional(),
     schema_modifiers: schemaModifier.optional(),
@@ -229,6 +231,8 @@ const serverConfig = z
       const bad = checkNpmSpec(s.package);
       if (bad) ctx.addIssue({ code: "custom", message: bad, path: ["package"] });
     }
+    if (s.source === "connector" && !s.toolkit) ctx.addIssue({ code: "custom", message: "a connector server needs a `toolkit` (for example youtube)", path: ["toolkit"] });
+    if (s.source !== "connector" && (s.toolkit || s.account)) ctx.addIssue({ code: "custom", message: "`toolkit` and `account` belong to `source: connector` only", path: ["toolkit"] });
   });
 
 const gateway = z
@@ -359,6 +363,26 @@ const profile = z
   })
   .strict();
 
+// Connector kit: upload rules and media staging (ADR local-composio 6.5 and 6.6). Everything defaults closed.
+const connectorSettings = z
+  .object({
+    upload_allowlist: z.array(z.string().min(1)).optional(),
+    upload_deny_segments: z.array(z.string().min(1)).optional(),
+    max_upload_bytes: z.number().int().positive().max(8 * 1024 * 1024 * 1024).optional(),
+    max_download_bytes: z.number().int().positive().max(8 * 1024 * 1024 * 1024).optional(),
+    media: z
+      .object({
+        backend: z.enum(["expose", "s3"]).optional(),
+        public_base_url: z.url().optional(),
+        ttl_seconds: z.number().int().positive().max(900).optional(),
+        max_fetches: z.number().int().positive().max(10).optional(),
+        allow_local: z.boolean().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
 const settings = z
   .object({
     general: z
@@ -396,6 +420,7 @@ const settings = z
       .strict()
       .optional(),
     council: council.optional(),
+    connectors: connectorSettings.optional(),
     network: network.optional(),
     oauth_server: z
       .object({
@@ -446,6 +471,13 @@ const clientConfig = z
     max_scope: scope.optional(),
     max_risk: z.enum(["low", "medium", "high"]).optional(),
     limits: limitSpec.optional(),
+    // Connector accounts: provider slug -> the connected account this client uses, or "*" to choose any (CONNECTORS.md).
+    accounts: z
+      .record(
+        z.string().regex(/^[a-z][a-z0-9-]{0,63}$/, { message: "a provider slug: lowercase letters, digits and dashes" }),
+        z.string().min(1).max(128).regex(/^[^\u0000-\u001f\u007f]+$/, { message: "an account reference: ca_..., provider/label or a label (no control characters)" }),
+      )
+      .optional(),
   })
   .strict();
 

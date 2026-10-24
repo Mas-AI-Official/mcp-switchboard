@@ -9,11 +9,15 @@
  *   switchboard list                 mount everything and print the governed tool list
  *   switchboard doctor               check the environment + config
  *   switchboard catalog              list OAuth providers + connection status
- *   switchboard connect <provider>   authorize a provider via local loopback OAuth
+ *   switchboard connect <provider>   connect an account (browser OAuth on the loopback callback, or a token / key)
+ *   switchboard accounts ...         list|show|default|disable|enable|revoke|probe connected accounts
+ *   switchboard authconfig ...       add|list|show|rm the OAuth apps your connects use (secrets are vault references)
+ *   switchboard providers ...        list|show the provider definitions
  *   switchboard install <client>     register MCP Switchboard in an MCP client (bridge by default; preview, backup, probe, rollback)
  *   switchboard uninstall <client>   remove only the Switchboard entry from an MCP client (backup first)
  *   switchboard bridge --client <id> relay a client's stdio to the shared HTTP gateway as that client
  *   switchboard client add|list|rotate|rm   register clients (who may call /mcp) and manage their keys (a running gateway checks you are present before it grants one)
+ *   switchboard link|unlink|links    let a client use a connector toolkit (and as which account): edits the same `clients:` config, the one access-control source
  *   switchboard local-llm            detect a local LLM server for the offline council
  *   switchboard local-llm wire       wire a detected local server into the council
  *   switchboard toolkits sync        rebuild the integration catalog from open indexes
@@ -29,13 +33,12 @@
 
 import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
-import { createServer } from "node:http";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import { loadConfig, writeConfig, starterConfig } from "./config.js";
-import type { ClientConfig, SwitchboardConfig } from "./types.js";
+import type { ClientConfig, Risk, Scope, SwitchboardConfig } from "./types.js";
 import {
   applyProfileEnvOverride,
   describeProfile,
@@ -48,6 +51,10 @@ import { runExpose, TUNNEL_KINDS, type TunnelKind } from "./expose.js";
 import { ensureDir } from "./atomicfile.js";
 import { Vault, HOME_DIR } from "./vault.js";
 import { OAuthStore } from "./oauth.js";
+import { registerConnectorCommands } from "./connectors/cli.js";
+import { registerKitCommands, runToolkitSync } from "./connectors/cli-kit.js";
+import { Connectors } from "./connectors/index.js";
+import { linkRows, planLink, planUnlink } from "./connectors/link.js";
 import { ApiKeyStore } from "./apikeys.js";
 import { ClientAdmin, ClientAdminError, NEW_CLIENT_DEFAULTS, type ClientSpec } from "./clientadmin.js";
 import { ClientConfigWatcher } from "./clientconfig.js";
@@ -422,9 +429,28 @@ const toolkitsCmd = program
   .description("manage the browsable integration catalog (the dashboard's toolkit grid)");
 
 toolkitsCmd
-  .command("sync")
-  .description("rebuild data/catalog.json from the open MCP Registry + APIs.guru indexes")
-  .action(async () => {
+  .command("sync [target]")
+  .description("no argument: rebuild data/catalog.json from the open MCP Registry + APIs.guru indexes. With a provider, a toolkit or `all`: fetch the provider's public spec through the SSRF guard and write the connector toolkit")
+  .option("--check", "with a target: fetch and compare the spec hash with the synced version, write nothing, exit 1 on drift")
+  .action(async (target: string | undefined, opts: { check?: boolean }) => {
+    if (target) {
+      await runToolkitSync(
+        {
+          vaultBackend: () => {
+            try {
+              return loadConfig(configPath()).vault.backend;
+            } catch {
+              return "encrypted-file";
+            }
+          },
+          network: () => networkFromConfig(),
+          configPath: () => configPath(),
+        },
+        target,
+        opts,
+      );
+      return;
+    }
     out("Syncing catalog from the MCP Registry and APIs.guru…");
     const { snapshot, errors, enrichment } = await ingestCatalogVerbose(networkFromConfig());
     snapshot.generated_at = new Date().toISOString();
@@ -519,63 +545,36 @@ toolkitsCmd
     );
   });
 
-program
-  .command("connect <provider>")
-  .description("authorize an OAuth provider via the local loopback flow")
-  .action(async (provider: string) => {
-    const cfg = loadConfig(configPath());
-    const oauth = new OAuthStore(new Vault(cfg.vault.backend), () => cfg.settings?.network);
-    const { host, port } = cfg.gateway.http;
-    const redirectUri = `http://${host}:${port}/oauth/callback`;
-
-    let authorizeUrl: string;
+registerConnectorCommands(program, {
+  vaultBackend: () => {
     try {
-      ({ authorizeUrl } = oauth.beginAuth(provider, redirectUri));
-    } catch (err) {
-      log.error(err instanceof Error ? err.message : String(err));
-      process.exitCode = 1;
-      return;
+      return loadConfig(configPath()).vault.backend;
+    } catch {
+      return "encrypted-file";
     }
+  },
+  network: () => networkFromConfig(),
+  gatewayAddress: () => {
+    try {
+      const { host, port } = loadConfig(configPath()).gateway.http;
+      return { host, port };
+    } catch {
+      return { host: "127.0.0.1", port: 8088 };
+    }
+  },
+});
 
-    // Spin up a one-shot loopback listener to catch the provider's redirect, complete the
-    // exchange, then shut down. Tokens are sealed by OAuthStore — nothing is printed.
-    await new Promise<void>((done) => {
-      const server = createServer(async (req, res) => {
-        const url = new URL(req.url ?? "/", `http://${host}:${port}`);
-        if (url.pathname !== "/oauth/callback") {
-          res.writeHead(404).end("not found");
-          return;
-        }
-        const state = url.searchParams.get("state") ?? "";
-        const code = url.searchParams.get("code") ?? "";
-        const error = url.searchParams.get("error") ?? "";
-        try {
-          if (error) throw new Error(`provider returned: ${error}`);
-          if (!state || !code) throw new Error("missing 'state' or 'code' in callback");
-          const token = await oauth.completeAuth(state, code);
-          res.writeHead(200, { "content-type": "text/html" }).end("<h1>Connected — you can close this tab.</h1>");
-          log.ok(`connected '${token.provider}'`);
-        } catch (err) {
-          res.writeHead(400, { "content-type": "text/html" }).end("<h1>Authorization failed.</h1>");
-          log.error(err instanceof Error ? err.message : String(err));
-          process.exitCode = 1;
-        } finally {
-          server.close(() => done());
-        }
-      });
-      server.on("error", (err) => {
-        const msg = (err as NodeJS.ErrnoException).code === "EADDRINUSE"
-          ? `port ${port} is busy — stop \`switchboard serve\` and retry, or use the dashboard's Connect button`
-          : err.message;
-        log.error(msg);
-        process.exitCode = 1;
-        done();
-      });
-      server.listen(port, host, () => {
-        out(`\nOpen this URL in your browser to authorize:\n\n  ${authorizeUrl}\n\nWaiting for the callback…`);
-      });
-    });
-  });
+registerKitCommands(program, toolkitsCmd, {
+  vaultBackend: () => {
+    try {
+      return loadConfig(configPath()).vault.backend;
+    } catch {
+      return "encrypted-file";
+    }
+  },
+  network: () => networkFromConfig(),
+  configPath: () => configPath(),
+});
 
 /** Shared body of `install` and `uninstall`: validate the flags, load the config, run, set the exit code. */
 async function installAction(
@@ -1389,6 +1388,109 @@ clientCmd
       log.ok(`client '${id}': ${r.revokedKeys} key(s) revoked, key file ${r.keyFileRemoved ? "removed" : "was absent"}${r.purged ? ", config entry removed" : ""}`);
       if (!r.purged) out("  the config entry stays (it grants nothing without a key); add --purge to remove it too.");
       if (offline) out(`  ${OFFLINE_NOTE}`);
+    }),
+  );
+
+// ── connector links (one access-control source: the `clients:` section) ─────────────────────────────
+
+/** Apply a client change: through the running gateway (presence first) when one answers, else the offline admin. */
+async function applyClientSpec(admin: ClientAdmin, cfg: SwitchboardConfig, id: string, spec: ClientSpec): Promise<{ client: ClientConfig; created: boolean; keyFile: string; offline: boolean }> {
+  if ((await runningGateway(cfg)) !== null) {
+    const r = (await gatewayChange(`/clients/${encodeURIComponent(id)}/add`, { spec, print: false }, true)) as { created: boolean; client: ClientConfig; keyFile: string };
+    return { client: r.client, created: r.created, keyFile: r.keyFile, offline: false };
+  }
+  const r = admin.add(id, spec);
+  return { client: r.client, created: r.created, keyFile: r.keyFile, offline: true };
+}
+
+function connectorsForCli(cfg: SwitchboardConfig): Connectors {
+  const network = networkFromConfig();
+  return new Connectors({ vault: new Vault(cfg.vault.backend), ...(network ? { network } : {}) });
+}
+
+program
+  .command("link <client> <toolkit>")
+  .description(
+    "let a client use a toolkit: adds the toolkit's server to the client's `servers` in the clients config (the one access-control source; `client add` edits the same section), optionally with its ceilings and the account it uses. A running gateway checks you are present first",
+  )
+  .option("--account <ref>", "the connected account of the toolkit's provider this client uses (its `accounts` entry; without it the client uses the provider default)")
+  .option("--max-scope <scope>", "read, write or full (a new client starts at read)")
+  .option("--max-risk <risk>", "low, medium or high (a new client starts at low)")
+  .action(
+    clientAction(async (admin, cfg, client: string, toolkit: string, opts: { account?: string; maxScope?: string; maxRisk?: string }) => {
+      if (opts.maxScope !== undefined && !["read", "write", "full"].includes(opts.maxScope)) throw new Error("--max-scope must be read, write or full");
+      if (opts.maxRisk !== undefined && !["low", "medium", "high"].includes(opts.maxRisk)) throw new Error("--max-risk must be low, medium or high");
+      const rt = connectorsForCli(cfg);
+      // The target is a toolkit slug, or the id of a connector server in the config (a second mount of a toolkit has its own id).
+      const isServerId = cfg.servers.some((s) => s.source === "connector" && s.id === toolkit);
+      if (toolkit !== "*" && !isServerId && !rt.kit.toolkits.slugs().includes(toolkit)) throw new Error(`no toolkit or connector server '${toolkit}' is defined here (switchboard toolkits list)`);
+      // The account is checked before anything is written, so a bad --account never leaves a half-applied link.
+      let account: { provider: string; ref: string } | undefined;
+      if (opts.account) {
+        if (toolkit === "*") throw new Error("--account needs a specific toolkit");
+        const slug = cfg.servers.find((s) => s.source === "connector" && s.id === toolkit)?.toolkit ?? toolkit;
+        const provider = rt.providers.providerForToolkit(slug);
+        const acct = rt.accounts.require(opts.account);
+        if (!provider || acct.provider !== provider.slug) throw new Error(`account ${acct.id} belongs to ${acct.provider}, not to ${toolkit}'s provider`);
+        account = { provider: provider.slug, ref: acct.id };
+      }
+      const plan = planLink(cfg, client, toolkit, {
+        ...(opts.maxScope ? { maxScope: opts.maxScope as Scope } : {}),
+        ...(opts.maxRisk ? { maxRisk: opts.maxRisk as Risk } : {}),
+        ...(account ? { account } : {}),
+      });
+      if (plan.noServer) log.warn(`no connector server for '${toolkit}' is in the config yet: linked to the id '${plan.serverIds[0]}', which \`switchboard toolkits enable ${toolkit}\` uses by default`);
+      if (Object.keys(plan.spec).length === 0) {
+        out(`${client} may already use ${plan.serverIds.join(", ")}: nothing to change`);
+        return;
+      }
+      const r = await applyClientSpec(admin, cfg, client, plan.spec);
+      const c = r.client;
+      log.ok(`${client} ${r.created ? "created and linked" : "linked"}: servers ${c.servers.join(",") || "(none)"}, max_scope ${c.max_scope ?? "(server ceiling)"}, max_risk ${c.max_risk ?? "high"}${c.accounts && Object.keys(c.accounts).length ? `, accounts ${Object.entries(c.accounts).map(([p, a]) => `${p}=${a}`).join(",")}` : ""}`);
+      if (r.created) out(`  a key was issued for it (${r.keyFile}); \`switchboard bridge --client ${client}\` uses it`);
+      if (r.offline) out(`  ${OFFLINE_NOTE}`);
+    }),
+  );
+
+program
+  .command("unlink <client> [toolkit]")
+  .description("remove a toolkit's server from a client's `servers` (or every connector server and the account bindings when no toolkit is named); the client and its key stay, `client rm` removes those. A running gateway checks you are present first")
+  .action(
+    clientAction(async (admin, cfg, client: string, toolkit: string | undefined) => {
+      const plan = planUnlink(cfg, client, toolkit, connectorsForCli(cfg).kit.toolkits.slugs());
+      if (!plan || (plan.removed.length === 0 && !plan.clearsAccounts)) {
+        out("nothing to remove");
+        if (plan && plan.stillCovered.length > 0) log.warn(`'${plan.stillCovered.join("', '")}' still covers ${toolkit ?? "the connector servers"}: edit the client's servers with \`switchboard client add ${client} --servers ...\``);
+        return;
+      }
+      const r = await applyClientSpec(admin, cfg, client, plan.spec);
+      log.ok(`${client}${toolkit ? ` is no longer linked to ${toolkit}` : " no longer has any connector server or account binding"}: servers ${r.client.servers.join(",") || "(none)"}`);
+      if (plan.stillCovered.length > 0) log.warn(`'${plan.stillCovered.join("', '")}' still covers ${toolkit ?? "a connector server"}: a glob cannot be narrowed here, use \`switchboard client add ${client} --servers ...\``);
+      if (r.offline) out(`  ${OFFLINE_NOTE}`);
+    }),
+  );
+
+program
+  .command("links")
+  .description("which client may use which connector toolkit, how far, as which account (the clients config; a running gateway's view when one answers)")
+  .action(
+    clientAction(async (_admin, cfg) => {
+      let clients: Record<string, ClientConfig> | undefined = cfg.clients;
+      const live = await runningGateway(cfg);
+      if (live) {
+        const rows = (live.clients ?? []) as (ClientConfig & { id: string; keys?: unknown; key_file?: unknown })[];
+        clients = Object.fromEntries(rows.map(({ id, keys: _k, key_file: _f, ...config }) => [id, config as ClientConfig]));
+        out("(the running gateway's view: these are the clients in force)");
+      }
+      const rows = linkRows(clients);
+      if (rows.length === 0) {
+        out("no client is configured: every caller may use every enabled toolkit (single-user mode). `switchboard link <client> <toolkit>` starts restricting.");
+        return;
+      }
+      const head = ["client", "servers", "max scope", "max risk", "accounts"];
+      const body = rows.map((r) => [r.client, r.servers, r.max_scope, r.max_risk, r.accounts]);
+      const widths = head.map((_, i) => Math.max(...[head, ...body].map((row) => row[i]!.length)));
+      for (const row of [head, ...body]) out(row.map((cell, i) => cell.padEnd(widths[i]!)).join("  ").trimEnd());
     }),
   );
 

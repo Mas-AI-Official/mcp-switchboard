@@ -1,0 +1,65 @@
+{
+  "toolkit": "x",
+  "provider": "x",
+  "source": {
+    "kind": "openapi",
+    "url": "https://api.x.com/2/openapi.json",
+    "note": "X API v2 OpenAPI 3.0 document. Its info.license is the X Developer Agreement and Policy: fetch at sync time on your machine, never commit or redistribute it."
+  },
+  "description_trim": 300,
+  "rename": {
+    "create_posts": "create_post",
+    "delete_posts": "delete_post",
+    "get_posts_by_id": "get_post",
+    "get_posts_by_ids": "get_posts",
+    "search_posts_recent": "search_recent_posts"
+  },
+  "important": [
+    "get_users_me",
+    "get_users_by_username",
+    "get_users_posts",
+    "get_users_mentions",
+    "get_users_timeline",
+    "get_posts_by_id",
+    "get_posts_by_ids",
+    "search_posts_recent",
+    "create_posts",
+    "delete_posts",
+    "like_post",
+    "unlike_post",
+    "repost_post",
+    "follow_user",
+    "media_upload",
+    "initialize_media_upload",
+    "append_media_upload",
+    "finalize_media_upload",
+    "get_media_upload_status",
+    "create_media_metadata"
+  ],
+  "outward": [
+    "create_posts",
+    "follow_user",
+    "media_upload",
+    "finalize_media_upload"
+  ],
+  "tags": {
+    "create_posts": [
+      "tweet",
+      "post",
+      "publish"
+    ],
+    "search_posts_recent": [
+      "tweet",
+      "search",
+      "find"
+    ],
+    "get_users_me": [
+      "profile",
+      "me",
+      "account"
+    ]
+  },
+  "reconcile": {
+    "create_posts": "The post may have been published. Read your recent posts (get_users_posts for your user id) and look for the text before posting again."
+  }
+}

@@ -1,0 +1,71 @@
+{
+  "$schema": "../schemas/provider.schema.json",
+  "slug": "linkedin",
+  "name": "LinkedIn",
+  "categories": ["social"],
+  "api_hosts": ["api.linkedin.com"],
+  "docs_url": "https://learn.microsoft.com/en-us/linkedin/shared/authentication/authorization-code-flow",
+  "owner_setup": {
+    "console_url": "https://www.linkedin.com/developers/apps",
+    "steps": [
+      "Create a LinkedIn developer app tied to a Company Page (organization posting also needs an admin role on that Page)",
+      "On the Products tab request the products that grant the scopes you need (Sign In with LinkedIn using OpenID Connect for openid, profile and email; Share on LinkedIn for w_member_social); the scopes available to the app are listed on its Auth tab",
+      "On the Auth tab add the redirect URL below",
+      "Store the client id and secret: switchboard vault set linkedin_client_id and switchboard vault set linkedin_client_secret",
+      "Register them: switchboard authconfig add linkedin --client-id-ref linkedin_client_id --client-secret-ref linkedin_client_secret",
+      "Connect: switchboard connect linkedin --account personal --scopes openid,profile,email,w_member_social"
+    ],
+    "redirect_uris": ["{loopback_redirect}"],
+    "notes": [
+      "Observed 2026-10-23 (LinkedIn 3-legged OAuth doc): authorize at https://www.linkedin.com/oauth/v2/authorization, exchange at POST https://www.linkedin.com/oauth/v2/accessToken with client_id and client_secret as form fields, scopes are space delimited, access tokens live 60 days, the authorization code lives 30 minutes, and requesting a different scope invalidates earlier access tokens.",
+      "Observed (same doc): programmatic refresh tokens are available only to a limited set of partners; without one an expired token means the person goes through consent again. The engine marks the account EXPIRED and prints the reconnect command.",
+      "Observed (same doc): the doc tells you to add the redirect URL via HTTPS and does not mention PKCE. UNVERIFIED whether LinkedIn accepts an http loopback redirect URL; if the console refuses it, use an https tunnel via switchboard authconfig add ... --redirect-uri.",
+      "ADR section 8 (Observed there): w_member_social and r_organization_admin cannot be combined, r_member_social is restricted to approved users. Official API only; no browser automation (a LinkedIn restriction happened before).",
+      "The posts API needs a Linkedin-Version: YYYYMM header on every call; the recipes in ADR phase P4 set it per call, so it is not fixed here. Marketing version 202511 sunsets 2026-11-16 (ADR section 7).",
+      "UNVERIFIED: the identity probe URL (the OpenID Connect userinfo endpoint) was not fetched when this file was written."
+    ]
+  },
+  "identity_probe": {
+    "method": "GET",
+    "url": "https://api.linkedin.com/v2/userinfo",
+    "id_path": "sub",
+    "name_path": "name",
+    "avatar_path": "picture"
+  },
+  "auth": [
+    {
+      "id": "oauth2",
+      "mode": "oauth2",
+      "label": "3-legged OAuth",
+      "default": true,
+      "oauth2": {
+        "authorize_url": "https://www.linkedin.com/oauth/v2/authorization",
+        "token_url": "https://www.linkedin.com/oauth/v2/accessToken",
+        "pkce": "unsupported",
+        "client_auth": "body",
+        "client_secret_at_exchange": "always",
+        "scope_separator": " ",
+        "default_scopes": ["openid", "profile", "email"],
+        "scope_catalog": [
+          { "scope": "openid", "description": "Sign In with LinkedIn using OpenID Connect" },
+          { "scope": "profile", "description": "Read the basic profile" },
+          { "scope": "email", "description": "Read the primary email" },
+          { "scope": "w_member_social", "description": "Create, modify and delete the member's posts (Share on LinkedIn)" },
+          { "scope": "w_organization_social", "description": "Post as an organization the member administers" },
+          { "scope": "r_organization_admin", "description": "Read organizations the member administers" }
+        ],
+        "redirect": "loopback",
+        "accept_json": true,
+        "refresh": { "kind": "refresh_token", "rotates": false }
+      },
+      "inject": { "in": "header", "name": "Authorization", "template": "Bearer {token}" },
+      "fields": {
+        "auth_config_creation": [
+          { "name": "client_id", "label": "Client ID", "required": true, "secret": false },
+          { "name": "client_secret", "label": "Client secret", "required": true, "secret": true }
+        ],
+        "connected_account_initiation": []
+      }
+    }
+  ]
+}

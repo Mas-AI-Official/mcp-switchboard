@@ -88,6 +88,15 @@ settings:
     # timeout_ms: 15000            # per request, DNS through last body byte
     # max_response_bytes: 5242880  # decoded body cap enforced while streaming (5 MiB)
 
+  # Toolkit file handling and media staging (connectors; see docs/architecture/CONNECTORS.md).
+  # connectors:
+  #   upload_allowlist: ["D:/Ideas/creative"]   # local drive-letter folders an action may upload from (empty = no local path; network folders are ignored)
+  #   max_upload_bytes: 268435456
+  #   media:                                     # for platforms that fetch media themselves (Instagram, TikTok)
+  #     public_base_url: https://your-tunnel.example   # from `switchboard expose --tunnel cloudflared`
+  #     ttl_seconds: 900                         # at most 900
+  #     max_fetches: 3                           # at most 10
+
   # Cross-provider "council" relay tools. Lets an agent connected to MCP Switchboard broker a
   # PEER model: council_consult (one prompt -> the other provider) and council_debate (a
   # bounded multi-round exchange between providers + a synthesized conclusion). The headline
@@ -310,6 +319,14 @@ servers:
             lon: { type: number }
           required: [lat, lon]
 
+  # A connector toolkit (needs an ACTIVE connected account first: `switchboard connect google`, then
+  # `switchboard toolkits sync google`). `switchboard toolkits enable gmail` writes this entry for you.
+  # - id: gmail
+  #   source: connector
+  #   toolkit: gmail
+  #   # account: google/work                # optional: PIN this server to one connected account. A pin is final:
+  #   #                                     # neither a client's `accounts` binding nor a call's `account` argument changes it
+
 # --- clients: who may call /mcp (design 3.1). Optional. Prefer `switchboard client add <id>`, which edits this section
 # for you and issues the key. With NO client configured the gateway is in loopback single-user mode. With ONE or more,
 # /mcp needs a key bound to a configured client on every request, whatever the bind host. A running gateway re-reads
@@ -327,3 +344,17 @@ servers:
 #     servers: [voice, youtube]
 #     max_scope: read
 #     max_risk: low
+#   # Connector accounts (docs/architecture/CONNECTORS.md): `accounts` maps a provider to the connected account this client
+#   # uses (an id `ca_...`, `provider/label` or a unique label). Without an entry the client uses the provider's default
+#   # account. A call's `account` argument may only name the client's own account; `"*"` lets the client pick any account
+#   # of that provider. `switchboard link <client> <toolkit> --account <ref>` edits servers and accounts for you.
+#   assistant-a:
+#     servers: [gmail, youtube]
+#     max_scope: write
+#     max_risk: medium
+#     accounts: { google: google/work }
+#   assistant-b:
+#     servers: [gmail]
+#     max_scope: read
+#     max_risk: low
+#     accounts: { google: "*" }

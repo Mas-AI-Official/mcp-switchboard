@@ -1,0 +1,75 @@
+{
+  "$schema": "../schemas/provider.schema.json",
+  "slug": "x",
+  "name": "X (Twitter)",
+  "toolkits": ["x", "twitter"],
+  "categories": ["social"],
+  "api_hosts": ["api.x.com"],
+  "docs_url": "https://docs.x.com/resources/fundamentals/authentication/oauth-2-0/user-access-token",
+  "owner_setup": {
+    "console_url": "https://developer.x.com/en/portal/dashboard",
+    "steps": [
+      "Create an X developer account and a project with an app, and pick a paid API access tier (the API itself is billed by X; ADR section 8)",
+      "In the app's user authentication settings enable OAuth 2.0 and add the callback URL below",
+      "Copy the OAuth 2.0 Client ID and Client Secret from Keys and Tokens",
+      "Store them: switchboard vault set x_client_id and switchboard vault set x_client_secret",
+      "Register them: switchboard authconfig add x --client-id-ref x_client_id --client-secret-ref x_client_secret",
+      "Connect: switchboard connect x --account brand --scopes tweet.read,tweet.write,users.read,offline.access"
+    ],
+    "redirect_uris": ["{loopback_redirect}"],
+    "notes": [
+      "Observed 2026-10-23 (X OAuth 2.0 docs): authorize at https://x.com/i/oauth2/authorize with PKCE, token at POST https://api.x.com/2/oauth2/token, revoke at POST https://api.x.com/2/oauth2/revoke. A confidential client sends HTTP Basic with the client id and secret; a public client sends client_id in the body. Scopes are space separated. A refresh token is issued only with the offline.access scope; an access token otherwise lasts two hours; the authorization code lives 30 seconds. The callback must match the app setting exactly.",
+      "UNVERIFIED: whether refresh tokens rotate (the docs do not say; this file assumes they do, and the engine persists any new refresh token either way), and whether the console accepts an http loopback callback.",
+      "Observed (X users/me reference): identity is GET https://api.x.com/2/users/me?user.fields=profile_image_url, readable with tweet.read and users.read.",
+      "ADR section 8 (Observed there): analytics returns 403 below the Enterprise tier. Current API price: UNVERIFIED.",
+      "Only the scopes verified in the docs above plus tweet.write, like.read and like.write are listed; the full X scope list was not fetched."
+    ]
+  },
+  "identity_probe": {
+    "method": "GET",
+    "url": "https://api.x.com/2/users/me",
+    "query": { "user.fields": "profile_image_url" },
+    "id_path": "data.id",
+    "name_path": "data.username",
+    "avatar_path": "data.profile_image_url"
+  },
+  "auth": [
+    {
+      "id": "oauth2",
+      "mode": "oauth2",
+      "label": "OAuth 2.0 with PKCE",
+      "default": true,
+      "oauth2": {
+        "authorize_url": "https://x.com/i/oauth2/authorize",
+        "token_url": "https://api.x.com/2/oauth2/token",
+        "revoke": { "url": "https://api.x.com/2/oauth2/revoke", "auth": "client_basic", "token_param": "token" },
+        "pkce": "required",
+        "client_auth": "basic",
+        "client_secret_at_exchange": "optional",
+        "scope_separator": " ",
+        "default_scopes": ["tweet.read", "users.read", "offline.access"],
+        "scope_catalog": [
+          { "scope": "tweet.read", "description": "Read posts" },
+          { "scope": "tweet.write", "description": "Create and delete posts" },
+          { "scope": "users.read", "description": "Read profiles" },
+          { "scope": "follows.read", "description": "Read follows" },
+          { "scope": "follows.write", "description": "Follow and unfollow" },
+          { "scope": "like.read", "description": "Read likes" },
+          { "scope": "like.write", "description": "Like and unlike" },
+          { "scope": "offline.access", "description": "Issue a refresh token" }
+        ],
+        "redirect": "loopback",
+        "accept_json": true,
+        "refresh": { "kind": "refresh_token", "rotates": true }
+      },
+      "inject": { "in": "header", "name": "Authorization", "template": "Bearer {token}" },
+      "fields": {
+        "auth_config_creation": [
+          { "name": "client_id", "label": "OAuth 2.0 Client ID", "required": true, "secret": false },
+          { "name": "client_secret", "label": "OAuth 2.0 Client Secret (confidential clients)", "required": false, "secret": true }
+        ],
+        "connected_account_initiation": []
+      }
+    }
+  ]
+}

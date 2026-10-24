@@ -1,0 +1,64 @@
+{
+  "$schema": "../../schemas/provider.schema.json",
+  "slug": "pastefy",
+  "name": "Pastefy",
+  "categories": [
+    "uncategorized"
+  ],
+  "api_hosts": [
+    "pastefy.app"
+  ],
+  "docs_url": "https://github.com/activepieces/activepieces/tree/6f4be340d7c4bef9fb6ff874ca72224e4933d3d2/packages/pieces/community/pastefy/src",
+  "owner_setup": {
+    "console_url": "https://pastefy.app/",
+    "steps": [
+      "Unverified seed: this definition was derived from another project's published auth settings and has not been tested against the provider. Read the provider's own developer documentation first.",
+      "The 'custom' authentication of this provider takes several credential fields. This build does not drive custom authentication yet, so Connect is unavailable for that one."
+    ],
+    "redirect_uris": [],
+    "notes": [
+      "SEED, unverified. Facts (URLs, scope names, field names, a product name) were read from the Activepieces community piece 'pastefy' at commit 6f4be340d7c4 (MIT; see NOTICE). Nothing here was tested against the provider and it never counts as working.",
+      "api_hosts are candidates: https literals in the piece source whose host carries the vendor's name (region maps, base URL helpers). Review them before relying on them: they decide where a credential may be sent."
+    ]
+  },
+  "auth": [
+    {
+      "id": "custom",
+      "mode": "custom",
+      "label": "Custom credentials",
+      "default": true,
+      "inject": {
+        "in": "header",
+        "name": "Authorization",
+        "template": "Bearer {token}"
+      },
+      "fields": {
+        "auth_config_creation": [],
+        "connected_account_initiation": [
+          {
+            "name": "instance_url",
+            "required": false,
+            "secret": false
+          },
+          {
+            "name": "token",
+            "required": false,
+            "secret": true
+          }
+        ]
+      }
+    }
+  ],
+  "provenance": {
+    "derived_from": [
+      "activepieces/activepieces@6f4be340d7c4bef9fb6ff874ca72224e4933d3d2 packages/pieces/community/pastefy/src"
+    ],
+    "license": "MIT",
+    "attribution": "Copyright (c) 2020-2024 Activepieces Inc. (MIT Expat). Facts only: URLs, scope names, field names. See NOTICE."
+  },
+  "source": {
+    "activepieces_commit": "6f4be340d7c4bef9fb6ff874ca72224e4933d3d2",
+    "piece": "pastefy"
+  },
+  "verification": "unverified_seed"
+}

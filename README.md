@@ -412,19 +412,49 @@ or base64url tokens next to the words key / token / secret) at any depth and rep
 `[redacted:<kind>]`; values under secret-looking key names are masked as before. Upstream error text is
 scrubbed the same way even when capture is off.
 
-### Connecting an OAuth provider (Phase 3)
+### Connecting a provider account
 
-For the five managed providers you don't paste a token — you authorize once and MCP Switchboard seals
-the result in the vault. Store the provider's client credentials, then run the loopback flow:
+How each provider is connected (authorize and token URLs, PKCE, client auth, scope separator, refresh rules,
+which hosts its credentials may reach, and what you must create in its console) is **data**:
+`src/connectors/providers/*.json`, validated against `src/connectors/schemas/provider.schema.json`. Register
+your own OAuth app once (secrets stay in the vault and are referenced, never copied), then connect:
 
 ```bash
-# one-time: store the OAuth app's client id/secret (names are a fixed convention)
-printf '%s' '<client-id>'     | node dist/cli.js vault set oauth_github_client_id
-printf '%s' '<client-secret>' | node dist/cli.js vault set oauth_github_client_secret
+# one-time: put the OAuth app's client id/secret in the vault, then register them by reference
+printf '%s' '<client-id>'     | node dist/cli.js vault set gh_client_id
+printf '%s' '<client-secret>' | node dist/cli.js vault set gh_client_secret
+node dist/cli.js authconfig add github --client-id-ref gh_client_id --client-secret-ref gh_client_secret
 
-node dist/cli.js catalog            # see provider status: ready / needs client id / connected
-node dist/cli.js connect github     # prints an authorize URL, waits on a local loopback callback
+node dist/cli.js providers show github        # what to create at the provider, redirect URIs, notes
+node dist/cli.js connect github               # prints an authorize URL, waits on the loopback callback
+node dist/cli.js connect github --auth pat --account ci --token-stdin   # or store a token you already hold
+node dist/cli.js accounts list                # several accounts per provider: status, identity, expiry
+node dist/cli.js accounts probe github/ci     # prove the credential is live
 ```
+
+The old convention (vault names `oauth_<provider>_client_id` / `_client_secret`) still works with no
+registration step, and an existing `oauth.json` is imported once as `default` accounts. A connect that is
+cancelled, expires after 10 minutes, is refused, or fails its identity probe stores nothing. Tokens are
+sealed with the vault key; an `invalid_grant` marks the account `EXPIRED` and the error names the exact
+reconnect command.
+
+### Toolkits: call a connected account's API
+
+A **toolkit** is one provider API as agent tools (YouTube, Gmail, Drive, X, Slack, Notion ship as overlays). The
+vendor's public spec is fetched into your own `SWITCHBOARD_HOME` at sync time and never committed. Each toolkit lists
+at most 28 curated actions plus `manage_connections` and `proxy_request`; the rest of the API is reachable through
+`find_tools` and `call_tool`. Scope and risk come from the HTTP verb and the action's name, and an overlay can only
+tighten them.
+
+```bash
+node dist/cli.js toolkits sync google            # YouTube, Gmail and Drive specs (add --check to detect drift)
+node dist/cli.js toolkits enable gmail           # mounts it as a `source: connector` server
+node dist/cli.js link claude-code gmail --max-scope write --account google/me   # edits the clients config
+node dist/cli.js coverage                        # honest count: only account-verified rows are "working"
+```
+
+Uploads need `settings.connectors.upload_allowlist`; downloads are saved under `SWITCHBOARD_HOME/files/<run_id>/`.
+Details: `docs/architecture/CONNECTORS.md`.
 
 Or click **Connect** in the dashboard's catalog card. The browser bounces through the provider and
 back to `127.0.0.1`, the token is sealed, and the row flips to **connected** — no token ever leaves
@@ -793,6 +823,9 @@ clients:
   local-model:
     servers: [voice, youtube]
     max_scope: read
+  assistant-a:
+    servers: [gmail]
+    accounts: { google: ca_work }   # local connectors: the account this client runs as ("*": it may choose one)
 ```
 
 - **One command per client.** `switchboard client add codex --servers voice,youtube --max-scope read` writes the
@@ -802,6 +835,11 @@ clients:
 - **Fail closed.** The moment one client exists, `/mcp` needs a key bound to a configured client on every request, on
   loopback too (even with `require_auth: never`). No credential is 401; a valid key that names no configured client is
   403. With no client configured nothing changes: the loopback single-user mode of 0.1.0.
+- **One access table, also for connectors.** Which client may use a connector toolkit, how far, and as which account is
+  this same `clients:` section: `servers` names the toolkit's server, `max_scope` and `max_risk` cap it, and the optional
+  `accounts: { <provider>: <account> }` binds the account. There is no second table; `switchboard link` edits this one
+  (see Local connectors). A call's `account` argument may name only the account the client is bound to (or any when it is
+  bound to `"*"`), never beats a server's `account` pin, and a refusal is `SB_POLICY_DENY` naming the client.
 - **Hidden is uncallable.** Listings and calls are both filtered. A tool outside the client's servers or tools, or in
   `exclude_tools`, is refused with `SB_POLICY_DENY` naming the client; `max_scope` caps calls the same way. Resources
   and prompts follow the client's `servers`. `find_tools`, `call_tool` and `batch_call` apply the same filter.
@@ -834,6 +872,48 @@ clients:
 stops working at once, on a running gateway too), `client rm <id>` revokes its keys and deletes the key file
 (`--purge` also removes the config entry). `npm run verify:principals` proves all of the above end to end.
 
+## Local connectors (no subscription)
+
+A hosted tool router signs you in to Gmail, YouTube, Slack and the rest once, keeps the tokens in its cloud and
+charges a subscription. Switchboard does the same job locally: you connect each provider **once** with an OAuth app
+or key that you own, the tokens are sealed in your local vault, and every agent you link reaches them through the one
+governed endpoint. No subscription, no third party in the path, and nothing leaves your machine except the calls to
+the provider itself.
+
+1. **Register your app** at the provider (a shared app is impossible for an open-source program):
+   [docs/connectors/OWNER_SETUP.md](docs/connectors/OWNER_SETUP.md) has the steps and the limits, per platform.
+2. **Connect**: `switchboard connect <provider>`, or press **Connect** on the dashboard's **Connectors** page. An
+   account is stored only after the provider's identity probe passes.
+3. **Toolkits**: `switchboard toolkits sync <provider>` then `switchboard toolkits enable <toolkit>` (or the toggle on
+   the Connectors page) mounts the provider's API as agent tools. Generated definitions live on your machine and are
+   never committed.
+4. **Link clients**: `switchboard link <client> <toolkit> --max-scope write --account <account>` decides which agent may
+   use what, and as which account. It edits the `clients:` section (the one access table; `unlink` and `links` are its
+   counterparts), so the gateway asks you to be present first, exactly as for `client add`. Calls that publish, send or
+   delete need your approval, and the approval is bound to the account and to the exact request (method, host, path,
+   body), so an approval for one account cannot run as another.
+
+**Curated and seeded providers.** The 13 curated definitions (Google, Meta, LinkedIn, TikTok, X, Slack, Notion, GitHub,
+ElevenLabs, Linear, Higgsfield, Buffer) are written and checked by hand. Beside them ship 594 **seeds**: candidate
+definitions of long-tail providers, derived from the authentication settings of the MIT-licensed
+[Activepieces](https://github.com/activepieces/activepieces) community pieces (facts only, never piece code; see
+`NOTICE`). A seed enables Connect and nothing more: it is marked `unverified_seed`, has no toolkits and no identity
+probe, and it is **never counted as working**. A curated definition always wins over a seed of the same name, and
+writing your own `<SWITCHBOARD_HOME>/providers/<slug>.json` replaces one.
+
+**Honest counts.** Only a row proven live by an owner-run probe is called working (`switchboard coverage`). A registered
+provider, a mapped action or a seed is not a working one.
+
+```bash
+switchboard providers list --seeds        # curated and seeded providers, with their authentication modes
+switchboard providers show <provider>     # what to create at the provider, redirect URIs, assumptions for a seed
+switchboard dashboard login               # then open #/connectors: search, filter, Connect, accounts, toolkit on/off
+node scripts/verify-connectors-seed.mjs   # the oracle: seeds validate, curated wins, a seed never reports working
+```
+
+Architecture and security rules: [docs/architecture/LOCAL_TOOLKITS.md](docs/architecture/LOCAL_TOOLKITS.md).
+File-by-file notes: [docs/architecture/CONNECTORS.md](docs/architecture/CONNECTORS.md).
+
 ## CLI
 
 | Command | What it does |
@@ -850,8 +930,14 @@ stops working at once, on a running gateway too), `client rm <id>` revokes its k
 | `switchboard list` | Mount everything and print the governed tool list, then exit |
 | `switchboard doctor` | Check Node, config, transports, and that every secret resolves |
 | `switchboard catalog` | List the OAuth providers and their connection status |
-| `switchboard connect <provider>` | Authorize a provider locally (loopback OAuth → token sealed in the vault) |
+| `switchboard connect <provider>` | Connect an account: browser OAuth on the loopback callback, or a token / key you hold (`--account`, `--auth-config`, `--auth`, `--scopes`, `--token-ref`, `--token-stdin`, `--import`) |
+| `switchboard accounts list\|show\|default\|disable\|enable\|revoke\|probe` | Inspect and manage connected accounts (several per provider; revoke calls the provider when it supports that) |
+| `switchboard authconfig add\|list\|show\|rm` | Register the OAuth apps your connects use (client id and secret as vault references) |
+| `switchboard providers list\|show <slug>` | The provider definitions and what you must set up at each provider |
 | `switchboard toolkits sync\|stats` | Rebuild / inspect the browsable integration catalog (MCP Registry + APIs.guru) |
+| `switchboard toolkits list\|show\|enable\|disable\|sync <toolkit>` | Local connector toolkits: list what is defined, show a toolkit's actions, mount or unmount it, rebuild its definition from the provider's spec |
+| `switchboard link <client> <toolkit-or-server-id>` / `unlink <client> [toolkit]` / `links` | Give a client access to a connector toolkit (`--account`, `--max-scope`, `--max-risk`), take it away, or list who has what. They edit the `clients:` section through the same code as `client add` |
+| `switchboard coverage [toolkit]` | Honest counts: only account-verified rows are "working" |
 | `switchboard local-llm [wire]` | Auto-detect an offline OpenAI-compatible LLM; `wire` writes it into the council |
 | `switchboard profile list\|show <name>\|use <name>\|clear` | Manage named, switchable views over your servers/tools |
 | `switchboard apikey new <name>\|list\|rm <id>` | Manage `/mcp` bearer API keys for local & cloud clients; `new --client <id>` binds a key to a registered client |
@@ -914,9 +1000,11 @@ tool-exposure modes, the encrypted vault, the approval gate, the audit log, the 
 one-command `install` into five clients. The full `find_tools → call_tool` round-trip works end-to-end
 through the governed path.
 
-- **Managed OAuth (Phase 3)** — local OAuth for **5 providers** (Google, GitHub, Slack, Notion, Linear)
-  via the catalog UI or `switchboard connect <provider>`; tokens are sealed in the same local vault as
-  BYO keys. Hand-rolled on Node `crypto` — no third-party auth service, zero native deps.
+- **Managed OAuth (Phase 3), now the connector core**: provider auth definitions are validated data
+  (13 bundled: Google, GitHub, Slack, Notion, Linear, Meta Facebook and Instagram, LinkedIn, TikTok, X,
+  ElevenLabs, Higgsfield, Buffer); connected accounts (several per provider) are sealed with the vault key,
+  refreshed single-flight and shown by `switchboard accounts`; connect through the catalog UI or
+  `switchboard connect <provider>`. Hand-rolled on Node `crypto`, with no third-party auth service and zero native deps.
 - **app2mcp (Phase 4)** — point `source: app2mcp` at an OpenAPI/Swagger spec and MCP Switchboard generates
   an in-process MCP server at mount, with verb→scope inference flowing into the **same** governance
   engine (a generated `deletepet` is denied under a `read` ceiling). A reference without a resolvable
@@ -1019,6 +1107,7 @@ npm run verify     # build + npm audit + 26 oracles = 1171 checks, all green
 - [Vision & positioning](docs/VISION.md)
 - [Architecture overview](docs/ARCHITECTURE.md)
 - [Roadmap](docs/ROADMAP.md)
+- [Local toolkits (architecture)](docs/architecture/LOCAL_TOOLKITS.md) · [Owner setup per platform](docs/connectors/OWNER_SETUP.md)
 - [Competitive landscape](docs/COMPETITIVE.md) · [Composio parity, feature by feature](docs/COMPOSIO-PARITY.md)
 - [Example config](switchboard.config.example.yaml) · [search-mode example](examples/switchboard.config.yaml)
 

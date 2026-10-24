@@ -1,0 +1,49 @@
+{
+  "toolkit": "notion",
+  "provider": "notion",
+  "source": {
+    "kind": "openapi",
+    "url": "https://raw.githubusercontent.com/makenotion/notion-mcp-server/main/scripts/notion-openapi.json",
+    "note": "Notion API OpenAPI 3.1 from makenotion/notion-mcp-server (MIT). Fetched by `toolkits sync`, never committed. It describes 24 operations; the ADR counted 65 from another source."
+  },
+  "description_trim": 300,
+  "important": [
+    "get_self",
+    "get_users",
+    "post_search",
+    "retrieve_a_page",
+    "post_page",
+    "patch_page",
+    "retrieve_a_block",
+    "get_block_children",
+    "patch_block_children",
+    "query_data_source",
+    "retrieve_a_data_source",
+    "retrieve_a_database",
+    "create_a_comment",
+    "retrieve_page_markdown",
+    "update_page_markdown",
+    "move_page"
+  ],
+  "tags": {
+    "post_search": [
+      "find",
+      "search",
+      "pages"
+    ],
+    "post_page": [
+      "create",
+      "new",
+      "page"
+    ],
+    "query_data_source": [
+      "database",
+      "rows",
+      "query"
+    ]
+  },
+  "reconcile": {
+    "post_page": "The page may have been created. Search for its title (post_search) before creating it again.",
+    "create_a_comment": "The comment may have been posted. Retrieve the page's comments before posting again."
+  }
+}

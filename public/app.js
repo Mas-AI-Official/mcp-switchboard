@@ -617,6 +617,497 @@ async function renderAccounts() {
 }
 
 // ============================================================================
+// VIEW: Connectors (providers, connect, accounts, toolkit on/off, coverage)
+//
+// Providers come from two places: CURATED definitions (written and checked by hand) and SEEDS (candidate
+// definitions derived from another project's published auth settings). A seed enables Connect and nothing
+// more: it is never probed, never verified and never counted as working. Every number on this page that
+// says "live" is rows proven by an owner-run probe; nothing else is called working.
+// ============================================================================
+const connState = {
+  q: "",
+  source: "",
+  auth: "",
+  connectable: false,
+  offset: 0,
+  limit: 60,
+  total: 0,
+  items: [],
+  facets: null,
+  loading: false,
+  seq: 0,
+};
+
+const CONN_MODE_LABEL = {
+  oauth2: "OAuth 2",
+  oauth2_cc: "OAuth client credentials",
+  oauth1: "OAuth 1",
+  api_key: "API key",
+  bearer: "Token",
+  basic: "Username and password",
+  custom: "Custom fields",
+};
+
+function safeHttps(url) {
+  return typeof url === "string" && /^https:\/\/[^\s"'<>]+$/.test(url) ? url : "";
+}
+
+function connModeLabel(m) {
+  return CONN_MODE_LABEL[m] || m;
+}
+
+function connCoverageBadge(cov) {
+  if (!cov) return "";
+  if (cov.state === "unverified_seed") {
+    return `<span class="badge badge-warn" title="Derived from another project's published auth settings. It enables Connect and never counts as working."><span class="dot"></span>Unverified seed</span>`;
+  }
+  if (cov.working_rows > 0) {
+    const when = cov.last_verified_at ? ` Last live probe ${fmtDateTime(cov.last_verified_at)}.` : "";
+    return `<span class="badge badge-ok" title="Rows proven live by an owner-run probe.${attr(when)}"><span class="dot"></span>${cov.working_rows} of ${cov.addressable_rows} rows live</span>`;
+  }
+  return `<span class="badge badge-off" title="No row has been proven live by an owner-run probe yet."><span class="dot"></span>Not verified live</span>`;
+}
+
+function connStatusBadge(status) {
+  const map = { ACTIVE: "badge-ok", INITIATED: "badge-warn", INITIALIZING: "badge-warn", EXPIRED: "badge-danger", FAILED: "badge-danger", REVOKED: "badge-danger", INACTIVE: "badge-off" };
+  return `<span class="badge ${map[status] || "badge-off"}"><span class="dot"></span>${esc(status)}</span>`;
+}
+
+function connToolkitState(t) {
+  if (t.state === "on") return `<span class="badge badge-ok"><span class="dot"></span>On</span>`;
+  if (t.state === "off") return `<span class="badge badge-off"><span class="dot"></span>Off</span>`;
+  return `<span class="badge badge-off"><span class="dot"></span>Not enabled</span>`;
+}
+
+function connToolkitButton(t) {
+  if (t.state === "on") return `<button class="btn btn-sm" data-tk-disable="${attr(t.slug)}">Disable</button>`;
+  const why = !t.defined ? `Not defined here yet: run switchboard toolkits sync ${t.slug}` : !t.ready ? "Needs an ACTIVE account that passed its identity probe" : "";
+  return `<button class="btn btn-sm btn-primary" data-tk-enable="${attr(t.slug)}" ${why ? `title="${attr(why)}"` : ""}>Enable</button>`;
+}
+
+async function renderConnectors() {
+  connState.offset = 0;
+  connState.items = [];
+  view().innerHTML =
+    pageHead(
+      "Connectors",
+      "Local connectors: sign in to a provider once and share the connection with every agent, without a subscription to a hosted tool router. Curated providers are checked by hand; seeds are unverified candidates that only enable Connect."
+    ) +
+    `
+    <div class="stat-grid" id="conn-stats"><div class="dim">loading...</div></div>
+    <div class="catalog-toolbar">
+      <div class="search-wrap">
+        <span class="search-ico">&#8981;</span>
+        <input id="conn-search" class="search-input" type="search" autocomplete="off"
+          placeholder="Search providers, categories or toolkits" value="${attr(connState.q)}" />
+      </div>
+      <select id="conn-source" class="select" style="width:auto" title="Curated or seed">
+        <option value="">All sources</option>
+        <option value="curated">Curated</option>
+        <option value="seed">Seeds (unverified)</option>
+      </select>
+      <select id="conn-auth" class="select" style="width:auto" title="Authentication mode">
+        <option value="">All auth modes</option>
+        ${Object.keys(CONN_MODE_LABEL).map((m) => `<option value="${attr(m)}">${esc(connModeLabel(m))}</option>`).join("")}
+      </select>
+      <label class="check-inline"><input id="conn-connectable" type="checkbox" /> Connect available</label>
+    </div>
+    <div class="result-meta" id="conn-meta"></div>
+    <div class="grid" id="conn-grid"></div>
+    <div class="load-more" id="conn-more"></div>
+    <h2 class="section-title">Toolkits</h2>
+    <p class="dim section-sub">A toolkit is the set of actions a provider offers. Turning one on mounts it as a server now; it needs an active account that passed its identity probe. Seeds have no toolkits.</p>
+    <div id="conn-toolkits"><div class="dim">loading...</div></div>
+    <h2 class="section-title">Connected accounts</h2>
+    <p class="dim section-sub">Tokens stay in your local vault and are never shown here.</p>
+    <div id="conn-accounts"><div class="dim">loading...</div></div>`;
+
+  $("#conn-source").value = connState.source;
+  $("#conn-auth").value = connState.auth;
+  $("#conn-connectable").checked = connState.connectable;
+  $("#conn-search").addEventListener(
+    "input",
+    debounce((e) => {
+      connState.q = e.target.value.trim();
+      connReload();
+    }, 220)
+  );
+  $("#conn-source").addEventListener("change", (e) => {
+    connState.source = e.target.value;
+    connReload();
+  });
+  $("#conn-auth").addEventListener("change", (e) => {
+    connState.auth = e.target.value;
+    connReload();
+  });
+  $("#conn-connectable").addEventListener("change", (e) => {
+    connState.connectable = e.target.checked;
+    connReload();
+  });
+
+  connLoadCoverage();
+  connReload();
+  connLoadToolkits();
+  connLoadAccounts();
+}
+
+async function connLoadCoverage() {
+  const el = $("#conn-stats");
+  if (!el) return;
+  try {
+    const c = await api("/api/connectors/coverage");
+    const f = connState.facets;
+    el.innerHTML =
+      `<div class="stat stat-accent"><div class="stat-val">${f ? f.source.curated : "-"}</div><div class="stat-label">curated providers</div></div>` +
+      `<div class="stat stat-warn"><div class="stat-val">${f ? f.source.seed : "-"}</div><div class="stat-label">unverified seeds</div></div>` +
+      (c.imported
+        ? `<div class="stat stat-ok"><div class="stat-val">${esc(String(c.working))} of ${esc(String(c.addressable))}</div><div class="stat-label">checklist rows proven live</div></div>`
+        : `<div class="stat"><div class="stat-val">0</div><div class="stat-label">rows proven live (no checklist imported)</div></div>`);
+    el.title = c.note || "";
+  } catch (e) {
+    el.innerHTML = errorBanner(e);
+  }
+}
+
+async function connReload() {
+  connState.offset = 0;
+  connState.items = [];
+  await connFetchPage(true);
+}
+
+async function connFetchPage(replace) {
+  const grid = $("#conn-grid");
+  if (!grid) return;
+  const mySeq = ++connState.seq;
+  connState.loading = true;
+  const params = new URLSearchParams();
+  if (connState.q) params.set("q", connState.q);
+  if (connState.source) params.set("source", connState.source);
+  if (connState.auth) params.set("auth", connState.auth);
+  if (connState.connectable) params.set("connectable", "1");
+  params.set("offset", String(connState.offset));
+  params.set("limit", String(connState.limit));
+  try {
+    const res = await api(`/api/connectors/providers?${params.toString()}`);
+    if (mySeq !== connState.seq || !$("#conn-grid")) return; // a newer search superseded this one
+    connState.total = res.total;
+    connState.facets = res.facets;
+    connState.items = replace ? res.providers : connState.items.concat(res.providers);
+    connState.offset = connState.items.length;
+    connRenderGrid(res);
+    connLoadCoverage();
+  } catch (e) {
+    if (mySeq === connState.seq && $("#conn-grid")) $("#conn-grid").innerHTML = errorBanner(e);
+  } finally {
+    if (mySeq === connState.seq) connState.loading = false;
+  }
+}
+
+function connCardHtml(p) {
+  const seed = p.source === "seed";
+  const initial = (p.name || "?").trim().charAt(0).toUpperCase();
+  const modes = p.auth.map((a) => `<span class="tag" title="${attr(a.connectable ? "Connect is available" : "This build does not drive this mode yet")}">${esc(connModeLabel(a.mode))}${a.connectable ? "" : " (not driven)"}</span>`).join("");
+  const toolkits = p.toolkits.length
+    ? p.toolkits.map((t) => `<span class="tag conn-tk-${attr(t.state)}" title="${attr(t.state === "on" ? "enabled" : t.state === "off" ? "disabled" : "not enabled")}">${esc(t.slug)}</span>`).join("")
+    : `<span class="dim conn-none">${seed ? "no toolkits (seed)" : "no toolkits defined yet"}</span>`;
+  const connectLabel = p.connected ? "Add account" : "Connect";
+  const connectBtn =
+    p.connect === "unavailable"
+      ? `<button class="btn btn-sm" disabled title="This build does not drive this provider's authentication yet">Connect unavailable</button>`
+      : `<button class="btn btn-sm ${p.connected ? "" : "btn-primary"}" data-conn-connect="${attr(p.slug)}">${connectLabel}</button>`;
+  const accounts = p.accounts ? `<span class="badge badge-ok"><span class="dot"></span>${p.accounts} account${p.accounts === 1 ? "" : "s"}</span>` : `<span class="badge badge-off"><span class="dot"></span>No account</span>`;
+  return `
+    <div class="tk-card conn-card${seed ? " conn-seed" : ""}" data-conn-slug="${attr(p.slug)}">
+      <div class="tk-card-head">
+        <div class="tk-logo">${esc(initial)}</div>
+        <div style="min-width:0">
+          <div class="tk-name">${esc(p.name)}</div>
+          <div class="tk-origin">${seed ? "Seed" : "Curated"} &middot; ${esc((p.categories || []).slice(0, 2).join(", "))}</div>
+        </div>
+      </div>
+      <div class="tk-tags">${modes}</div>
+      <div class="tk-tags conn-toolkits"><span class="dim">toolkits</span> ${toolkits}</div>
+      <div class="tk-tags">${connCoverageBadge(p.coverage)} ${accounts}</div>
+      ${p.needs_app ? `<div class="tk-origin">Needs an OAuth app you register first; Connect shows the steps.</div>` : ""}
+      <div class="tk-foot">
+        <button class="btn btn-sm btn-ghost" data-conn-detail="${attr(p.slug)}">Details</button>
+        ${connectBtn}
+      </div>
+    </div>`;
+}
+
+function connRenderGrid(res) {
+  const grid = $("#conn-grid");
+  const more = $("#conn-more");
+  const meta = $("#conn-meta");
+  if (!grid) return;
+  const f = res.facets;
+  meta.textContent = `${connState.total.toLocaleString()} provider${connState.total === 1 ? "" : "s"} match (${f.source.curated} curated, ${f.source.seed} seed in this search; ${f.connectable} can start Connect)` + (res.shadowed_seeds ? `; ${res.shadowed_seeds} seed${res.shadowed_seeds === 1 ? " is" : "s are"} hidden because a curated definition wins` : "");
+  if (!connState.items.length) {
+    grid.innerHTML = `<div class="empty"><div class="empty-title">No provider matches</div><div class="empty-sub">Try a shorter search or clear the filters.</div></div>`;
+    more.innerHTML = "";
+    return;
+  }
+  grid.innerHTML = connState.items.map(connCardHtml).join("");
+  $$("[data-conn-connect]", grid).forEach((b) => b.addEventListener("click", () => connectProvider(b.dataset.connConnect, {}, b)));
+  $$("[data-conn-detail]", grid).forEach((b) => b.addEventListener("click", () => openProviderDetail(b.dataset.connDetail)));
+  if (connState.items.length < connState.total) {
+    more.innerHTML = `<button class="btn" id="conn-more-btn">Show more (${(connState.total - connState.items.length).toLocaleString()} left)</button>`;
+    $("#conn-more-btn").addEventListener("click", async (e) => {
+      e.target.disabled = true;
+      await connFetchPage(false);
+    });
+  } else more.innerHTML = "";
+}
+
+async function connLoadToolkits() {
+  const el = $("#conn-toolkits");
+  if (!el) return;
+  try {
+    const { toolkits } = await api("/api/connectors/toolkits");
+    if (!toolkits.length) {
+      el.innerHTML = `<div class="empty"><div class="empty-title">No toolkits defined</div><div class="empty-sub">Run <code>switchboard toolkits sync all</code> to fetch the providers' public specs.</div></div>`;
+      return;
+    }
+    el.innerHTML = `<table class="table"><thead><tr><th>Toolkit</th><th>Provider</th><th>Version</th><th>Tools</th><th>State</th><th>Coverage</th><th></th></tr></thead><tbody>${toolkits
+      .map(
+        (t) => `<tr>
+          <td><code>${esc(t.slug)}</code></td>
+          <td>${esc(t.provider)}</td>
+          <td>${t.defined ? esc(t.version || "") : `<span class="dim">not synced</span>`}</td>
+          <td>${t.tools}${t.listed ? ` <span class="dim">(${t.listed} listed)</span>` : ""}</td>
+          <td>${connToolkitState(t)}</td>
+          <td>${connCoverageBadge(t.coverage)}</td>
+          <td class="nowrap">${connToolkitButton(t)}</td>
+        </tr>`
+      )
+      .join("")}</tbody></table>`;
+    connBindToolkitButtons(el);
+  } catch (e) {
+    el.innerHTML = errorBanner(e);
+  }
+}
+
+function connBindToolkitButtons(root) {
+  $$("[data-tk-enable]", root).forEach((b) => b.addEventListener("click", () => connToggleToolkit(b.dataset.tkEnable, "enable", b)));
+  $$("[data-tk-disable]", root).forEach((b) => b.addEventListener("click", () => connToggleToolkit(b.dataset.tkDisable, "disable", b)));
+}
+
+async function connToggleToolkit(slug, action, btn) {
+  const original = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = `<span class="spinner"></span>`;
+  try {
+    await api(`/api/connectors/toolkits/${encodeURIComponent(slug)}/${action}`, { method: "POST", body: JSON.stringify({}) });
+    toast(`Toolkit ${slug} is ${action === "enable" ? "on" : "off"}.`, "ok");
+    refreshSidebar();
+    await Promise.all([connLoadToolkits(), connReload()]);
+    const open = $(".modal-body [data-conn-modal-slug]");
+    if (open) openProviderDetail(open.dataset.connModalSlug);
+  } catch (e) {
+    toast(e.message, "error");
+    btn.disabled = false;
+    btn.innerHTML = original;
+  }
+}
+
+function connAccountsTable(accounts, opts) {
+  if (!accounts.length) return `<div class="empty"><div class="empty-title">No account connected</div></div>`;
+  const showProvider = !opts || !opts.hideProvider;
+  return `<table class="table"><thead><tr>${showProvider ? "<th>Provider</th>" : ""}<th>Account</th><th>Status</th><th>Expires</th><th>Last probe</th><th></th></tr></thead><tbody>${accounts
+    .map((a) => {
+      const probe = a.probe_available
+        ? a.last_probe_at
+          ? `${relTime(a.last_probe_at)}${a.last_error ? ` <span class="badge badge-danger" title="${attr(a.last_error)}"><span class="dot"></span>failed</span>` : ""}`
+          : `<span class="dim">never</span>`
+        : `<span class="dim" title="This provider defines no identity probe">no probe available</span>`;
+      const ident = a.identity && (a.identity.display_name || (a.identity.external_id !== "unknown" ? a.identity.external_id : ""));
+      return `<tr>
+        ${showProvider ? `<td>${esc(a.provider_name)}${a.source_kind === "seed" ? ` <span class="badge badge-warn"><span class="dot"></span>unverified seed</span>` : ""}</td>` : ""}
+        <td><code>${esc(a.label)}</code> <span class="dim mono">${esc(a.id)}</span>${ident ? `<div class="dim">${esc(ident)}</div>` : ""}</td>
+        <td>${connStatusBadge(a.status)}${a.status_reason ? `<div class="dim">${esc(a.status_reason)}</div>` : ""}</td>
+        <td>${a.expires_at ? fmtDateTime(a.expires_at) : `<span class="dim">no expiry</span>`}</td>
+        <td>${probe}</td>
+        <td class="nowrap"><button class="btn btn-sm" data-conn-probe="${attr(a.id)}" ${a.probe_available ? "" : "disabled"}>Probe</button></td>
+      </tr>`;
+    })
+    .join("")}</tbody></table>`;
+}
+
+function connBindProbeButtons(root, after) {
+  $$("[data-conn-probe]", root).forEach((b) =>
+    b.addEventListener("click", async () => {
+      const original = b.innerHTML;
+      b.disabled = true;
+      b.innerHTML = `<span class="spinner"></span>`;
+      try {
+        const r = await api(`/api/connectors/accounts/${encodeURIComponent(b.dataset.connProbe)}/probe`, { method: "POST", body: JSON.stringify({}) });
+        toast(r.ok ? "Probe passed." : `Probe failed: ${r.error || "unknown error"}`, r.ok ? "ok" : "error");
+      } catch (e) {
+        toast(e.message, "error");
+      } finally {
+        b.disabled = false;
+        b.innerHTML = original;
+        if (after) after();
+      }
+    })
+  );
+}
+
+async function connLoadAccounts() {
+  const el = $("#conn-accounts");
+  if (!el) return;
+  try {
+    const { accounts } = await api("/api/connectors/accounts");
+    el.innerHTML = connAccountsTable(accounts, {});
+    connBindProbeButtons(el, connLoadAccounts);
+  } catch (e) {
+    el.innerHTML = errorBanner(e);
+  }
+}
+
+function connSetupHtml(setup, name) {
+  const link = safeHttps(setup.console_url);
+  return `
+    <p class="dim">${esc(name)} needs an OAuth app that you create and own. Follow these steps, then press Connect again.</p>
+    ${link ? `<p><a href="${attr(link)}" target="_blank" rel="noopener noreferrer">Open the provider's developer console</a></p>` : ""}
+    <ol class="steps">${setup.steps.map((s) => `<li>${esc(s)}</li>`).join("")}</ol>
+    ${setup.redirect_uris.length ? `<h4 class="mini-title">Redirect URIs to register</h4><div class="cmd">${setup.redirect_uris.map((u) => `<div>${esc(u)}</div>`).join("")}</div>` : ""}
+    ${setup.commands.length ? `<h4 class="mini-title">Commands</h4><div class="cmd">${setup.commands.map((c) => `<div>${esc(c)}</div>`).join("")}</div>` : ""}
+    ${setup.notes.length ? `<h4 class="mini-title">Notes</h4><ul class="notes">${setup.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}`;
+}
+
+async function connectProvider(slug, body, btn) {
+  const original = btn ? btn.innerHTML : "";
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = `<span class="spinner"></span>`;
+  }
+  try {
+    const out = await api(`/api/connectors/providers/${encodeURIComponent(slug)}/connect`, { method: "POST", body: JSON.stringify(body || {}) });
+    if (out.status === "redirect") {
+      const url = safeHttps(out.authorize_url) || (/^http:\/\/(127\.0\.0\.1|localhost)[:/]/.test(out.authorize_url) ? out.authorize_url : "");
+      if (!url) throw new Error("the provider returned a consent URL that is not https");
+      window.open(url, "_blank", "noopener");
+      toast("Opened the provider's consent screen in a new tab. Come back here when you are done.", "ok");
+      const refresh = () => {
+        window.removeEventListener("focus", refresh);
+        setTimeout(() => {
+          if ($("#conn-grid")) {
+            connReload();
+            connLoadAccounts();
+          }
+        }, 800);
+      };
+      window.addEventListener("focus", refresh);
+    } else if (out.status === "connected") {
+      toast(`Connected ${out.account.label}.`, "ok");
+      await Promise.all([connReload(), connLoadAccounts()]);
+    } else if (out.status === "needs_setup") {
+      const name = (connState.items.find((p) => p.slug === slug) || {}).name || slug;
+      const m = openModal({ title: `Register an app for ${name}`, body: connSetupHtml(out.owner_setup, name), footer: `<button class="btn" id="conn-setup-close">Close</button>` });
+      $("#conn-setup-close", m.root).addEventListener("click", m.close);
+    } else if (out.status === "needs_input") {
+      openCredentialModal(slug, out);
+    }
+  } catch (e) {
+    toast(e.message, "error");
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = original;
+    }
+  }
+}
+
+function openCredentialModal(slug, out) {
+  const fields = out.fields
+    .map(
+      (f) => `<label class="field-row"><span>${esc(f.label || f.name)}${f.required ? "" : ` <span class="dim">(optional)</span>`}</span>
+        <input class="input" data-cred-field="${attr(f.name)}" type="${f.secret ? "password" : "text"}" autocomplete="off" spellcheck="false" /></label>`
+    )
+    .join("");
+  const body = `
+    <p class="dim">${esc(out.message)}. The value goes straight into your local encrypted vault and is never shown again.</p>
+    <label class="field-row"><span>Account label</span><input class="input" id="cred-label" type="text" value="default" autocomplete="off" /></label>
+    ${fields}`;
+  const m = openModal({ title: "Connect", body, footer: `<button class="btn" id="cred-cancel">Cancel</button><button class="btn btn-primary" id="cred-save">Connect</button>` });
+  $("#cred-cancel", m.root).addEventListener("click", m.close);
+  $("#cred-save", m.root).addEventListener("click", async (e) => {
+    const btn = e.target;
+    const values = {};
+    $$("[data-cred-field]", m.root).forEach((i) => {
+      if (i.value.trim()) values[i.dataset.credField] = i.value;
+    });
+    const label = $("#cred-label", m.root).value.trim() || "default";
+    btn.disabled = true;
+    try {
+      const res = await api(`/api/connectors/providers/${encodeURIComponent(slug)}/connect`, { method: "POST", body: JSON.stringify({ auth_id: out.auth_id, label, fields: values }) });
+      $$("[data-cred-field]", m.root).forEach((i) => (i.value = ""));
+      if (res.status === "connected") {
+        toast(`Connected ${res.account.label}.`, "ok");
+        m.close();
+        await Promise.all([connReload(), connLoadAccounts()]);
+      } else toast(res.message || "More input is needed.", "error");
+    } catch (err) {
+      toast(err.message, "error");
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
+async function openProviderDetail(slug) {
+  let d;
+  try {
+    d = await api(`/api/connectors/providers/${encodeURIComponent(slug)}`);
+  } catch (e) {
+    toast(e.message, "error");
+    return;
+  }
+  const seed = d.source === "seed";
+  const docs = safeHttps(d.docs_url);
+  const authList = d.auth_detail
+    .map((a) => {
+      const o = a.oauth2 ? ` &middot; PKCE ${esc(a.oauth2.pkce)}, ${esc(a.oauth2.default_scopes.length)} default scope${a.oauth2.default_scopes.length === 1 ? "" : "s"}` : "";
+      const fields = a.fields.length ? ` &middot; fields: ${a.fields.map((f) => esc(f.name) + (f.secret ? " (secret)" : "")).join(", ")}` : "";
+      const btn = a.connectable ? `<button class="btn btn-sm" data-conn-auth="${attr(a.id)}">Connect with this</button>` : `<span class="dim">not driven by this build</span>`;
+      return `<li><strong>${esc(connModeLabel(a.mode))}</strong> <code>${esc(a.id)}</code>${a.default ? ` <span class="tag">default</span>` : ""}${o}${fields} ${btn}</li>`;
+    })
+    .join("");
+  const toolkits = d.toolkits.length
+    ? `<table class="table"><thead><tr><th>Toolkit</th><th>State</th><th></th></tr></thead><tbody>${d.toolkits.map((t) => `<tr><td><code>${esc(t.slug)}</code> <span class="dim">${t.defined ? `${t.tools} tools` : "not synced"}</span></td><td>${connToolkitState(t)}</td><td class="nowrap">${connToolkitButton(t)}</td></tr>`).join("")}</tbody></table>`
+    : `<div class="dim">${seed ? "A seed defines no toolkits." : "No toolkit is defined for this provider yet."}</div>`;
+  const body = `
+    <div data-conn-modal-slug="${attr(d.slug)}"></div>
+    <dl class="kv">
+      <dt>Source</dt><dd>${seed ? "Seed (unverified candidate)" : "Curated"}</dd>
+      <dt>Coverage</dt><dd>${connCoverageBadge(d.coverage)}</dd>
+      <dt>Categories</dt><dd>${esc((d.categories || []).join(", "))}</dd>
+      <dt>API hosts</dt><dd class="mono">${esc((d.api_hosts || []).join(", "))}</dd>
+      ${docs ? `<dt>Source link</dt><dd><a href="${attr(docs)}" target="_blank" rel="noopener noreferrer">${seed ? "Where these facts came from" : "Provider docs"}</a></dd>` : ""}
+    </dl>
+    <h4 class="mini-title">Authentication</h4>
+    <ul class="auth-list">${authList}</ul>
+    ${d.connect === "needs_app" ? `<h4 class="mini-title">Before you connect</h4>${connSetupHtml(d.owner_setup, d.name)}` : ""}
+    <h4 class="mini-title">Toolkits</h4>
+    ${toolkits}
+    <h4 class="mini-title">Connected accounts</h4>
+    <div id="conn-detail-accounts">${connAccountsTable(d.accounts_detail, { hideProvider: true })}</div>`;
+  const m = openModal({ title: d.name, body, footer: `<button class="btn" id="conn-detail-close">Close</button>` });
+  m.root.querySelector(".modal").classList.add("modal-wide");
+  $("#conn-detail-close", m.root).addEventListener("click", m.close);
+  $$("[data-conn-auth]", m.root).forEach((b) =>
+    b.addEventListener("click", () => {
+      m.close();
+      connectProvider(d.slug, { auth_id: b.dataset.connAuth }, null);
+    })
+  );
+  connBindToolkitButtons(m.root);
+  connBindProbeButtons(m.root, () => openProviderDetail(slug));
+}
+
+// ============================================================================
 // VIEW: Servers
 // ============================================================================
 async function renderServers() {
@@ -2403,6 +2894,7 @@ async function renderOAuthConsent(pendingId) {
 const routes = {
   "/catalog": renderCatalog,
   "/accounts": renderAccounts,
+  "/connectors": renderConnectors,
   "/servers": renderServers,
   "/clients": renderClients,
   "/approvals": renderApprovals,

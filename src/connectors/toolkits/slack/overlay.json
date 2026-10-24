@@ -1,0 +1,56 @@
+{
+  "toolkit": "slack",
+  "provider": "slack",
+  "source": {
+    "kind": "openapi",
+    "url": "https://raw.githubusercontent.com/slackapi/slack-api-specs/master/web-api/slack_web_openapi_v2.json",
+    "note": "Slack Web API Swagger 2.0. Provenance and freshness UNVERIFIED: the slackapi/slack-api-specs repository is archived."
+  },
+  "description_trim": 300,
+  "important": [
+    "auth_test",
+    "conversations_list",
+    "conversations_history",
+    "conversations_replies",
+    "conversations_info",
+    "conversations_members",
+    "conversations_open",
+    "conversations_join",
+    "chat_post_message",
+    "chat_update",
+    "chat_delete",
+    "chat_get_permalink",
+    "chat_schedule_message",
+    "reactions_add",
+    "users_list",
+    "users_info",
+    "users_lookup_by_email",
+    "search_messages",
+    "files_list",
+    "files_info",
+    "pins_add",
+    "team_info"
+  ],
+  "tags": {
+    "chat_post_message": [
+      "send",
+      "message",
+      "channel",
+      "publish"
+    ],
+    "conversations_history": [
+      "read",
+      "messages",
+      "channel"
+    ],
+    "users_lookup_by_email": [
+      "find",
+      "user",
+      "email"
+    ]
+  },
+  "reconcile": {
+    "chat_post_message": "The message may have been posted. Read the channel's recent history (conversations_history) and look for the text before posting again.",
+    "chat_schedule_message": "The message may have been scheduled. List scheduled messages (chat_scheduled_messages_list) before scheduling it again."
+  }
+}

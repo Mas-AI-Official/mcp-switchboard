@@ -1,0 +1,98 @@
+{
+  "$schema": "../schemas/provider.schema.json",
+  "slug": "meta-facebook",
+  "name": "Facebook (Meta)",
+  "toolkits": ["facebook"],
+  "categories": ["social"],
+  "api_hosts": ["graph.facebook.com", "rupload.facebook.com"],
+  "docs_url": "https://developers.facebook.com/docs/facebook-login/guides/advanced/manual-flow",
+  "owner_setup": {
+    "console_url": "https://developers.facebook.com/apps/",
+    "steps": [
+      "Create a Meta developer app and add the Facebook Login for Business product (or Facebook Login)",
+      "Add yourself as an app admin; in Development mode only role users can use the app",
+      "Register the redirect URI below under Valid OAuth Redirect URIs",
+      "Store the app id and app secret: switchboard vault set meta_app_id and switchboard vault set meta_app_secret",
+      "Register them: switchboard authconfig add meta-facebook --client-id-ref meta_app_id --client-secret-ref meta_app_secret",
+      "Connect: switchboard connect meta-facebook --account brand-page --scopes pages_show_list,pages_manage_posts,pages_read_engagement"
+    ],
+    "redirect_uris": ["{loopback_redirect}"],
+    "notes": [
+      "Observed 2026-10-23 (Meta manual login flow doc): the dialog is https://www.facebook.com/v26.0/dialog/oauth, scopes may be comma or space separated, and the code is exchanged with GET https://graph.facebook.com/v26.0/oauth/access_token carrying client_id, redirect_uri, client_secret and code. The Graph version is pinned in the URLs: bump it when Meta retires it.",
+      "Observed (Meta long-lived token doc): the short-lived user token lasts hours and is traded for a roughly 60 day token with grant_type=fb_exchange_token; an expired token cannot be exchanged, so the person must log in again. This file does that exchange right after connect (post_exchange) and again before expiry (refresh.kind exchange).",
+      "UNVERIFIED: whether exchanging a still-valid long-lived token returns a token with a fresh 60 day lifetime. The ADR day-8 style check on a real account is the proof; until then treat the expiry date shown by accounts show as authoritative.",
+      "Long-lived Page tokens come from GET /{user-id}/accounts with a long-lived user token and have no expiry date (Meta doc). That is a recipe step in ADR phase P4, not part of connecting the user.",
+      "UNVERIFIED: whether Meta accepts an http loopback redirect URI for an app in Development mode, and whether Live mode forces https. If the console rejects it, use an https tunnel with switchboard authconfig add ... --redirect-uri.",
+      "Meta documents the token as an access_token query parameter on Graph calls; the Authorization header is not documented, so this file injects the query parameter. Request URLs are never written to logs.",
+      "Permission names in scope_catalog come from Meta's permissions reference and were not re-fetched when this file was written. Live mode exposes only App Review approved permissions."
+    ]
+  },
+  "identity_probe": {
+    "method": "GET",
+    "url": "https://graph.facebook.com/v26.0/me",
+    "query": { "fields": "id,name" },
+    "id_path": "id",
+    "name_path": "name"
+  },
+  "auth": [
+    {
+      "id": "oauth2",
+      "mode": "oauth2",
+      "label": "Facebook Login",
+      "default": true,
+      "oauth2": {
+        "authorize_url": "https://www.facebook.com/v26.0/dialog/oauth",
+        "token_url": "https://graph.facebook.com/v26.0/oauth/access_token",
+        "token_http_method": "GET",
+        "pkce": "unsupported",
+        "client_auth": "body",
+        "client_secret_at_exchange": "always",
+        "scope_separator": ",",
+        "default_scopes": ["public_profile"],
+        "scope_catalog": [
+          { "scope": "public_profile", "description": "Name and profile picture" },
+          { "scope": "pages_show_list", "description": "List the Pages the person manages" },
+          { "scope": "pages_read_engagement", "description": "Read Page posts and engagement" },
+          { "scope": "pages_manage_posts", "description": "Create, edit and delete Page posts" },
+          { "scope": "pages_manage_engagement", "description": "Manage comments on Page posts" },
+          { "scope": "pages_read_user_content", "description": "Read content people post on the Page" },
+          { "scope": "read_insights", "description": "Read Page insights" }
+        ],
+        "post_exchange": {
+          "method": "GET",
+          "url": "https://graph.facebook.com/v26.0/oauth/access_token",
+          "params": {
+            "grant_type": "fb_exchange_token",
+            "client_id": "{client_id}",
+            "client_secret": "{client_secret}",
+            "fb_exchange_token": "{access_token}"
+          }
+        },
+        "redirect": "loopback",
+        "accept_json": true,
+        "refresh": {
+          "kind": "exchange",
+          "rotates": false,
+          "exchange": {
+            "method": "GET",
+            "url": "https://graph.facebook.com/v26.0/oauth/access_token",
+            "params": {
+              "grant_type": "fb_exchange_token",
+              "client_id": "{client_id}",
+              "client_secret": "{client_secret}",
+              "fb_exchange_token": "{access_token}"
+            }
+          }
+        }
+      },
+      "inject": { "in": "query", "name": "access_token", "template": "{token}" },
+      "fields": {
+        "auth_config_creation": [
+          { "name": "client_id", "label": "App ID", "required": true, "secret": false },
+          { "name": "client_secret", "label": "App secret", "required": true, "secret": true }
+        ],
+        "connected_account_initiation": []
+      }
+    }
+  ]
+}

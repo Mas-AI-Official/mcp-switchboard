@@ -77,6 +77,8 @@ import { Governor } from "./governor.js";
 import { Breaker } from "./breaker.js";
 import { DEFAULT_STEP_BUDGET, templateMatches, type StepBudget } from "./uritemplate.js";
 import { log } from "./logger.js";
+import { APPROVED_META_KEY, AUDIT_META_KEY, CLIENT_META_KEY, TOOL_META_KEY, type ConnectorPlanView } from "./connectors/mcpserver.js";
+import { isConnectorError, type ConnectorError } from "./connectors/errors.js";
 
 const SEP = "__";
 
@@ -198,7 +200,17 @@ export class Router {
     const gate = this.callerOf(principal).gate;
     if (gate && gate.deny !== null) return [];
     if (this.mode === "search") return this.metaTools();
-    return this.exposed(gate).map(({ exposedName, tool }) => ({ ...tool, name: exposedName }));
+    const tools = this.exposed(gate).map(({ exposedName, tool }) => ({ ...tool, name: exposedName }));
+    // A connector toolkit lists only its important set. While any toolkit THIS caller may see holds unlisted actions,
+    // the two discovery tools are listed too, so the rest are reachable (ADR local-composio 6.7).
+    if (this.hasUnlisted(gate)) tools.push(...this.metaTools().filter((t) => t.name === FIND_TOOLS || t.name === CALL_TOOL));
+    return tools;
+  }
+
+  /** True while a server the caller may see holds callable-but-unlisted tools (a connector toolkit's long tail). */
+  private hasUnlisted(gate?: ClientGate): boolean {
+    const active = getActiveProfile(this.cfg)?.profile;
+    return this.registry.list().some((s) => this.isVisible(s, active) && (!gate || gateAllowsServer(gate, s.id)) && (s.unlisted?.length ?? 0) > 0);
   }
 
   /** The two meta-tools presented in `search` mode. */
@@ -289,7 +301,11 @@ export class Router {
     ];
   }
 
-  private exposed(gate?: ClientGate): ExposedTool[] {
+  /**
+   * `gate`: the caller's client, which may hide whole servers and individual tools. `includeUnlisted`: also the tools a
+   * server keeps out of its listing (search and calls use them; listing never does).
+   */
+  private exposed(gate?: ClientGate, includeUnlisted = false): ExposedTool[] {
     // `search` mode still namespaces internally so `call_tool` / `find_tools` can resolve
     // a unique name back to its upstream; only `flat` collapses to bare tool names.
     const flat = this.mode === "flat";
@@ -306,7 +322,7 @@ export class Router {
       // The caller's client may hide a server too. Its tools still claim their names below, so a flat-mode
       // name resolves to the same owner here as in resolve() whoever is asking.
       const serverHidden = gate !== undefined && !gateAllowsServer(gate, server.config.id);
-      for (const tool of server.tools) {
+      for (const tool of includeUnlisted && server.unlisted?.length ? [...server.tools, ...server.unlisted] : server.tools) {
         const override = server.config.tools?.[tool.name];
         // A tool explicitly disabled in config is never exposed at all.
         if (override?.enabled === false) continue;
@@ -353,7 +369,7 @@ export class Router {
   ): Tool[] {
     const lcQuery = query.trim().toLowerCase();
 
-    let pool = this.exposed(gate);
+    let pool = this.exposed(gate, true);
     if (serverFilter && serverFilter.size) pool = pool.filter((e) => serverFilter.has(e.server.id));
     if (tagFilter && tagFilter.size) {
       pool = pool.filter((e) => {
@@ -365,13 +381,17 @@ export class Router {
     // Build one BM25F document per exposed tool: name / tags / input-property names / description.
     const docs: RankDoc[] = pool.map(({ exposedName, server, tool }) => {
       const override = server.config.tools?.[tool.name];
+      // A connector action carries its own tags. Its `important` flag decides what is LISTED, not how it ranks:
+      // find_tools exists to reach the long tail, so the listed set gets no boost over it.
+      const meta = server.config.source === "connector" ? (tool._meta?.[TOOL_META_KEY] as { tags?: unknown } | undefined) : undefined;
+      const metaTags = Array.isArray(meta?.tags) ? (meta!.tags as unknown[]).filter((t): t is string => typeof t === "string") : [];
       return {
         id: exposedName,
         boost: override?.important ? IMPORTANT_BOOST : 1,
         exact: exposedName.toLowerCase() === lcQuery,
         fields: [
           { key: "name", text: exposedName, weight: SEARCH_FIELDS.name.weight, b: SEARCH_FIELDS.name.b },
-          { key: "tags", text: (override?.tags ?? []).join(" "), weight: SEARCH_FIELDS.tags.weight, b: SEARCH_FIELDS.tags.b },
+          { key: "tags", text: [...(override?.tags ?? []), ...metaTags].join(" "), weight: SEARCH_FIELDS.tags.weight, b: SEARCH_FIELDS.tags.b },
           { key: "props", text: this.schemaPropNames(tool).join(" "), weight: SEARCH_FIELDS.props.weight, b: SEARCH_FIELDS.props.b },
           { key: "description", text: tool.description ?? "", weight: SEARCH_FIELDS.description.weight, b: SEARCH_FIELDS.description.b },
         ],
@@ -406,13 +426,22 @@ export class Router {
   private resolve(exposedName: string): { server: MountedServer; toolName: string } | undefined {
     if (this.mode !== "flat") {
       const owner = this.namespaceOwner(exposedName);
-      return owner && owner.server.tools.some((t) => t.name === owner.toolName) ? owner : undefined;
+      return owner && this.lists(owner.server, owner.toolName) ? owner : undefined;
     }
     // flat mode: find the first server that owns this tool name.
     for (const server of this.registry.list()) {
-      if (server.tools.some((t) => t.name === exposedName)) return { server, toolName: exposedName };
+      if (this.lists(server, exposedName)) return { server, toolName: exposedName };
     }
     return undefined;
+  }
+
+  /**
+   * Does this server LIST the tool, or hold it as a callable-but-unlisted one (a connector toolkit's long tail, found
+   * with `find_tools`)? Both are tools the upstream declared at mount. A name the upstream never declared is neither.
+   * Callable is not the same as allowed: every client, profile and policy gate in forward() still applies.
+   */
+  private lists(server: MountedServer, toolName: string): boolean {
+    return server.tools.some((t) => t.name === toolName) || server.unlisted?.some((t) => t.name === toolName) === true;
   }
 
   /** Entry point for a downstream tool call. In `search` mode this also services the
@@ -427,6 +456,8 @@ export class Router {
       if (exposedName === CALL_TOOL) return this.handleCall(args, caller);
       if (exposedName === BATCH_CALL) return this.handleBatch(args, caller);
       // Direct call by namespaced name still works as a convenience.
+    } else if ((exposedName === FIND_TOOLS || exposedName === CALL_TOOL) && this.hasUnlisted(caller.gate)) {
+      return exposedName === FIND_TOOLS ? this.handleFind(args, caller) : this.handleCall(args, caller);
     }
     return this.forward(exposedName, args, caller);
   }
@@ -544,6 +575,8 @@ export class Router {
       this.annotationsOf(server, toolName),
       gateScopeCeiling(gate),
       gateRiskCeiling(gate),
+      // A connector action carries its own risk, outward and approval facts: they raise the risk and force an approval, never lower either.
+      server.connector?.hints[toolName],
     );
     risk = verdict.risk;
 
@@ -609,9 +642,39 @@ export class Router {
     // without an execution; everything allowed audits ONCE after the call so the row can carry timing and (opt-in)
     // request/response.
     let reason = verdict.reason;
+    let plan: ConnectorPlanView | undefined;
     if (verdict.decision === "approval_required") {
       // The hash is taken over the arguments as the client sent them: BEFORE applyArgTransforms below injects a secret.
-      const settled = await this.settleApproval(server, toolName, exposedName, args, verdict, caller, () => isKilled(this.cfg));
+      let bound: unknown = args;
+      if (server.connector) {
+        // A connector call is approved for an ACCOUNT and a REQUEST, not just for arguments: another account, host,
+        // path, method, body or file must be another approval. The call is resolved here exactly as the toolkit will
+        // resolve it (the final arguments, the authenticated client), without sending anything, and what it resolves
+        // to is bound beside the arguments. A refusal at this point (the account argument, a pin, an unknown account, a
+        // bad argument) comes before any approval exists, so nothing is put in front of the owner that cannot run.
+        let planArgs: Record<string, unknown>;
+        try {
+          planArgs = applyArgTransforms(args, server.config, override, this.resolveSecret);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          rec({ server: server.id, tool: toolName, scope: verdict.scope, decision: "deny", reason: `arg transform failed: ${msg}`, error_code: SB_ERR.BAD_REQUEST });
+          return this.error(`could not prepare arguments for '${exposedName}': ${msg}`, SB_ERR.BAD_REQUEST);
+        }
+        try {
+          plan = await server.connector.plan(toolName, planArgs, caller.principal?.client ?? undefined);
+        } catch (err) {
+          if (!isConnectorError(err)) {
+            // Anything else that goes wrong while resolving a call is a refusal too: nothing was approved, nothing is sent.
+            const msg = safeText(err instanceof Error ? err.message : String(err), 300);
+            rec({ server: server.id, tool: toolName, scope: verdict.scope, decision: "deny", reason: `could not resolve the call: ${msg}`, error_code: SB_ERR.BAD_REQUEST });
+            return this.error(`could not prepare '${exposedName}': ${msg}`, SB_ERR.BAD_REQUEST);
+          }
+          rec({ server: server.id, tool: toolName, scope: verdict.scope, decision: "deny", reason: safeText(err.message, 300), error_code: err.code });
+          return this.connectorRefusal(err, exposedName);
+        }
+        if (plan) bound = { account: plan.account, request: plan.request, arguments: args, connector: plan.binding };
+      }
+      const settled = await this.settleApproval(server, toolName, exposedName, bound, verdict, caller, () => isKilled(this.cfg));
       if (!settled.go) {
         // The switch can be thrown while we waited for the owner. The approval stays unused for when it is cleared.
         if (settled.killed) return this.refuseIfKilled(exposedName, caller) ?? this.error("kill switch is on", SB_ERR.KILL_SWITCH);
@@ -682,7 +745,11 @@ export class Router {
 
     const start = Date.now();
     try {
-      const raw = (await server.client.callTool({ name: toolName, arguments: finalArgs }, undefined, callOpts)) as CallToolResult;
+      // A connector server is told who is calling (from the authenticated principal, never from an argument) and, when
+      // an approval was consumed for a planned call, the digest of what was approved: it rebuilds the call and refuses
+      // one that hashes to anything else (another account, another request).
+      const callMeta = server.connector ? this.connectorMeta(caller, plan, approvalId) : undefined;
+      const raw = (await server.client.callTool({ name: toolName, arguments: finalArgs, ...(callMeta ? { _meta: callMeta } : {}) }, undefined, callOpts)) as CallToolResult;
       // The server responded — transport is healthy even if the tool returned an error *result*
       // (a logical "not found" is not an outage). Closes the breaker / clears the failure count.
       this.breaker.record(server.id, true, Date.now());
@@ -697,8 +764,9 @@ export class Router {
         duration_ms: Date.now() - start,
         ...(capture ? { request: sanitizeForAudit(finalArgs, injectedKeys), response: sanitizeForAudit(result) } : {}),
         ...(result.isError ? { error: this.resultErrorText(result), error_code: SB_ERR.UPSTREAM_ERROR } : {}),
+        ...this.connectorAudit(server, raw),
       });
-      return result;
+      return this.normalizeConnectorRefusal(server, raw, result);
     } catch (err) {
       // A throw or timeout is a TRANSPORT failure — count it toward opening the breaker so a
       // wedged/dead upstream trips fast after N in a row, rather than every call hanging.
@@ -1128,7 +1196,7 @@ export class Router {
 
   /** The upstream's annotations for a tool, from the tool list the registry cached at mount. */
   private annotationsOf(server: MountedServer, toolName: string): Tool["annotations"] {
-    return server.tools.find((t) => t.name === toolName)?.annotations;
+    return (server.tools.find((t) => t.name === toolName) ?? server.unlisted?.find((t) => t.name === toolName))?.annotations;
   }
 
   /** The scope a tool resolves to (override, hint, name, annotations), for audit attribution. */
@@ -1168,6 +1236,79 @@ export class Router {
   /** Fire-and-forget webhook delivery — never blocks, never throws into the call path. */
   private fireWebhook(event: WebhookEvent): void {
     deliverWebhook(this.cfg, event, this.resolveSecret);
+  }
+
+  /** The request `_meta` for a call into a connector server: the caller's client and, after an approval, what was approved. */
+  private connectorMeta(caller: Caller, plan: ConnectorPlanView | undefined, approvalId: string | undefined): Record<string, unknown> {
+    return {
+      ...(caller.principal?.client ? { [CLIENT_META_KEY]: caller.principal.client } : {}),
+      ...(plan && approvalId ? { [APPROVED_META_KEY]: { digest: plan.digest, approval_id: approvalId } } : {}),
+    };
+  }
+
+  /**
+   * A refusal the connector pipeline makes itself (an account a client may not use, a digest that no longer matches
+   * the approval, the kill switch) reaches the agent in the gateway's own refusal shape, the one the router gives for
+   * the same reason before the call: `{ error, code, hint }`. Every other connector result keeps the toolkit's shape.
+   * The audit row was already written from the connector's own `_meta`.
+   */
+  private normalizeConnectorRefusal(server: MountedServer, raw: CallToolResult, result: CallToolResult): CallToolResult {
+    if (server.config.source !== "connector" || raw.isError !== true) return result;
+    const meta = (raw._meta as Record<string, unknown> | undefined)?.[AUDIT_META_KEY] as Record<string, unknown> | undefined;
+    const code = meta && typeof meta.error_code === "string" ? meta.error_code : undefined;
+    if (code !== SB_ERR.POLICY_DENY && code !== SB_ERR.APPROVAL_DENIED && code !== SB_ERR.KILL_SWITCH) return result;
+    let message = "";
+    try {
+      const body = JSON.parse(this.resultErrorText(raw)) as { error?: { message?: unknown } };
+      if (typeof body.error?.message === "string") message = body.error.message;
+    } catch {
+      /* not the toolkit's shape: leave the result as it is */
+    }
+    if (!message) return result;
+    return this.error(code === SB_ERR.POLICY_DENY ? `denied by policy: ${message}` : message, code);
+  }
+
+  /** A connector refusal before the call as a governed result: a policy denial in the gateway's own form, any other code with its fix. */
+  private connectorRefusal(err: ConnectorError, exposedName: string): CallToolResult {
+    if (err.code === SB_ERR.POLICY_DENY) return this.error(`denied by policy: ${err.message}`, SB_ERR.POLICY_DENY);
+    const text = JSON.stringify({
+      error: `[switchboard] could not prepare '${exposedName}': ${err.message}`,
+      code: err.code,
+      ...(err.detail.hint ? { hint: err.detail.hint } : {}),
+      ...(err.detail.reconnect ? { reconnect: err.detail.reconnect } : {}),
+    });
+    return { isError: true, content: [{ type: "text", text }] };
+  }
+
+  /**
+   * The connector fields of an audit row (ADR local-composio 6.4): toolkit, its version, the account id, the
+   * client, the risk. They come from the connector server's own result `_meta`, and ONLY from a server whose
+   * source is `connector`: any other upstream could otherwise write whatever it liked into the audit log.
+   * Every value is checked against a strict shape; a call the connector refused before sending is a `deny`.
+   */
+  private connectorAudit(server: MountedServer, result: CallToolResult): Partial<AuditInput> {
+    if (server.config.source !== "connector") return {};
+    const m = (result._meta as Record<string, unknown> | undefined)?.[AUDIT_META_KEY];
+    if (!m || typeof m !== "object") return {};
+    const a = m as Record<string, unknown>;
+    const str = (v: unknown, re: RegExp, max: number): string | undefined => (typeof v === "string" && v.length <= max && re.test(v) ? v : undefined);
+    const out: Partial<AuditInput> = {};
+    const toolkit = str(a.toolkit, /^[a-z][a-z0-9-]*$/, 40);
+    const version = str(a.toolkit_version, /^[A-Za-z0-9_.-]+$/, 24);
+    const account = str(a.account, /^ca_[A-Za-z0-9]+$/, 40);
+    const client = str(a.client, /^[A-Za-z0-9][A-Za-z0-9._-]*$/, 48);
+    const runId = str(a.run_id, /^[A-Za-z0-9_-]+$/, 64);
+    const code = str(a.error_code, /^SB_[A-Z_]+$/, 48);
+    if (toolkit) out.toolkit = toolkit;
+    if (version) out.toolkit_version = version;
+    if (account) out.account = account;
+    if (client) out.client = client;
+    if (runId) out.run_id = runId;
+    if (a.risk === "low" || a.risk === "medium" || a.risk === "high") out.risk = a.risk;
+    if (typeof a.outward === "boolean") out.outward = a.outward;
+    if (code && result.isError) out.error_code = code;
+    if (a.decision === "deny" && result.isError) out.decision = "deny";
+    return out;
   }
 
   /** Best-effort extraction of an upstream error-result's text content for the audit row. */

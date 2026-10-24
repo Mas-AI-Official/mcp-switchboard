@@ -34,16 +34,16 @@ import { dotSegmentProblem, pathParamProblem } from "./pathparam.js";
 const HTTP_METHODS = ["get", "put", "post", "delete", "options", "head", "patch", "trace"] as const;
 const MAX_RESPONSE_CHARS = 50_000;
 
-type ParamLocation = "path" | "query" | "header" | "body";
+export type ParamLocation = "path" | "query" | "header" | "body";
 
-interface FlatParam {
+export interface FlatParam {
   location: ParamLocation;
   /** The real name to send upstream. `__body__` means "the entire request body". */
   originalName: string;
   required: boolean;
 }
 
-interface GeneratedOp {
+export interface GeneratedOp {
   toolName: string;
   method: string; // upper-case HTTP method
   pathTemplate: string; // e.g. /pet/{petId}
@@ -60,7 +60,7 @@ export interface OpenApiServer {
 }
 
 /** GET/HEAD/OPTIONS/TRACE → read, DELETE → full, everything else → write. */
-function scopeForMethod(method: string): Scope {
+export function scopeForMethod(method: string): Scope {
   const m = method.toLowerCase();
   if (m === "get" || m === "head" || m === "options" || m === "trace") return "read";
   if (m === "delete") return "full";
@@ -73,7 +73,7 @@ function scopeForMethod(method: string): Scope {
  * and a dangling pointer resolves to `{}` (fail-soft, never throw mid-generation).
  * Supports OpenAPI 3.x (`#/components/...`) and Swagger 2.0 (`#/definitions/...`).
  */
-function makeDeref(root: unknown): (node: unknown) => any {
+export function makeDeref(root: unknown): (node: unknown) => any {
   function resolvePointer(ref: string): unknown {
     if (!ref.startsWith("#/")) return undefined;
     const parts = ref.slice(2).split("/").map((p) => p.replace(/~1/g, "/").replace(/~0/g, "~"));
@@ -116,7 +116,7 @@ function paramSchema(param: any, deref: (n: unknown) => any): any {
 }
 
 /** Sanitize to the MCP tool-name charset `[a-z0-9_-]{1,64}`, truncated for headroom. */
-function sanitizeName(raw: string): string {
+export function sanitizeName(raw: string): string {
   let name = raw.toLowerCase().replace(/[^a-z0-9_-]/g, "_");
   name = name.replace(/_+/g, "_").replace(/^[_-]+/, "");
   if (name.length === 0) name = "op";
@@ -240,17 +240,22 @@ function assertCredentialHost(config: ServerConfig, spec: any, isSwagger2: boole
   }
 }
 
-/** Flatten one operation into a tool definition + an invocation plan. */
-function buildOperation(
+/**
+ * Flatten one operation into a tool definition + an invocation plan. `toolNameOverride` lets a caller that
+ * owns naming (the connector importers, which must keep `<toolkit>__<action>` within 64 characters) supply
+ * the final name; it is used as given and still recorded in `takenToolNames`.
+ */
+export function buildOperation(
   rawPath: string,
   method: string,
   op: any,
   pathLevelParams: any[],
   deref: (n: unknown) => any,
   takenToolNames: Set<string>,
+  toolNameOverride?: string,
 ): { tool: Tool; plan: GeneratedOp } {
   const candidate = op["x-mcp-tool-name"] ?? op.operationId ?? `${method}_${sanitizeName(rawPath)}`;
-  const toolName = uniqueKey(sanitizeName(String(candidate)), takenToolNames);
+  const toolName = toolNameOverride ?? uniqueKey(sanitizeName(String(candidate)), takenToolNames);
   takenToolNames.add(toolName);
 
   const properties: Record<string, any> = {};

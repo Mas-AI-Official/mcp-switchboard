@@ -1,0 +1,38 @@
+{
+  "$schema": "../schemas/provider.schema.json",
+  "slug": "higgsfield",
+  "name": "Higgsfield",
+  "categories": ["image", "video"],
+  "api_hosts": ["api.higgsfield.ai"],
+  "docs_url": "https://docs.higgsfield.ai/docs/authentication",
+  "owner_setup": {
+    "console_url": "https://console.higgsfield.ai",
+    "steps": [
+      "Create an API key in the Higgsfield Console; it has a key ID and a secret",
+      "You enter both yourself: switchboard connect higgsfield --field key_id=${vault:higgsfield_key_id} --field key_secret=${vault:higgsfield_key_secret}  (store each with switchboard vault set first)",
+      "No identity probe is defined, so the account is stored but not verified until a real call succeeds"
+    ],
+    "redirect_uris": [],
+    "notes": [
+      "Observed 2026-10-23 (Higgsfield authentication doc): the credential is Authorization: Key KEY_ID:KEY_SECRET against https://api.higgsfield.ai; the older hf-api-key and hf-secret headers still work but new integrations should use Authorization. Invalid credentials return 401 with a detail body.",
+      "The doc names no read-only account or balance endpoint (its only example is a request-status lookup that needs an existing request id), so this definition has no identity_probe.",
+      "LOCKED DECISION (owner, 2026-09-30, CLAUDE.md HIGGSFIELD-API EXCEPTION): Higgsfield developer API calls go through the local higgsfield-api MCP server, which holds the key in Windows Credential Manager, quotes before it spends and enforces server-side caps. This definition exists for completeness and credential custody only; do not route generation through a Switchboard toolkit."
+    ]
+  },
+  "auth": [
+    {
+      "id": "api_key",
+      "mode": "api_key",
+      "label": "API key ID and secret",
+      "default": true,
+      "inject": { "in": "header", "name": "Authorization", "template": "Key {key_id}:{key_secret}" },
+      "fields": {
+        "auth_config_creation": [],
+        "connected_account_initiation": [
+          { "name": "key_id", "label": "Key ID", "required": true, "secret": true },
+          { "name": "key_secret", "label": "Key secret", "required": true, "secret": true }
+        ]
+      }
+    }
+  ]
+}

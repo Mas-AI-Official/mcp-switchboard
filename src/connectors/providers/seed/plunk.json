@@ -1,0 +1,65 @@
+{
+  "$schema": "../../schemas/provider.schema.json",
+  "slug": "plunk",
+  "name": "Plunk",
+  "categories": [
+    "marketing",
+    "communication"
+  ],
+  "api_hosts": [
+    "next-api.useplunk.com"
+  ],
+  "docs_url": "https://github.com/activepieces/activepieces/tree/6f4be340d7c4bef9fb6ff874ca72224e4933d3d2/packages/pieces/community/plunk/src",
+  "owner_setup": {
+    "console_url": "https://next-api.useplunk.com/",
+    "steps": [
+      "Unverified seed: this definition was derived from another project's published auth settings and has not been tested against the provider. Read the provider's own developer documentation first.",
+      "The 'custom' authentication of this provider takes several credential fields. This build does not drive custom authentication yet, so Connect is unavailable for that one."
+    ],
+    "redirect_uris": [],
+    "notes": [
+      "SEED, unverified. Facts (URLs, scope names, field names, a product name) were read from the Activepieces community piece 'plunk' at commit 6f4be340d7c4 (MIT; see NOTICE). Nothing here was tested against the provider and it never counts as working.",
+      "api_hosts are candidates harvested from request URL settings in the piece source. Review them before relying on them: they decide where a credential may be sent."
+    ]
+  },
+  "auth": [
+    {
+      "id": "custom",
+      "mode": "custom",
+      "label": "Custom credentials",
+      "default": true,
+      "inject": {
+        "in": "header",
+        "name": "Authorization",
+        "template": "Bearer {token}"
+      },
+      "fields": {
+        "auth_config_creation": [],
+        "connected_account_initiation": [
+          {
+            "name": "secret_key",
+            "required": true,
+            "secret": true
+          },
+          {
+            "name": "public_key",
+            "required": false,
+            "secret": false
+          }
+        ]
+      }
+    }
+  ],
+  "provenance": {
+    "derived_from": [
+      "activepieces/activepieces@6f4be340d7c4bef9fb6ff874ca72224e4933d3d2 packages/pieces/community/plunk/src"
+    ],
+    "license": "MIT",
+    "attribution": "Copyright (c) 2020-2024 Activepieces Inc. (MIT Expat). Facts only: URLs, scope names, field names. See NOTICE."
+  },
+  "source": {
+    "activepieces_commit": "6f4be340d7c4bef9fb6ff874ca72224e4933d3d2",
+    "piece": "plunk"
+  },
+  "verification": "unverified_seed"
+}

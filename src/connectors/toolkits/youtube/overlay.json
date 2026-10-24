@@ -1,0 +1,90 @@
+{
+  "toolkit": "youtube",
+  "provider": "google",
+  "source": {
+    "kind": "discovery",
+    "url": "https://www.googleapis.com/discovery/v1/apis/youtube/v3/rest",
+    "note": "YouTube Data API v3 Discovery document. Fetched by `toolkits sync`, never committed."
+  },
+  "description_trim": 300,
+  "rename": {
+    "search_list": "search",
+    "videos_list": "list_videos",
+    "channels_list": "list_channels",
+    "playlists_list": "list_playlists",
+    "playlist_items_list": "list_playlist_items",
+    "comment_threads_list": "list_comment_threads",
+    "videos_update": "update_video",
+    "videos_delete": "delete_video",
+    "playlists_insert": "create_playlist",
+    "playlist_items_insert": "add_to_playlist",
+    "comment_threads_insert": "post_comment",
+    "comments_insert": "reply_to_comment",
+    "videos_rate": "rate_video",
+    "thumbnails_set": "set_thumbnail"
+  },
+  "important": [
+    "channels_list",
+    "videos_list",
+    "search_list",
+    "playlists_list",
+    "playlist_items_list",
+    "playlists_insert",
+    "playlist_items_insert",
+    "comment_threads_list",
+    "comment_threads_insert",
+    "comments_insert",
+    "subscriptions_list",
+    "captions_list",
+    "videos_insert",
+    "videos_update",
+    "videos_delete",
+    "videos_rate",
+    "thumbnails_set"
+  ],
+  "outward": [
+    "videos_insert",
+    "videos_update",
+    "comments_insert",
+    "comment_threads_insert",
+    "playlists_insert",
+    "playlist_items_insert"
+  ],
+  "tags": {
+    "videos_insert": [
+      "upload",
+      "publish",
+      "video"
+    ],
+    "videos_list": [
+      "video",
+      "details",
+      "statistics"
+    ],
+    "search_list": [
+      "find",
+      "query"
+    ],
+    "channels_list": [
+      "channel",
+      "mine",
+      "profile"
+    ],
+    "comment_threads_insert": [
+      "comment",
+      "reply",
+      "post"
+    ],
+    "thumbnails_set": [
+      "thumbnail",
+      "cover"
+    ]
+  },
+  "reconcile": {
+    "videos_insert": "The upload may have completed. List your recent uploads (list_videos with mine, or search with forMine) and look for the title before uploading again.",
+    "comment_threads_insert": "The comment may have been posted. List the video's comment threads and look for your text before posting again.",
+    "comments_insert": "The reply may have been posted. List the comments of the thread and look for your text before replying again.",
+    "playlists_insert": "The playlist may have been created. List your playlists and look for the title before creating it again.",
+    "playlist_items_insert": "The video may have been added. List the playlist's items before adding it again."
+  }
+}

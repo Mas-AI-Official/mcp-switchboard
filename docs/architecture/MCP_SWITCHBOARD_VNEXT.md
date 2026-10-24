@@ -80,6 +80,9 @@ clients:
     servers: ["voice", "youtube"]
     max_scope: read
     max_risk: low
+  assistant-a:
+    servers: ["gmail"]
+    accounts: { google: ca_work }   # connector accounts: the account this client runs as (3.16); "*" lets it choose
 ```
 
 - `Principal = { id, client, via: "apikey" | "oauth" | "stdio" | "loopback-anonymous" }`.
@@ -319,8 +322,8 @@ work budget per lookup. An out-of-bounds template is a non-match, never an error
 Superseded on 2026-10-23 by the owner's decision: the goal is a local equivalent of Composio, not a client of
 it. The method Composio uses per platform (auth definition plus actions that wrap the platform's own API,
 connected accounts, search, MCP exposure) is re-implemented locally as Switchboard toolkits; the architecture
-is recorded in docs/architecture/LOCAL_TOOLKITS.md once its research ADR is ruled. The text below is kept only
-as the record of the rejected option and is not built on main.
+is recorded in docs/architecture/LOCAL_TOOLKITS.md and integrated with principals and approvals in 3.16. The text
+below is kept only as the record of the rejected option and is not built on main.
 
 ```yaml
 - id: social
@@ -524,6 +527,63 @@ What this does NOT do (stated plainly, and recorded as open):
   confused-deputy risk of any presence prompt; the prompt text and the 429 on a second request are the mitigation.
 - `/oauth/consent` stays in the public-route allowlist of `isPublicRoutePath` with no handler behind it (404); it is harmless and
   left to keep two oracles that pin that list unchanged.
+
+### 3.16 Connector integration (local toolkits on the governed gateway, oracle `verify:integration`)
+
+The local connector layer (`src/connectors/`, LOCAL_TOOLKITS.md, CONNECTORS.md) mounts each toolkit as a `source: connector`
+server. This section is the contract between it and sections 3.1 to 3.15. Where the two designs overlapped, this document
+decides anything about authentication, owner sessions, CSRF, approvals, presence, the kill switch and principals; the
+connector layer adds features on top.
+
+- **One access-control source.** The connector layer used to keep its own table of which client may use which toolkit
+  (`connectors/links.json`, `switchboard link`). It is gone. A client's access to a toolkit is its access to the toolkit's
+  server (`servers` globs), its ceilings are `max_scope` and `max_risk`, and the account it runs as is the new optional
+  `accounts: { <provider>: <account> }`. `src/connectors/access.ts` only READS the live `clients:` map (the gateway hands
+  it `() => cfg.clients`, which ClientAdmin keeps current). `switchboard link|unlink|links` plan a change to that section
+  (`connectors/link.ts`) and apply it through the same ClientAdmin as `switchboard client add`: with a gateway running the
+  owner sees the exact grant, accounts included, in the gateway's presence prompt; with none, the audit row says `local:cli`.
+  `link <client> <toolkit-or-server-id>` adds only the server whose id is the target (else the toolkit's servers, else the
+  default id a later `toolkits enable` gives it); a second mount pinned elsewhere is reached by naming its server id.
+- **Which account a call runs as** (`chooseAccount`, one function for the router's preflight and the pipeline):
+  1. a server pin (`servers[].account`) is final: the `account` argument cannot override it, and a client bound to a
+     different account of that provider is refused on that server (the call would run as an identity it was not given);
+  2. a client with `accounts: { <provider>: <account> }` runs as that account, and the argument may name only that account;
+  3. `accounts: { <provider>: "*" }` runs as the provider default unless the argument names an account;
+  4. a client with no entry runs as the provider default and may name no other account;
+  5. the owner's own path (no principal: the playground, a trigger poll) may name any account, except against a pin.
+  A refusal is `SB_POLICY_DENY` naming the client (the gateway's own refusal shape, also when the pipeline makes it); a named
+  account that does not exist is `SB_ACCOUNT_NOT_FOUND`, never a fall back to the default. The binding resolver of the account
+  store reads the same map (`AccountStore.setBindingResolver`).
+- **The identity the connector server sees is the router's.** The router puts the authenticated principal's client in the
+  request `_meta` (`io.mcpswitchboard/client`); nothing in a tool's arguments or in the client's own request can set it. A
+  client id that is present but malformed is refused by the connector server, never read as "no client" (the connectors
+  branch accepted 48 characters while a client id may have 64, which would have turned a long id into the owner's unscoped path).
+- **Risk comes from the action.** Each connector action carries `scope`, `risk`, `outward` and `approval`. The router asks
+  the mounted toolkit (`MountedServer.connector.hints`) and `evaluate()` raises risk by them: the action's risk is a floor
+  that the server's `risk_defaults` cannot go under, `outward: true` makes write and full high exactly like the server flag,
+  and `approval: "always"` (proxy_request) needs a human whatever `gateway.approval.require_for_risk` says. Only the
+  operator's explicit per-tool `risk` can lower a connector action's risk. Client `max_scope` and `max_risk` then apply
+  as for any tool, before any approval exists. Unlisted actions (the long tail reached through `find_tools` and `call_tool`)
+  go through the same gates; `find_tools` and `call_tool` are listed to a client only while a server it may see has some.
+- **An approval binds the account and the request.** For a gated connector call the router resolves the call without
+  sending anything (`Executor.plan`: the final arguments after `inject_args`, the authenticated client, the account, the file
+  hashes, the built request) BEFORE it asks the owner, and binds `{ account, request, arguments, connector }` where
+  `connector` holds the account id, the toolkit version and, for a one-request action, the method, host, path, a hash of the
+  query string and a hash of the body (multipart by its parts, so the random boundary does not matter); a recipe is bound by
+  a hash of its steps. The owner is shown the account and the request first. After the approval is consumed the router passes
+  the digest to the connector server (`io.mcpswitchboard/approved`); the pipeline rebuilds the call and refuses one that
+  hashes to anything else (`SB_APPROVAL_DENIED`), so an approval for account A cannot run as account B, and an approval does
+  not survive a change of the default account, of the toolkit definition or of a file's bytes. The old TTY seam (`approve` in
+  the gateway) is not wired: the router decides every approval, and a pipeline reached without the router's attestation
+  refuses an action that needs a decision.
+- **Admin surfaces.** The Connectors page and its `/api/connectors/*` routes are registered after the owner-session gate, so
+  they need the `X-Switchboard-Session` header (never a cookie, never a client key) and, for every mutation, the CSRF header.
+  The page uses the one fetch wrapper of the SPA. `/media/<id>` (ephemeral single-file media URLs for platforms that fetch
+  media themselves) is the one extra public route; an unknown id is an identical 404.
+
+What this does not change: the same-user boundary of 3.15. A client's account binding is a ceiling for a well-behaved agent
+and a record of intent, not a boundary between two processes of one OS user: a process that can run `switchboard bridge
+--client other` can be `other`, and so can use `other`'s account.
 
 ## 4. Order of work
 

@@ -66,6 +66,16 @@ export class Gateway {
     // The network guard reads the live config object, so a settings change is picked up without a restart.
     this.oauth = new OAuthStore(this.vault, () => cfg.settings?.network);
     this.registry = new Registry(this.vault, this.oauth, () => cfg.settings?.network);
+    // The connector kit (toolkits, files, media, execution): live settings, kill switch and clients from this
+    // config. The router writes the audit row from the connector server's result, so the kit does not write a second
+    // one. There is no approval seam here on purpose: the router decides every approval (out of band, design 3.3),
+    // bound to the resolved account and the final request, and attests it to the connector call (connectors/exec.ts).
+    this.oauth.connectors.kit.configure({
+      settings: () => cfg.settings?.connectors,
+      killed: () => isKilled(cfg),
+      clients: () => cfg.clients,
+      ownAudit: false,
+    });
     this.approvals = opts.approvals ?? new Approvals();
     this.router = new Router(this.registry, cfg, (ref) => this.vault.resolve(ref), this.approvals);
     // Polls run through this.router, so every trigger poll is governed + audited like any call.

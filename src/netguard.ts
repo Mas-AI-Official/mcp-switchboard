@@ -602,6 +602,8 @@ export interface GuardedResponse {
   readonly redirected: boolean;
   text(): Promise<string>;
   json(): Promise<any>;
+  /** The decoded body as bytes (file downloads), already bounded by the response cap. */
+  bytes(): Promise<Uint8Array>;
 }
 
 const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
@@ -758,6 +760,8 @@ async function run(first: URL, init: GuardedInit, eff: Effective, signal: AbortS
         redirected,
         text: async () => "",
         json: async () => ({}),
+        // A streamed head carries no buffered body: the caller reads `raw` itself (the MCP transport). No file download uses it.
+        bytes: async () => new Uint8Array(0),
         raw: bodyless ? { ...resp, body: null } : resp,
       };
       return head;
@@ -780,6 +784,7 @@ async function run(first: URL, init: GuardedInit, eff: Effective, signal: AbortS
       redirected,
       text: async () => new TextDecoder().decode(bytes),
       json: async () => JSON.parse(new TextDecoder().decode(bytes)),
+      bytes: async () => new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength),
     };
   }
 }
