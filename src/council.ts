@@ -28,12 +28,8 @@
  *     debate; the total provider calls per debate are bounded by `rounds * participants + 1`.
  */
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-} from "@modelcontextprotocol/sdk/types.js";
-import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
+import { Server } from "@modelcontextprotocol/server";
+import type { CallToolResult, Tool } from "@modelcontextprotocol/server";
 import type {
   CouncilConfig,
   CouncilProviderConfig,
@@ -41,6 +37,7 @@ import type {
   Scope,
 } from "./types.js";
 import type { Vault } from "./vault.js";
+import { guardedFetch, type NetworkSource } from "./netguard.js";
 
 /** Synthetic server id — also the tool namespace (`council__council_consult`, …). */
 export const COUNCIL_SERVER_ID = "council";
@@ -98,23 +95,29 @@ async function callAnthropic(
   vault: Vault,
   cfg: CouncilProviderConfig,
   args: { prompt: string; system?: string; model?: string; maxTokens: number },
+  network: NetworkSource,
 ): Promise<CallResult> {
   const key = vault.resolve(cfg.api_key_ref); // fail-closed: throws if missing
   const model = args.model?.trim() || cfg.default_model;
-  const res = await fetch(`${baseUrl("anthropic", cfg)}/v1/messages`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": key,
-      "anthropic-version": "2023-06-01",
+  const res = await guardedFetch(
+    `${baseUrl("anthropic", cfg)}/v1/messages`,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": key,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: args.maxTokens,
+        ...(args.system ? { system: args.system } : {}),
+        messages: [{ role: "user", content: args.prompt }],
+      }),
+      credentialHeaders: ["x-api-key"],
     },
-    body: JSON.stringify({
-      model,
-      max_tokens: args.maxTokens,
-      ...(args.system ? { system: args.system } : {}),
-      messages: [{ role: "user", content: args.prompt }],
-    }),
-  });
+    network,
+  );
 
   const bodyText = await res.text();
   if (!res.ok) {
@@ -145,6 +148,7 @@ async function callOpenAI(
   vault: Vault,
   cfg: CouncilProviderConfig,
   args: { prompt: string; system?: string; model?: string; maxTokens: number },
+  network: NetworkSource,
 ): Promise<CallResult> {
   const key = vault.resolve(cfg.api_key_ref); // fail-closed: throws if missing
   const model = args.model?.trim() || cfg.default_model;
@@ -152,14 +156,18 @@ async function callOpenAI(
   if (args.system) messages.push({ role: "system", content: args.system });
   messages.push({ role: "user", content: args.prompt });
 
-  const res = await fetch(`${baseUrl("openai", cfg)}/v1/chat/completions`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${key}`,
+  const res = await guardedFetch(
+    `${baseUrl("openai", cfg)}/v1/chat/completions`,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${key}`,
+      },
+      body: JSON.stringify({ model, messages, max_tokens: args.maxTokens }),
     },
-    body: JSON.stringify({ model, messages, max_tokens: args.maxTokens }),
-  });
+    network,
+  );
 
   const bodyText = await res.text();
   if (!res.ok) {
@@ -189,6 +197,7 @@ async function callLocal(
   vault: Vault,
   cfg: LocalProviderConfig,
   args: { prompt: string; system?: string; model?: string; maxTokens: number },
+  network: NetworkSource,
 ): Promise<CallResult> {
   const model = args.model?.trim() || cfg.default_model;
   const messages: { role: string; content: string }[] = [];
@@ -199,11 +208,13 @@ async function callLocal(
   if (cfg.api_key_ref) headers.authorization = `Bearer ${vault.resolve(cfg.api_key_ref)}`; // fail-closed only when a token is configured
 
   const base = cfg.base_url.replace(/\/$/, "");
-  const res = await fetch(`${base}/chat/completions`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({ model, messages, max_tokens: args.maxTokens }),
-  });
+  // The local provider points at a loopback or LAN address by design, so its host must be listed in
+  // settings.network.allow_private (`switchboard local-llm wire` adds it). It is not exempt from the guard.
+  const res = await guardedFetch(
+    `${base}/chat/completions`,
+    { method: "POST", headers, body: JSON.stringify({ model, messages, max_tokens: args.maxTokens }) },
+    network,
+  );
 
   const bodyText = await res.text();
   if (!res.ok) {
@@ -227,16 +238,17 @@ async function dispatch(
   council: CouncilConfig,
   name: ProviderName,
   args: { prompt: string; system?: string; model?: string; maxTokens: number },
+  network: NetworkSource,
 ): Promise<CallResult> {
   if (name === "local") {
     const cfg = council.providers?.local;
     if (!cfg) throw new Error("council provider 'local' is not configured under settings.council.providers");
-    return callLocal(vault, cfg, args);
+    return callLocal(vault, cfg, args, network);
   }
   const cfg = providerConfig(council, name);
   return name === "anthropic"
-    ? callAnthropic(vault, cfg, args)
-    : callOpenAI(vault, cfg, args);
+    ? callAnthropic(vault, cfg, args, network)
+    : callOpenAI(vault, cfg, args, network);
 }
 
 /** Clamp a requested round count into `[1, max_rounds]` (the loop guard). */
@@ -268,6 +280,7 @@ function usageFooter(calls: CallResult[]): string {
 export function buildCouncilServer(
   council: CouncilConfig,
   vault: Vault,
+  network?: NetworkSource,
 ): { server: Server; scopeHints: Record<string, Scope>; toolCount: number } {
   const available = configuredProviders(council);
   const maxRounds = council.max_rounds ?? 3;
@@ -341,9 +354,9 @@ export function buildCouncilServer(
     { capabilities: { tools: {} } },
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
+  server.setRequestHandler("tools/list", async () => ({ tools }));
 
-  server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToolResult> => {
+  server.setRequestHandler("tools/call", async (request): Promise<CallToolResult> => {
     const name = request.params.name;
     const a = (request.params.arguments ?? {}) as Record<string, unknown>;
 
@@ -358,12 +371,18 @@ export function buildCouncilServer(
         const prompt = typeof a.prompt === "string" ? a.prompt : "";
         if (!prompt.trim()) throw new Error("'prompt' is required and must be a non-empty string");
 
-        const result = await dispatch(vault, council, provider, {
-          prompt,
-          system: typeof a.system === "string" ? a.system : undefined,
-          model: typeof a.model === "string" ? a.model : undefined,
-          maxTokens,
-        });
+        const result = await dispatch(
+          vault,
+          council,
+          provider,
+          {
+            prompt,
+            system: typeof a.system === "string" ? a.system : undefined,
+            model: typeof a.model === "string" ? a.model : undefined,
+            maxTokens,
+          },
+          network,
+        );
         return {
           content: [{ type: "text", text: `[${provider}]\n${result.text}${usageFooter([result])}` }],
         };
@@ -399,7 +418,7 @@ export function buildCouncilServer(
               `Motion: ${topic}\n\nDebate so far:\n${history}\n\n` +
               `Give your ${opening ? "opening position" : "response"} as ${p}.`;
 
-            const result = await dispatch(vault, council, p, { prompt, system, maxTokens });
+            const result = await dispatch(vault, council, p, { prompt, system, maxTokens }, network);
             transcript.push({ provider: p, round, text: result.text });
             calls.push(result);
           }
@@ -415,11 +434,13 @@ export function buildCouncilServer(
           `Motion: ${topic}\n\nFull debate transcript:\n` +
           transcript.map((t) => `[${t.provider}, round ${t.round}]: ${t.text}`).join("\n\n") +
           `\n\nProduce the synthesis.`;
-        const synthesis = await dispatch(vault, council, moderator, {
-          prompt: synthPrompt,
-          system: synthSystem,
-          maxTokens,
-        });
+        const synthesis = await dispatch(
+          vault,
+          council,
+          moderator,
+          { prompt: synthPrompt, system: synthSystem, maxTokens },
+          network,
+        );
         calls.push(synthesis);
 
         const transcriptText = transcript

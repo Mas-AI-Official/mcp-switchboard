@@ -1,0 +1,666 @@
+{
+  "generated_by": "scripts/extract-activepieces-auth.mjs",
+  "extractor_version": 1,
+  "source": {
+    "repository": "https://github.com/activepieces/activepieces",
+    "commit": "6f4be340d7c4bef9fb6ff874ca72224e4933d3d2",
+    "license": "MIT",
+    "license_file": "LICENSE",
+    "copyright": "Copyright (c) 2020-2024 Activepieces Inc.",
+    "community_outside_ee": true
+  },
+  "pieces_scanned": 742,
+  "seeds": 594,
+  "auth_definitions": 628,
+  "auth_definitions_by_mode": {
+    "api_key": 379,
+    "basic": 12,
+    "custom": 144,
+    "oauth2": 90,
+    "oauth2_cc": 3
+  },
+  "providers_by_mode": {
+    "api_key": 379,
+    "basic": 12,
+    "custom": 144,
+    "oauth2": 90,
+    "oauth2_cc": 3
+  },
+  "providers_that_can_start_connect": 475,
+  "api_hosts_basis": {
+    "harvested": 553,
+    "vendor_literal": 41,
+    "token_host_fallback": 0
+  },
+  "auth_found_via": {
+    "createPiece": 594,
+    "scan": 0
+  },
+  "skipped_pieces": {
+    "total": 148,
+    "reasons": {
+      "custom_fields_unresolved": 1,
+      "no_api_host": 101,
+      "no_auth": 19,
+      "oauth2_url_not_static": 27
+    },
+    "pieces": [
+      {
+        "piece": "activecampaign",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "activepieces",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "actualbudget",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "ai",
+        "reason": "no_auth"
+      },
+      {
+        "piece": "amazon-lambda",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "amazon-s3",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "amazon-secrets-manager",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "amazon-ses",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "amazon-sns",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "amazon-sqs",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "amazon-textract",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "aminos",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "ampeco",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "anyhook-graphql",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "anyhook-websocket",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "apache-kafka",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "apitable",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "aws-bedrock",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "azure-ad",
+        "reason": "oauth2_url_not_static"
+      },
+      {
+        "piece": "azure-blob-storage",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "azure-communication-services",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "azure-openai",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "backblaze",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "base44",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "bigin-by-zoho",
+        "reason": "oauth2_url_not_static"
+      },
+      {
+        "piece": "binance",
+        "reason": "no_auth"
+      },
+      {
+        "piece": "blockscout",
+        "reason": "no_auth"
+      },
+      {
+        "piece": "brilliant-directories",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "bubble",
+        "reason": "no_auth"
+      },
+      {
+        "piece": "chargebee",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "chess-com",
+        "reason": "no_auth"
+      },
+      {
+        "piece": "couchbase",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "coupa",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "cyberark",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "datadog",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "discourse",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "dittofeed",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "docusign",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "drupal",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "duckdb",
+        "reason": "no_auth"
+      },
+      {
+        "piece": "elevenlabs",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "eth-name-service",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "flow-helper",
+        "reason": "no_auth"
+      },
+      {
+        "piece": "flowise",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "flowlu",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "formio",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "formsite",
+        "reason": "no_auth"
+      },
+      {
+        "piece": "formspark",
+        "reason": "no_auth"
+      },
+      {
+        "piece": "freshdesk",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "gitea",
+        "reason": "oauth2_url_not_static"
+      },
+      {
+        "piece": "goodmem",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "gorgias",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "gotify",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "gravityforms",
+        "reason": "no_auth"
+      },
+      {
+        "piece": "grist",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "hackernews",
+        "reason": "no_auth"
+      },
+      {
+        "piece": "hashi-corp-vault",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "http-oauth2",
+        "reason": "oauth2_url_not_static"
+      },
+      {
+        "piece": "hume-ai",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "ibm-cognose",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "imap",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "imeetify",
+        "reason": "no_auth"
+      },
+      {
+        "piece": "instabase",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "invoiceninja",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "jira-cloud",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "jira-data-center",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "json",
+        "reason": "no_auth"
+      },
+      {
+        "piece": "kimai",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "kissflow",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "letta",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "localai",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "mailchain",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "matomo",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "matrix",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "mattermost",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "mautic",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "mcp",
+        "reason": "no_auth"
+      },
+      {
+        "piece": "mcp-client",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "mempool-space",
+        "reason": "no_auth"
+      },
+      {
+        "piece": "metabase",
+        "reason": "custom_fields_unresolved"
+      },
+      {
+        "piece": "microsoft-365-people",
+        "reason": "oauth2_url_not_static"
+      },
+      {
+        "piece": "microsoft-365-planner",
+        "reason": "oauth2_url_not_static"
+      },
+      {
+        "piece": "microsoft-copilot",
+        "reason": "oauth2_url_not_static"
+      },
+      {
+        "piece": "microsoft-dynamics-365-business-central",
+        "reason": "oauth2_url_not_static"
+      },
+      {
+        "piece": "microsoft-dynamics-crm",
+        "reason": "oauth2_url_not_static"
+      },
+      {
+        "piece": "microsoft-excel-365",
+        "reason": "oauth2_url_not_static"
+      },
+      {
+        "piece": "microsoft-onedrive",
+        "reason": "oauth2_url_not_static"
+      },
+      {
+        "piece": "microsoft-onenote",
+        "reason": "oauth2_url_not_static"
+      },
+      {
+        "piece": "microsoft-outlook",
+        "reason": "oauth2_url_not_static"
+      },
+      {
+        "piece": "microsoft-outlook-calendar",
+        "reason": "oauth2_url_not_static"
+      },
+      {
+        "piece": "microsoft-power-bi",
+        "reason": "oauth2_url_not_static"
+      },
+      {
+        "piece": "microsoft-sharepoint",
+        "reason": "oauth2_url_not_static"
+      },
+      {
+        "piece": "microsoft-sql-server",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "microsoft-teams",
+        "reason": "oauth2_url_not_static"
+      },
+      {
+        "piece": "microsoft-todo",
+        "reason": "oauth2_url_not_static"
+      },
+      {
+        "piece": "mongodb",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "mysql",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "netsuite",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "ninjapipe",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "ntfy",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "odoo",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "okta",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "oracle-fusion-cloud-erp",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "outseta",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "pocketbase",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "poper",
+        "reason": "no_auth"
+      },
+      {
+        "piece": "postgres",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "qdrant",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "queue",
+        "reason": "no_auth"
+      },
+      {
+        "piece": "rabbitmq",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "ringcentral",
+        "reason": "oauth2_url_not_static"
+      },
+      {
+        "piece": "rss",
+        "reason": "no_auth"
+      },
+      {
+        "piece": "runware",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "runway",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "saleor",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "salesforce",
+        "reason": "oauth2_url_not_static"
+      },
+      {
+        "piece": "sap-ariba",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "scrapegrapghai",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "segment",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "sendy",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "service-now",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "simplepdf",
+        "reason": "no_auth"
+      },
+      {
+        "piece": "snowflake",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "soap",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "stable-diffusion-webui",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "supabase",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "surrealdb",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "tableau",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "totalcms",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "twenty",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "twitter",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "upgradechat",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "vtex",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "vtiger",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "wayfront",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "webling",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "woocommerce",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "wordpress",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "workday",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "youtrack",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "zendesk",
+        "reason": "no_api_host"
+      },
+      {
+        "piece": "zoho-bookings",
+        "reason": "oauth2_url_not_static"
+      },
+      {
+        "piece": "zoho-books",
+        "reason": "oauth2_url_not_static"
+      },
+      {
+        "piece": "zoho-campaigns",
+        "reason": "oauth2_url_not_static"
+      },
+      {
+        "piece": "zoho-crm",
+        "reason": "oauth2_url_not_static"
+      },
+      {
+        "piece": "zoho-desk",
+        "reason": "oauth2_url_not_static"
+      },
+      {
+        "piece": "zoho-invoice",
+        "reason": "oauth2_url_not_static"
+      },
+      {
+        "piece": "zoho-mail",
+        "reason": "oauth2_url_not_static"
+      }
+    ]
+  },
+  "skipped_auth_definitions": {
+    "total": 59,
+    "reasons": {
+      "custom:custom_fields_unresolved": 1,
+      "none:no_auth": 19,
+      "oauth2:oauth2_url_not_static": 33,
+      "oidc:oidc_not_representable": 6
+    }
+  },
+  "slugs_changed": [
+    {
+      "piece": "0codekit",
+      "slug": "p-0codekit"
+    },
+    {
+      "piece": "microsoft-dynamics-365-business-central",
+      "slug": "microsoft-dynamics-365-business"
+    }
+  ],
+  "data_quality": {
+    "pieces_with_unresolved_props": 1,
+    "scopes_dropped_as_unsafe": 17,
+    "pieces_with_non_mit_package_license": []
+  }
+}

@@ -21,24 +21,129 @@ function attr(s) {
   return String(s ?? "").replace(/"/g, "&quot;");
 }
 
-async function api(path, opts) {
-  const res = await fetch(path, {
-    headers: { "content-type": "application/json" },
-    ...opts,
-  });
+// ----------------------------------------------------------------------------
+// Owner session (design 3.15). The admin API needs the session id in the X-Switchboard-Session header and, on every
+// mutating call, the CSRF value. Both come back once from the login exchange and are kept in THIS TAB's sessionStorage:
+// storage is scoped to the origin, port included, and the browser never sends it by itself, so no other local port
+// can receive it (a cookie is sent to every port of the same host, which is how an unrelated listener on another
+// port used to end up holding a working owner session). `switchboard dashboard login` opens this page at
+// /#login=<code>; the code is single use.
+// ----------------------------------------------------------------------------
+const SESSION_STORE = { sid: "switchboard.session", csrf: "switchboard.csrf" };
+function storeGet(key) {
+  try {
+    return window.sessionStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+function storeSet(key, value) {
+  try {
+    if (value === null) window.sessionStorage.removeItem(key);
+    else window.sessionStorage.setItem(key, value);
+  } catch {
+    /* storage blocked: the session then lives in memory for this page load only */
+  }
+}
+let sessionId = storeGet(SESSION_STORE.sid);
+let csrfToken = storeGet(SESSION_STORE.csrf);
+function setSession(sid, csrf) {
+  sessionId = sid;
+  csrfToken = csrf;
+  storeSet(SESSION_STORE.sid, sid);
+  storeSet(SESSION_STORE.csrf, csrf);
+}
+function clearSession() {
+  setSession(null, null);
+}
+
+function showSignInBanner(detail) {
+  let el = $("#auth-banner");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "auth-banner";
+    el.className = "auth-banner";
+    el.setAttribute("role", "alert");
+    document.body.prepend(el);
+  }
+  el.innerHTML =
+    `<strong>Owner sign-in required.</strong> ${detail ? esc(detail) + " " : ""}` +
+    `Run <code>switchboard dashboard login</code> in a terminal on this machine; it checks you are present, then opens this dashboard already signed in.`;
+}
+
+function hideSignInBanner() {
+  const el = $("#auth-banner");
+  if (el) el.remove();
+}
+
+// The ONE place the SPA talks to the server. Sends the session header and no cookie; adds the CSRF header on anything
+// that is not a read; a 401 drops a session the server no longer knows and shows the sign-in banner. `quiet` skips the
+// banner (the sign-in probe handles its own 401).
+async function api(path, opts = {}) {
+  const { quiet, ...init } = opts;
+  const method = String(init.method || "GET").toUpperCase();
+  const headers = { "content-type": "application/json", ...(init.headers || {}) };
+  if (sessionId) headers["X-Switchboard-Session"] = sessionId;
+  if (method !== "GET" && method !== "HEAD" && csrfToken) headers["X-Switchboard-CSRF"] = csrfToken;
+  const res = await fetch(path, { ...init, method, headers, credentials: "omit" });
   let body = null;
   const text = await res.text();
   if (text) {
     try { body = JSON.parse(text); } catch { body = { raw: text }; }
   }
   if (!res.ok) {
+    if (res.status === 401 && sessionId && !(method === "POST" && path === "/api/session")) clearSession();
+    if (res.status === 401 && !quiet) showSignInBanner();
     const msg = (body && body.error) || `${res.status} ${res.statusText}`;
     const err = new Error(msg);
     err.status = res.status;
+    err.code = body && body.code;
     throw err;
   }
   return body;
 }
+
+// Redeem a #login=<code> fragment (then drop it from the address bar at once, so the code never lingers in history),
+// or check that the session kept in this tab is still valid. Never throws.
+async function establishSession() {
+  const m = /^#login=([A-Za-z0-9_-]{16,200})$/.exec(location.hash);
+  if (m) {
+    history.replaceState(null, "", location.pathname + location.search);
+    try {
+      const r = await api("/api/session", { method: "POST", body: JSON.stringify({ code: m[1] }), quiet: true });
+      setSession(r.session, r.csrf);
+      hideSignInBanner();
+    } catch {
+      clearSession();
+      showSignInBanner("That login code is invalid, expired or already used.");
+    }
+    return;
+  }
+  if (!sessionId) {
+    showSignInBanner();
+    return;
+  }
+  try {
+    await api("/api/session", { quiet: true });
+    hideSignInBanner();
+  } catch {
+    clearSession();
+    showSignInBanner();
+  }
+}
+
+// <img> error events do not bubble, so one capture-phase listener replaces the inline onerror
+// attributes (the page CSP allows no inline event handlers).
+document.addEventListener(
+  "error",
+  (ev) => {
+    const el = ev.target;
+    if (!(el instanceof HTMLImageElement)) return;
+    if (el.dataset.fallback !== undefined) el.replaceWith(document.createTextNode(el.dataset.fallback));
+    else if (el.hasAttribute("data-hide-on-error")) el.style.display = "none";
+  },
+  true
+);
 
 let toastTimer;
 function toast(message, kind) {
@@ -305,7 +410,7 @@ async function fetchCatalogPage(replace) {
 function toolkitCardHtml(tk) {
   const initial = (tk.name || "?").trim().charAt(0).toUpperCase();
   const logo = tk.logo
-    ? `<img src="${attr(tk.logo)}" alt="" loading="lazy" onerror="this.replaceWith(document.createTextNode('${esc(initial)}'))" />`
+    ? `<img src="${attr(tk.logo)}" alt="" loading="lazy" data-fallback="${attr(initial)}" />`
     : esc(initial);
   const originLabel = tk.origin === "mcp-registry" ? "MCP server" : "OpenAPI";
   const tags = (tk.tags || [])
@@ -426,19 +531,28 @@ async function openToolkitDetail(slug) {
   if (addBtn) addBtn.addEventListener("click", () => addToolkit(slug, addBtn, m.close));
 }
 
-async function addToolkit(slug, btn, onDone) {
+async function addToolkit(slug, btn, onDone, version) {
   const original = btn ? btn.innerHTML : "";
   if (btn) { btn.disabled = true; btn.innerHTML = `<span class="spinner"></span>`; }
+  let needVersion = false;
   try {
-    const res = await api(`/api/toolkits/${encodeURIComponent(slug)}/add`, { method: "POST" });
+    const opts = { method: "POST" };
+    if (version) opts.body = JSON.stringify({ version });
+    const res = await api(`/api/toolkits/${encodeURIComponent(slug)}/add`, opts);
     toast(`Added as server “${res.id}” (disabled). Configure it under Servers, then toggle it on.`, "ok");
     if (onDone) onDone();
     refreshSidebar();
     if ($("#tk-grid")) reloadCatalog(); // flip the card to its Mounted state
   } catch (e) {
-    toast(e.message, "error");
+    // An npm toolkit is added pinned to one exact version; the server says when it has none to offer.
+    if (e.code === "SB_PACKAGE_UNPINNED" && !version) needVersion = true;
+    else toast(e.message, "error");
   } finally {
     if (btn) { btn.disabled = false; btn.innerHTML = original; }
+  }
+  if (needVersion) {
+    const v = window.prompt("This toolkit runs an npm package, and a new mount needs one exact version. Enter it (for example 1.2.3):", "");
+    if (v && v.trim()) return addToolkit(slug, btn, onDone, v.trim());
   }
 }
 
@@ -500,6 +614,497 @@ async function renderAccounts() {
       }
     })
   );
+}
+
+// ============================================================================
+// VIEW: Connectors (providers, connect, accounts, toolkit on/off, coverage)
+//
+// Providers come from two places: CURATED definitions (written and checked by hand) and SEEDS (candidate
+// definitions derived from another project's published auth settings). A seed enables Connect and nothing
+// more: it is never probed, never verified and never counted as working. Every number on this page that
+// says "live" is rows proven by an owner-run probe; nothing else is called working.
+// ============================================================================
+const connState = {
+  q: "",
+  source: "",
+  auth: "",
+  connectable: false,
+  offset: 0,
+  limit: 60,
+  total: 0,
+  items: [],
+  facets: null,
+  loading: false,
+  seq: 0,
+};
+
+const CONN_MODE_LABEL = {
+  oauth2: "OAuth 2",
+  oauth2_cc: "OAuth client credentials",
+  oauth1: "OAuth 1",
+  api_key: "API key",
+  bearer: "Token",
+  basic: "Username and password",
+  custom: "Custom fields",
+};
+
+function safeHttps(url) {
+  return typeof url === "string" && /^https:\/\/[^\s"'<>]+$/.test(url) ? url : "";
+}
+
+function connModeLabel(m) {
+  return CONN_MODE_LABEL[m] || m;
+}
+
+function connCoverageBadge(cov) {
+  if (!cov) return "";
+  if (cov.state === "unverified_seed") {
+    return `<span class="badge badge-warn" title="Derived from another project's published auth settings. It enables Connect and never counts as working."><span class="dot"></span>Unverified seed</span>`;
+  }
+  if (cov.working_rows > 0) {
+    const when = cov.last_verified_at ? ` Last live probe ${fmtDateTime(cov.last_verified_at)}.` : "";
+    return `<span class="badge badge-ok" title="Rows proven live by an owner-run probe.${attr(when)}"><span class="dot"></span>${cov.working_rows} of ${cov.addressable_rows} rows live</span>`;
+  }
+  return `<span class="badge badge-off" title="No row has been proven live by an owner-run probe yet."><span class="dot"></span>Not verified live</span>`;
+}
+
+function connStatusBadge(status) {
+  const map = { ACTIVE: "badge-ok", INITIATED: "badge-warn", INITIALIZING: "badge-warn", EXPIRED: "badge-danger", FAILED: "badge-danger", REVOKED: "badge-danger", INACTIVE: "badge-off" };
+  return `<span class="badge ${map[status] || "badge-off"}"><span class="dot"></span>${esc(status)}</span>`;
+}
+
+function connToolkitState(t) {
+  if (t.state === "on") return `<span class="badge badge-ok"><span class="dot"></span>On</span>`;
+  if (t.state === "off") return `<span class="badge badge-off"><span class="dot"></span>Off</span>`;
+  return `<span class="badge badge-off"><span class="dot"></span>Not enabled</span>`;
+}
+
+function connToolkitButton(t) {
+  if (t.state === "on") return `<button class="btn btn-sm" data-tk-disable="${attr(t.slug)}">Disable</button>`;
+  const why = !t.defined ? `Not defined here yet: run switchboard toolkits sync ${t.slug}` : !t.ready ? "Needs an ACTIVE account that passed its identity probe" : "";
+  return `<button class="btn btn-sm btn-primary" data-tk-enable="${attr(t.slug)}" ${why ? `title="${attr(why)}"` : ""}>Enable</button>`;
+}
+
+async function renderConnectors() {
+  connState.offset = 0;
+  connState.items = [];
+  view().innerHTML =
+    pageHead(
+      "Connectors",
+      "Local connectors: sign in to a provider once and share the connection with every agent, without a subscription to a hosted tool router. Curated providers are checked by hand; seeds are unverified candidates that only enable Connect."
+    ) +
+    `
+    <div class="stat-grid" id="conn-stats"><div class="dim">loading...</div></div>
+    <div class="catalog-toolbar">
+      <div class="search-wrap">
+        <span class="search-ico">&#8981;</span>
+        <input id="conn-search" class="search-input" type="search" autocomplete="off"
+          placeholder="Search providers, categories or toolkits" value="${attr(connState.q)}" />
+      </div>
+      <select id="conn-source" class="select" style="width:auto" title="Curated or seed">
+        <option value="">All sources</option>
+        <option value="curated">Curated</option>
+        <option value="seed">Seeds (unverified)</option>
+      </select>
+      <select id="conn-auth" class="select" style="width:auto" title="Authentication mode">
+        <option value="">All auth modes</option>
+        ${Object.keys(CONN_MODE_LABEL).map((m) => `<option value="${attr(m)}">${esc(connModeLabel(m))}</option>`).join("")}
+      </select>
+      <label class="check-inline"><input id="conn-connectable" type="checkbox" /> Connect available</label>
+    </div>
+    <div class="result-meta" id="conn-meta"></div>
+    <div class="grid" id="conn-grid"></div>
+    <div class="load-more" id="conn-more"></div>
+    <h2 class="section-title">Toolkits</h2>
+    <p class="dim section-sub">A toolkit is the set of actions a provider offers. Turning one on mounts it as a server now; it needs an active account that passed its identity probe. Seeds have no toolkits.</p>
+    <div id="conn-toolkits"><div class="dim">loading...</div></div>
+    <h2 class="section-title">Connected accounts</h2>
+    <p class="dim section-sub">Tokens stay in your local vault and are never shown here.</p>
+    <div id="conn-accounts"><div class="dim">loading...</div></div>`;
+
+  $("#conn-source").value = connState.source;
+  $("#conn-auth").value = connState.auth;
+  $("#conn-connectable").checked = connState.connectable;
+  $("#conn-search").addEventListener(
+    "input",
+    debounce((e) => {
+      connState.q = e.target.value.trim();
+      connReload();
+    }, 220)
+  );
+  $("#conn-source").addEventListener("change", (e) => {
+    connState.source = e.target.value;
+    connReload();
+  });
+  $("#conn-auth").addEventListener("change", (e) => {
+    connState.auth = e.target.value;
+    connReload();
+  });
+  $("#conn-connectable").addEventListener("change", (e) => {
+    connState.connectable = e.target.checked;
+    connReload();
+  });
+
+  connLoadCoverage();
+  connReload();
+  connLoadToolkits();
+  connLoadAccounts();
+}
+
+async function connLoadCoverage() {
+  const el = $("#conn-stats");
+  if (!el) return;
+  try {
+    const c = await api("/api/connectors/coverage");
+    const f = connState.facets;
+    el.innerHTML =
+      `<div class="stat stat-accent"><div class="stat-val">${f ? f.source.curated : "-"}</div><div class="stat-label">curated providers</div></div>` +
+      `<div class="stat stat-warn"><div class="stat-val">${f ? f.source.seed : "-"}</div><div class="stat-label">unverified seeds</div></div>` +
+      (c.imported
+        ? `<div class="stat stat-ok"><div class="stat-val">${esc(String(c.working))} of ${esc(String(c.addressable))}</div><div class="stat-label">checklist rows proven live</div></div>`
+        : `<div class="stat"><div class="stat-val">0</div><div class="stat-label">rows proven live (no checklist imported)</div></div>`);
+    el.title = c.note || "";
+  } catch (e) {
+    el.innerHTML = errorBanner(e);
+  }
+}
+
+async function connReload() {
+  connState.offset = 0;
+  connState.items = [];
+  await connFetchPage(true);
+}
+
+async function connFetchPage(replace) {
+  const grid = $("#conn-grid");
+  if (!grid) return;
+  const mySeq = ++connState.seq;
+  connState.loading = true;
+  const params = new URLSearchParams();
+  if (connState.q) params.set("q", connState.q);
+  if (connState.source) params.set("source", connState.source);
+  if (connState.auth) params.set("auth", connState.auth);
+  if (connState.connectable) params.set("connectable", "1");
+  params.set("offset", String(connState.offset));
+  params.set("limit", String(connState.limit));
+  try {
+    const res = await api(`/api/connectors/providers?${params.toString()}`);
+    if (mySeq !== connState.seq || !$("#conn-grid")) return; // a newer search superseded this one
+    connState.total = res.total;
+    connState.facets = res.facets;
+    connState.items = replace ? res.providers : connState.items.concat(res.providers);
+    connState.offset = connState.items.length;
+    connRenderGrid(res);
+    connLoadCoverage();
+  } catch (e) {
+    if (mySeq === connState.seq && $("#conn-grid")) $("#conn-grid").innerHTML = errorBanner(e);
+  } finally {
+    if (mySeq === connState.seq) connState.loading = false;
+  }
+}
+
+function connCardHtml(p) {
+  const seed = p.source === "seed";
+  const initial = (p.name || "?").trim().charAt(0).toUpperCase();
+  const modes = p.auth.map((a) => `<span class="tag" title="${attr(a.connectable ? "Connect is available" : "This build does not drive this mode yet")}">${esc(connModeLabel(a.mode))}${a.connectable ? "" : " (not driven)"}</span>`).join("");
+  const toolkits = p.toolkits.length
+    ? p.toolkits.map((t) => `<span class="tag conn-tk-${attr(t.state)}" title="${attr(t.state === "on" ? "enabled" : t.state === "off" ? "disabled" : "not enabled")}">${esc(t.slug)}</span>`).join("")
+    : `<span class="dim conn-none">${seed ? "no toolkits (seed)" : "no toolkits defined yet"}</span>`;
+  const connectLabel = p.connected ? "Add account" : "Connect";
+  const connectBtn =
+    p.connect === "unavailable"
+      ? `<button class="btn btn-sm" disabled title="This build does not drive this provider's authentication yet">Connect unavailable</button>`
+      : `<button class="btn btn-sm ${p.connected ? "" : "btn-primary"}" data-conn-connect="${attr(p.slug)}">${connectLabel}</button>`;
+  const accounts = p.accounts ? `<span class="badge badge-ok"><span class="dot"></span>${p.accounts} account${p.accounts === 1 ? "" : "s"}</span>` : `<span class="badge badge-off"><span class="dot"></span>No account</span>`;
+  return `
+    <div class="tk-card conn-card${seed ? " conn-seed" : ""}" data-conn-slug="${attr(p.slug)}">
+      <div class="tk-card-head">
+        <div class="tk-logo">${esc(initial)}</div>
+        <div style="min-width:0">
+          <div class="tk-name">${esc(p.name)}</div>
+          <div class="tk-origin">${seed ? "Seed" : "Curated"} &middot; ${esc((p.categories || []).slice(0, 2).join(", "))}</div>
+        </div>
+      </div>
+      <div class="tk-tags">${modes}</div>
+      <div class="tk-tags conn-toolkits"><span class="dim">toolkits</span> ${toolkits}</div>
+      <div class="tk-tags">${connCoverageBadge(p.coverage)} ${accounts}</div>
+      ${p.needs_app ? `<div class="tk-origin">Needs an OAuth app you register first; Connect shows the steps.</div>` : ""}
+      <div class="tk-foot">
+        <button class="btn btn-sm btn-ghost" data-conn-detail="${attr(p.slug)}">Details</button>
+        ${connectBtn}
+      </div>
+    </div>`;
+}
+
+function connRenderGrid(res) {
+  const grid = $("#conn-grid");
+  const more = $("#conn-more");
+  const meta = $("#conn-meta");
+  if (!grid) return;
+  const f = res.facets;
+  meta.textContent = `${connState.total.toLocaleString()} provider${connState.total === 1 ? "" : "s"} match (${f.source.curated} curated, ${f.source.seed} seed in this search; ${f.connectable} can start Connect)` + (res.shadowed_seeds ? `; ${res.shadowed_seeds} seed${res.shadowed_seeds === 1 ? " is" : "s are"} hidden because a curated definition wins` : "");
+  if (!connState.items.length) {
+    grid.innerHTML = `<div class="empty"><div class="empty-title">No provider matches</div><div class="empty-sub">Try a shorter search or clear the filters.</div></div>`;
+    more.innerHTML = "";
+    return;
+  }
+  grid.innerHTML = connState.items.map(connCardHtml).join("");
+  $$("[data-conn-connect]", grid).forEach((b) => b.addEventListener("click", () => connectProvider(b.dataset.connConnect, {}, b)));
+  $$("[data-conn-detail]", grid).forEach((b) => b.addEventListener("click", () => openProviderDetail(b.dataset.connDetail)));
+  if (connState.items.length < connState.total) {
+    more.innerHTML = `<button class="btn" id="conn-more-btn">Show more (${(connState.total - connState.items.length).toLocaleString()} left)</button>`;
+    $("#conn-more-btn").addEventListener("click", async (e) => {
+      e.target.disabled = true;
+      await connFetchPage(false);
+    });
+  } else more.innerHTML = "";
+}
+
+async function connLoadToolkits() {
+  const el = $("#conn-toolkits");
+  if (!el) return;
+  try {
+    const { toolkits } = await api("/api/connectors/toolkits");
+    if (!toolkits.length) {
+      el.innerHTML = `<div class="empty"><div class="empty-title">No toolkits defined</div><div class="empty-sub">Run <code>switchboard toolkits sync all</code> to fetch the providers' public specs.</div></div>`;
+      return;
+    }
+    el.innerHTML = `<table class="table"><thead><tr><th>Toolkit</th><th>Provider</th><th>Version</th><th>Tools</th><th>State</th><th>Coverage</th><th></th></tr></thead><tbody>${toolkits
+      .map(
+        (t) => `<tr>
+          <td><code>${esc(t.slug)}</code></td>
+          <td>${esc(t.provider)}</td>
+          <td>${t.defined ? esc(t.version || "") : `<span class="dim">not synced</span>`}</td>
+          <td>${t.tools}${t.listed ? ` <span class="dim">(${t.listed} listed)</span>` : ""}</td>
+          <td>${connToolkitState(t)}</td>
+          <td>${connCoverageBadge(t.coverage)}</td>
+          <td class="nowrap">${connToolkitButton(t)}</td>
+        </tr>`
+      )
+      .join("")}</tbody></table>`;
+    connBindToolkitButtons(el);
+  } catch (e) {
+    el.innerHTML = errorBanner(e);
+  }
+}
+
+function connBindToolkitButtons(root) {
+  $$("[data-tk-enable]", root).forEach((b) => b.addEventListener("click", () => connToggleToolkit(b.dataset.tkEnable, "enable", b)));
+  $$("[data-tk-disable]", root).forEach((b) => b.addEventListener("click", () => connToggleToolkit(b.dataset.tkDisable, "disable", b)));
+}
+
+async function connToggleToolkit(slug, action, btn) {
+  const original = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = `<span class="spinner"></span>`;
+  try {
+    await api(`/api/connectors/toolkits/${encodeURIComponent(slug)}/${action}`, { method: "POST", body: JSON.stringify({}) });
+    toast(`Toolkit ${slug} is ${action === "enable" ? "on" : "off"}.`, "ok");
+    refreshSidebar();
+    await Promise.all([connLoadToolkits(), connReload()]);
+    const open = $(".modal-body [data-conn-modal-slug]");
+    if (open) openProviderDetail(open.dataset.connModalSlug);
+  } catch (e) {
+    toast(e.message, "error");
+    btn.disabled = false;
+    btn.innerHTML = original;
+  }
+}
+
+function connAccountsTable(accounts, opts) {
+  if (!accounts.length) return `<div class="empty"><div class="empty-title">No account connected</div></div>`;
+  const showProvider = !opts || !opts.hideProvider;
+  return `<table class="table"><thead><tr>${showProvider ? "<th>Provider</th>" : ""}<th>Account</th><th>Status</th><th>Expires</th><th>Last probe</th><th></th></tr></thead><tbody>${accounts
+    .map((a) => {
+      const probe = a.probe_available
+        ? a.last_probe_at
+          ? `${relTime(a.last_probe_at)}${a.last_error ? ` <span class="badge badge-danger" title="${attr(a.last_error)}"><span class="dot"></span>failed</span>` : ""}`
+          : `<span class="dim">never</span>`
+        : `<span class="dim" title="This provider defines no identity probe">no probe available</span>`;
+      const ident = a.identity && (a.identity.display_name || (a.identity.external_id !== "unknown" ? a.identity.external_id : ""));
+      return `<tr>
+        ${showProvider ? `<td>${esc(a.provider_name)}${a.source_kind === "seed" ? ` <span class="badge badge-warn"><span class="dot"></span>unverified seed</span>` : ""}</td>` : ""}
+        <td><code>${esc(a.label)}</code> <span class="dim mono">${esc(a.id)}</span>${ident ? `<div class="dim">${esc(ident)}</div>` : ""}</td>
+        <td>${connStatusBadge(a.status)}${a.status_reason ? `<div class="dim">${esc(a.status_reason)}</div>` : ""}</td>
+        <td>${a.expires_at ? fmtDateTime(a.expires_at) : `<span class="dim">no expiry</span>`}</td>
+        <td>${probe}</td>
+        <td class="nowrap"><button class="btn btn-sm" data-conn-probe="${attr(a.id)}" ${a.probe_available ? "" : "disabled"}>Probe</button></td>
+      </tr>`;
+    })
+    .join("")}</tbody></table>`;
+}
+
+function connBindProbeButtons(root, after) {
+  $$("[data-conn-probe]", root).forEach((b) =>
+    b.addEventListener("click", async () => {
+      const original = b.innerHTML;
+      b.disabled = true;
+      b.innerHTML = `<span class="spinner"></span>`;
+      try {
+        const r = await api(`/api/connectors/accounts/${encodeURIComponent(b.dataset.connProbe)}/probe`, { method: "POST", body: JSON.stringify({}) });
+        toast(r.ok ? "Probe passed." : `Probe failed: ${r.error || "unknown error"}`, r.ok ? "ok" : "error");
+      } catch (e) {
+        toast(e.message, "error");
+      } finally {
+        b.disabled = false;
+        b.innerHTML = original;
+        if (after) after();
+      }
+    })
+  );
+}
+
+async function connLoadAccounts() {
+  const el = $("#conn-accounts");
+  if (!el) return;
+  try {
+    const { accounts } = await api("/api/connectors/accounts");
+    el.innerHTML = connAccountsTable(accounts, {});
+    connBindProbeButtons(el, connLoadAccounts);
+  } catch (e) {
+    el.innerHTML = errorBanner(e);
+  }
+}
+
+function connSetupHtml(setup, name) {
+  const link = safeHttps(setup.console_url);
+  return `
+    <p class="dim">${esc(name)} needs an OAuth app that you create and own. Follow these steps, then press Connect again.</p>
+    ${link ? `<p><a href="${attr(link)}" target="_blank" rel="noopener noreferrer">Open the provider's developer console</a></p>` : ""}
+    <ol class="steps">${setup.steps.map((s) => `<li>${esc(s)}</li>`).join("")}</ol>
+    ${setup.redirect_uris.length ? `<h4 class="mini-title">Redirect URIs to register</h4><div class="cmd">${setup.redirect_uris.map((u) => `<div>${esc(u)}</div>`).join("")}</div>` : ""}
+    ${setup.commands.length ? `<h4 class="mini-title">Commands</h4><div class="cmd">${setup.commands.map((c) => `<div>${esc(c)}</div>`).join("")}</div>` : ""}
+    ${setup.notes.length ? `<h4 class="mini-title">Notes</h4><ul class="notes">${setup.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}`;
+}
+
+async function connectProvider(slug, body, btn) {
+  const original = btn ? btn.innerHTML : "";
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = `<span class="spinner"></span>`;
+  }
+  try {
+    const out = await api(`/api/connectors/providers/${encodeURIComponent(slug)}/connect`, { method: "POST", body: JSON.stringify(body || {}) });
+    if (out.status === "redirect") {
+      const url = safeHttps(out.authorize_url) || (/^http:\/\/(127\.0\.0\.1|localhost)[:/]/.test(out.authorize_url) ? out.authorize_url : "");
+      if (!url) throw new Error("the provider returned a consent URL that is not https");
+      window.open(url, "_blank", "noopener");
+      toast("Opened the provider's consent screen in a new tab. Come back here when you are done.", "ok");
+      const refresh = () => {
+        window.removeEventListener("focus", refresh);
+        setTimeout(() => {
+          if ($("#conn-grid")) {
+            connReload();
+            connLoadAccounts();
+          }
+        }, 800);
+      };
+      window.addEventListener("focus", refresh);
+    } else if (out.status === "connected") {
+      toast(`Connected ${out.account.label}.`, "ok");
+      await Promise.all([connReload(), connLoadAccounts()]);
+    } else if (out.status === "needs_setup") {
+      const name = (connState.items.find((p) => p.slug === slug) || {}).name || slug;
+      const m = openModal({ title: `Register an app for ${name}`, body: connSetupHtml(out.owner_setup, name), footer: `<button class="btn" id="conn-setup-close">Close</button>` });
+      $("#conn-setup-close", m.root).addEventListener("click", m.close);
+    } else if (out.status === "needs_input") {
+      openCredentialModal(slug, out);
+    }
+  } catch (e) {
+    toast(e.message, "error");
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = original;
+    }
+  }
+}
+
+function openCredentialModal(slug, out) {
+  const fields = out.fields
+    .map(
+      (f) => `<label class="field-row"><span>${esc(f.label || f.name)}${f.required ? "" : ` <span class="dim">(optional)</span>`}</span>
+        <input class="input" data-cred-field="${attr(f.name)}" type="${f.secret ? "password" : "text"}" autocomplete="off" spellcheck="false" /></label>`
+    )
+    .join("");
+  const body = `
+    <p class="dim">${esc(out.message)}. The value goes straight into your local encrypted vault and is never shown again.</p>
+    <label class="field-row"><span>Account label</span><input class="input" id="cred-label" type="text" value="default" autocomplete="off" /></label>
+    ${fields}`;
+  const m = openModal({ title: "Connect", body, footer: `<button class="btn" id="cred-cancel">Cancel</button><button class="btn btn-primary" id="cred-save">Connect</button>` });
+  $("#cred-cancel", m.root).addEventListener("click", m.close);
+  $("#cred-save", m.root).addEventListener("click", async (e) => {
+    const btn = e.target;
+    const values = {};
+    $$("[data-cred-field]", m.root).forEach((i) => {
+      if (i.value.trim()) values[i.dataset.credField] = i.value;
+    });
+    const label = $("#cred-label", m.root).value.trim() || "default";
+    btn.disabled = true;
+    try {
+      const res = await api(`/api/connectors/providers/${encodeURIComponent(slug)}/connect`, { method: "POST", body: JSON.stringify({ auth_id: out.auth_id, label, fields: values }) });
+      $$("[data-cred-field]", m.root).forEach((i) => (i.value = ""));
+      if (res.status === "connected") {
+        toast(`Connected ${res.account.label}.`, "ok");
+        m.close();
+        await Promise.all([connReload(), connLoadAccounts()]);
+      } else toast(res.message || "More input is needed.", "error");
+    } catch (err) {
+      toast(err.message, "error");
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
+async function openProviderDetail(slug) {
+  let d;
+  try {
+    d = await api(`/api/connectors/providers/${encodeURIComponent(slug)}`);
+  } catch (e) {
+    toast(e.message, "error");
+    return;
+  }
+  const seed = d.source === "seed";
+  const docs = safeHttps(d.docs_url);
+  const authList = d.auth_detail
+    .map((a) => {
+      const o = a.oauth2 ? ` &middot; PKCE ${esc(a.oauth2.pkce)}, ${esc(a.oauth2.default_scopes.length)} default scope${a.oauth2.default_scopes.length === 1 ? "" : "s"}` : "";
+      const fields = a.fields.length ? ` &middot; fields: ${a.fields.map((f) => esc(f.name) + (f.secret ? " (secret)" : "")).join(", ")}` : "";
+      const btn = a.connectable ? `<button class="btn btn-sm" data-conn-auth="${attr(a.id)}">Connect with this</button>` : `<span class="dim">not driven by this build</span>`;
+      return `<li><strong>${esc(connModeLabel(a.mode))}</strong> <code>${esc(a.id)}</code>${a.default ? ` <span class="tag">default</span>` : ""}${o}${fields} ${btn}</li>`;
+    })
+    .join("");
+  const toolkits = d.toolkits.length
+    ? `<table class="table"><thead><tr><th>Toolkit</th><th>State</th><th></th></tr></thead><tbody>${d.toolkits.map((t) => `<tr><td><code>${esc(t.slug)}</code> <span class="dim">${t.defined ? `${t.tools} tools` : "not synced"}</span></td><td>${connToolkitState(t)}</td><td class="nowrap">${connToolkitButton(t)}</td></tr>`).join("")}</tbody></table>`
+    : `<div class="dim">${seed ? "A seed defines no toolkits." : "No toolkit is defined for this provider yet."}</div>`;
+  const body = `
+    <div data-conn-modal-slug="${attr(d.slug)}"></div>
+    <dl class="kv">
+      <dt>Source</dt><dd>${seed ? "Seed (unverified candidate)" : "Curated"}</dd>
+      <dt>Coverage</dt><dd>${connCoverageBadge(d.coverage)}</dd>
+      <dt>Categories</dt><dd>${esc((d.categories || []).join(", "))}</dd>
+      <dt>API hosts</dt><dd class="mono">${esc((d.api_hosts || []).join(", "))}</dd>
+      ${docs ? `<dt>Source link</dt><dd><a href="${attr(docs)}" target="_blank" rel="noopener noreferrer">${seed ? "Where these facts came from" : "Provider docs"}</a></dd>` : ""}
+    </dl>
+    <h4 class="mini-title">Authentication</h4>
+    <ul class="auth-list">${authList}</ul>
+    ${d.connect === "needs_app" ? `<h4 class="mini-title">Before you connect</h4>${connSetupHtml(d.owner_setup, d.name)}` : ""}
+    <h4 class="mini-title">Toolkits</h4>
+    ${toolkits}
+    <h4 class="mini-title">Connected accounts</h4>
+    <div id="conn-detail-accounts">${connAccountsTable(d.accounts_detail, { hideProvider: true })}</div>`;
+  const m = openModal({ title: d.name, body, footer: `<button class="btn" id="conn-detail-close">Close</button>` });
+  m.root.querySelector(".modal").classList.add("modal-wide");
+  $("#conn-detail-close", m.root).addEventListener("click", m.close);
+  $$("[data-conn-auth]", m.root).forEach((b) =>
+    b.addEventListener("click", () => {
+      m.close();
+      connectProvider(d.slug, { auth_id: b.dataset.connAuth }, null);
+    })
+  );
+  connBindToolkitButtons(m.root);
+  connBindProbeButtons(m.root, () => openProviderDetail(slug));
 }
 
 // ============================================================================
@@ -613,7 +1218,7 @@ async function renderLogs() {
         <td><code>${esc(e.server)}</code></td>
         <td class="mono">${esc(e.tool)}</td>
         <td>${scopeBadge(e.scope)}</td>
-        <td class="decision-${esc(e.decision)} mono">${esc(e.decision)}</td>
+        <td class="decision-${esc(e.decision)} mono">${esc(e.phase === "attempt" ? "attempt" : e.decision)}</td>
         <td class="dim">${esc(e.reason || "")}</td>
       </tr>`
     )
@@ -842,7 +1447,7 @@ async function renderSettingsAuthScreen() {
     const logo = $("#a-logo").value.trim();
     $("#a-preview").innerHTML = `
       <div style="border:1px solid var(--border);border-top:3px solid ${attr(safeAccent)};border-radius:14px;background:#0d1117;padding:26px 22px;text-align:center">
-        ${/^https?:\/\//.test(logo) ? `<img src="${attr(logo)}" alt="" style="max-height:36px;margin-bottom:12px" onerror="this.style.display='none'" />` : `<span style="display:inline-block;width:13px;height:13px;border-radius:50%;background:#3fb950;margin-bottom:12px"></span>`}
+        ${/^https?:\/\//.test(logo) ? `<img src="${attr(logo)}" alt="" style="max-height:36px;margin-bottom:12px" data-hide-on-error />` : `<span style="display:inline-block;width:13px;height:13px;border-radius:50%;background:#3fb950;margin-bottom:12px"></span>`}
         <div style="font-size:17px;font-weight:600;margin-bottom:6px">${esc(title)}</div>
         <div style="color:var(--muted);font-size:13px">Connected provider. You can close this tab.</div>
         ${sub ? `<div style="color:var(--muted);font-size:12px;margin-top:8px">${esc(sub)}</div>` : ""}
@@ -972,6 +1577,8 @@ async function renderSettingsCouncil() {
 
   const exampleYaml =
 `settings:
+  network:
+    allow_private: [127.0.0.1]   # the outbound guard refuses local hosts unless the exact host is listed
   council:
     enabled: true
     require_approval: false   # outbound + metered; gate it if you like
@@ -1700,12 +2307,597 @@ function openTriggerModal(existing, toolNames, onSaved, templates = []) {
 }
 
 // ============================================================================
+// Shared bits for the owner-decision pages
+// ============================================================================
+function riskBadge(risk) {
+  const cls = risk === "high" ? "badge-danger" : risk === "medium" ? "badge-warn" : "badge-off";
+  return `<span class="badge ${cls}">${esc(risk)}</span>`;
+}
+
+function statusBadge(status) {
+  const cls =
+    { pending: "badge-warn", approved: "badge-ok", consumed: "badge-ok", denied: "badge-danger", expired: "badge-off" }[status] ||
+    "badge-off";
+  return `<span class="badge ${cls}">${esc(status)}</span>`;
+}
+
+function csvList(text) {
+  return String(text || "")
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
+
+// ============================================================================
+// VIEW: Approvals (design 3.3) - the calls that wait for the owner
+//
+// Approving here does not just record a click. The gateway asks for owner presence (Windows Hello, or a
+// challenge at its own terminal) with the exact action, and signs the decision only if that succeeds, so a
+// script that steals the owner session still cannot approve anything.
+// ============================================================================
+const approvalsUi = { poll: null, tick: null, busy: false, offsetMs: 0 };
+
+function stopApprovalsTimers() {
+  clearInterval(approvalsUi.poll);
+  clearInterval(approvalsUi.tick);
+  approvalsUi.poll = null;
+  approvalsUi.tick = null;
+}
+
+function clock(iso) {
+  const left = Date.parse(iso) - (Date.now() + approvalsUi.offsetMs);
+  if (!Number.isFinite(left)) return "?";
+  if (left <= 0) return "expired";
+  const s = Math.floor(left / 1000);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const ss = String(s % 60).padStart(2, "0");
+  return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${ss}` : `${m}:${ss}`;
+}
+
+function argsCell(a) {
+  let text;
+  try { text = JSON.stringify(a.args_preview ?? {}); } catch { text = "(arguments cannot be shown)"; }
+  const short = text.length > 140 ? text.slice(0, 137) + "..." : text;
+  const pretty = (() => { try { return JSON.stringify(a.args_preview ?? {}, null, 2); } catch { return text; } })();
+  return `<code class="args-preview">${esc(short)}</code>` +
+    (text.length > 140 ? `<details class="args-full"><summary>full</summary><pre>${esc(pretty)}</pre></details>` : "");
+}
+
+function pendingRow(a, withActions) {
+  return `
+    <tr data-id="${attr(a.id)}">
+      <td><strong>${esc(a.client || a.principal)}</strong>${a.client ? `<div class="dim small" title="${attr(a.principal)}">${esc(a.principal)}</div>` : ""}</td>
+      <td><code>${esc(a.server)}</code></td>
+      <td><code>${esc(a.tool)}</code></td>
+      <td>${riskBadge(a.risk)} ${scopeBadge(a.scope)}</td>
+      <td>${argsCell(a)}</td>
+      <td class="nowrap"><span class="countdown" data-expires="${attr(a.expires)}">${esc(clock(a.expires))}</span></td>
+      <td class="table-actions nowrap">${withActions}</td>
+    </tr>`;
+}
+
+function approvalsHtml(data) {
+  const warn = [];
+  if (data.auto_approve) warn.push("<code>SWITCHBOARD_AUTO_APPROVE=1</code> is set on the gateway: every gated call is approved with no human decision. That is for test harnesses only.");
+  if (data.insecure_presence) warn.push("<code>SWITCHBOARD_INSECURE_APPROVAL=1</code> is set on the gateway: owner presence checks are switched off, so approving needs no Windows Hello. That is for test harnesses only.");
+  const warnHtml = warn.map((w) => `<div class="error-banner">${w}</div>`).join("");
+
+  const pending = data.pending || [];
+  const approved = data.approved || [];
+  const history = data.history || [];
+
+  const pendingHtml = pending.length
+    ? `<div class="panel" style="padding:6px 0;overflow-x:auto"><table class="table" id="pending-table">
+        <thead><tr><th>Client</th><th>Server</th><th>Tool</th><th>Risk</th><th>Arguments</th><th>Expires in</th><th></th></tr></thead>
+        <tbody>${pending
+          .map((a) =>
+            pendingRow(
+              a,
+              `<button class="btn btn-sm btn-primary" data-approve="${attr(a.id)}">Approve</button>
+               <button class="btn btn-sm btn-danger" data-deny="${attr(a.id)}">Deny</button>`
+            )
+          )
+          .join("")}</tbody></table></div>`
+    : `<div class="empty"><div class="empty-ico">✓</div><div class="empty-title">Nothing is waiting for you</div>
+        <div>A call that needs approval appears here the moment a client makes it. Approvals expire after ${esc(Math.round(data.ttl_seconds / 60))} minutes.</div></div>`;
+
+  const approvedHtml = approved.length
+    ? `<h3 class="section-title">Approved, not used yet</h3>
+       <div class="panel" style="padding:6px 0;overflow-x:auto"><table class="table">
+        <thead><tr><th>Client</th><th>Server</th><th>Tool</th><th>Risk</th><th>Arguments</th><th>Valid for</th><th></th></tr></thead>
+        <tbody>${approved.map((a) => pendingRow(a, `<button class="btn btn-sm btn-danger" data-deny="${attr(a.id)}">Withdraw</button>`)).join("")}</tbody></table></div>`
+    : "";
+
+  const historyHtml = history.length
+    ? `<h3 class="section-title">History <span class="dim small">(last ${history.length})</span></h3>
+       <div class="panel" style="padding:6px 0;overflow-x:auto"><table class="table">
+        <thead><tr><th>When</th><th>Status</th><th>Client</th><th>Call</th><th>Risk</th><th>Via</th><th>Arguments</th></tr></thead>
+        <tbody>${history
+          .map(
+            (a) => `<tr>
+              <td class="dim nowrap">${esc(relTime(a.decided_at || a.created))}</td>
+              <td>${statusBadge(a.status)}</td>
+              <td>${esc(a.client || a.principal)}</td>
+              <td><code>${esc(a.server)}__${esc(a.tool)}</code></td>
+              <td>${riskBadge(a.risk)}</td>
+              <td class="dim">${esc(a.decided_via || "none")}${a.presence ? ` <span class="small">(${esc(a.presence)})</span>` : ""}</td>
+              <td>${argsCell(a)}</td></tr>`
+          )
+          .join("")}</tbody></table></div>`
+    : "";
+
+  return warnHtml + pendingHtml + approvedHtml + historyHtml;
+}
+
+function tickApprovals() {
+  let anyExpired = false;
+  $$(".countdown").forEach((el) => {
+    const t = clock(el.dataset.expires);
+    if (el.textContent !== t) el.textContent = t;
+    if (t === "expired") anyExpired = true;
+  });
+  return anyExpired;
+}
+
+async function loadApprovals(first) {
+  const data = await api("/api/approvals");
+  approvalsUi.offsetMs = Date.parse(data.now) - Date.now();
+  if (first) {
+    view().innerHTML =
+      pageHead(
+        "Approvals",
+        "Calls that wait for you. Approving asks Windows Hello (or the gateway's own terminal) to confirm you are present. An approval covers exactly these arguments, works once, and expires.",
+        `<button class="btn" id="ap-refresh">Refresh</button>`
+      ) + `<div id="ap-body"></div>`;
+    $("#ap-refresh").addEventListener("click", () => loadApprovals(false).catch((e) => toast(e.message, "error")));
+  }
+  const body = $("#ap-body");
+  if (!body) return;
+  body.innerHTML = approvalsHtml(data);
+  bindApprovalButtons();
+  updateNavCount((data.pending || []).length);
+}
+
+function bindApprovalButtons() {
+  $$("[data-approve]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      if (approvalsUi.busy) return;
+      approvalsUi.busy = true;
+      const id = b.dataset.approve;
+      $$("[data-approve],[data-deny]").forEach((x) => (x.disabled = true));
+      b.innerHTML = `<span class="spinner"></span> Waiting for you`;
+      toast("Confirm on the machine that runs the gateway (Windows Hello or its terminal).", "ok");
+      try {
+        await api(`/api/approvals/${encodeURIComponent(id)}/approve`, { method: "POST", body: "{}" });
+        toast("Approved. The client can now repeat the identical call once.", "ok");
+      } catch (e) {
+        toast(e.message, "error");
+      } finally {
+        approvalsUi.busy = false;
+        loadApprovals(false).catch(() => {});
+      }
+    })
+  );
+  $$("[data-deny]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      if (approvalsUi.busy) return;
+      approvalsUi.busy = true;
+      try {
+        await api(`/api/approvals/${encodeURIComponent(b.dataset.deny)}/deny`, { method: "POST", body: "{}" });
+        toast("Denied.", "ok");
+      } catch (e) {
+        toast(e.message, "error");
+      } finally {
+        approvalsUi.busy = false;
+        loadApprovals(false).catch(() => {});
+      }
+    })
+  );
+}
+
+async function renderApprovals() {
+  loadingView();
+  stopApprovalsTimers();
+  try {
+    await loadApprovals(true);
+  } catch (e) {
+    view().innerHTML = pageHead("Approvals") + errorBanner(e);
+    return;
+  }
+  // The countdown moves every second; the list is re-read every few seconds, and at once when one expires.
+  approvalsUi.tick = setInterval(() => {
+    if (currentPath() !== "/approvals") return stopApprovalsTimers();
+    if (tickApprovals() && !approvalsUi.busy) loadApprovals(false).catch(() => {});
+  }, 1000);
+  approvalsUi.poll = setInterval(() => {
+    if (currentPath() !== "/approvals") return stopApprovalsTimers();
+    if (!approvalsUi.busy && !document.hidden) loadApprovals(false).catch(() => {});
+  }, 3000);
+}
+
+// ============================================================================
+// VIEW: Clients (design 3.1) - who may call /mcp, and how far
+// ============================================================================
+function clientFormHtml(c, isNew) {
+  const sel = (val, opts) =>
+    opts.map(([v, label]) => `<option value="${attr(v)}"${v === (val || "") ? " selected" : ""}>${esc(label)}</option>`).join("");
+  return `
+    ${isNew ? `<div class="field"><label for="c-id">Client id</label>
+      <input id="c-id" class="input" placeholder="e.g. codex" autofocus />
+      <div class="hint">1 to 64 characters from a-z, 0-9, '-' and '_'. This is the name the bridge uses: <code>switchboard bridge --client &lt;id&gt;</code>.</div></div>` : ""}
+    <div class="field"><label for="c-desc">Description</label>
+      <input id="c-desc" class="input" value="${attr(c.description || "")}" placeholder="What this client is" /></div>
+    <div class="field"><label for="c-servers">Servers it may see and call</label>
+      <input id="c-servers" class="input" value="${attr((c.servers || []).join(", "))}" placeholder="* or voice, youtube" />
+      <div class="hint">Comma separated server id globs. <code>*</code> is every server; an empty list is none.</div></div>
+    <div class="field"><label for="c-tools">Tool allowlist (optional)</label>
+      <input id="c-tools" class="input" value="${attr((c.tools || []).join(", "))}" placeholder="voice__text_*" />
+      <div class="hint">Exposed tool name globs. Empty means every tool of the allowed servers.</div></div>
+    <div class="field"><label for="c-excl">Hidden tools (optional)</label>
+      <input id="c-excl" class="input" value="${attr((c.exclude_tools || []).join(", "))}" placeholder="*__delete_*" /></div>
+    <div class="row">
+      <div class="field" style="flex:1;min-width:160px"><label for="c-scope">Scope ceiling</label>
+        <select id="c-scope" class="select">${sel(c.max_scope, [["", "(server ceiling)"], ["read", "read"], ["write", "write"], ["full", "full"]])}</select></div>
+      <div class="field" style="flex:1;min-width:160px"><label for="c-risk">Risk ceiling</label>
+        <select id="c-risk" class="select">${sel(c.max_risk, [["", "(high)"], ["low", "low"], ["medium", "medium"], ["high", "high (still needs approval)"]])}</select></div>
+      <div class="field" style="flex:1;min-width:160px"><label for="c-rate">Calls per minute</label>
+        <input id="c-rate" class="input" type="number" min="1" value="${attr(c.limits && c.limits.per_minute ? c.limits.per_minute : "")}" placeholder="no limit" /></div>
+    </div>`;
+}
+
+function readClientForm(m, existing) {
+  const v = (id) => $(id, m.root).value.trim();
+  const body = {
+    description: v("#c-desc"),
+    servers: csvList(v("#c-servers")),
+  };
+  const tools = csvList(v("#c-tools"));
+  const excl = csvList(v("#c-excl"));
+  const rate = Number.parseInt(v("#c-rate"), 10);
+  if (existing) {
+    // PUT merges; null clears an optional field.
+    body.description = body.description || null;
+    body.tools = tools.length ? tools : null;
+    body.exclude_tools = excl.length ? excl : null;
+    body.max_scope = v("#c-scope") || null;
+    body.max_risk = v("#c-risk") || null;
+    body.limits = Number.isFinite(rate) && rate > 0 ? { per_minute: rate } : null;
+  } else {
+    if (!body.description) delete body.description;
+    if (tools.length) body.tools = tools;
+    if (excl.length) body.exclude_tools = excl;
+    if (v("#c-scope")) body.max_scope = v("#c-scope");
+    if (v("#c-risk")) body.max_risk = v("#c-risk");
+    if (Number.isFinite(rate) && rate > 0) body.limits = { per_minute: rate };
+  }
+  return body;
+}
+
+function confirmModal({ title, body, confirmLabel, danger, onConfirm }) {
+  const m = openModal({
+    title,
+    body: `<p class="dim mt-0">${body}</p>`,
+    footer: `<button class="btn" data-close="1" id="cf-cancel">Cancel</button>
+             <button class="btn ${danger ? "btn-danger" : "btn-primary"}" id="cf-ok">${esc(confirmLabel)}</button>`,
+  });
+  $("#cf-cancel", m.root).addEventListener("click", m.close);
+  $("#cf-ok", m.root).addEventListener("click", async () => {
+    const btn = $("#cf-ok", m.root);
+    btn.disabled = true;
+    btn.innerHTML = `<span class="spinner"></span>`;
+    try {
+      await onConfirm();
+      m.close();
+    } catch (e) {
+      toast(e.message, "error");
+      btn.disabled = false;
+      btn.textContent = confirmLabel;
+    }
+  });
+  return m;
+}
+
+async function renderClients() {
+  loadingView();
+  let data;
+  try { data = await api("/api/clients"); } catch (e) { view().innerHTML = pageHead("Clients") + errorBanner(e); return; }
+  const posture = data.enforced
+    ? `<span class="badge badge-ok"><span class="dot"></span>Enforced</span>`
+    : `<span class="badge badge-off"><span class="dot"></span>Single-user mode</span>`;
+  const rows = data.clients
+    .map(
+      (c) => `
+      <tr data-id="${attr(c.id)}">
+        <td><strong>${esc(c.id)}</strong>${c.description ? `<div class="dim small">${esc(c.description)}</div>` : ""}</td>
+        <td><code>${esc((c.servers || []).join(", ") || "(none)")}</code>${c.tools && c.tools.length ? `<div class="dim small">tools: ${esc(c.tools.join(", "))}</div>` : ""}${c.exclude_tools && c.exclude_tools.length ? `<div class="dim small">hidden: ${esc(c.exclude_tools.join(", "))}</div>` : ""}</td>
+        <td class="nowrap">${scopeBadge(c.max_scope || "server")} ${riskBadge(c.max_risk || "high")}${c.limits && c.limits.per_minute ? `<div class="dim small">${esc(c.limits.per_minute)}/min</div>` : ""}</td>
+        <td class="dim">${c.keys.length} key${c.keys.length === 1 ? "" : "s"}${c.key_file ? "" : ` <span class="small">(no key file)</span>`}${c.keys[0] && c.keys[0].last_used ? `<div class="small">used ${esc(relTime(c.keys[0].last_used))}</div>` : ""}</td>
+        <td class="table-actions nowrap">
+          <button class="btn btn-sm" data-edit="${attr(c.id)}">Edit</button>
+          <button class="btn btn-sm" data-rotate="${attr(c.id)}">Rotate key</button>
+          <button class="btn btn-sm btn-danger" data-revoke="${attr(c.id)}">Revoke keys</button>
+          <button class="btn btn-sm btn-danger" data-remove="${attr(c.id)}">Remove</button>
+        </td>
+      </tr>`
+    )
+    .join("");
+  view().innerHTML =
+    pageHead(
+      "Clients",
+      "The callers that may use /mcp, what each may see, and how far it may go. A client's keys live in a protected key file read by the bridge; a token is never shown here.",
+      `<button class="btn btn-primary" id="cl-new">+ Add client</button>`
+    ) +
+    `<div class="row" style="margin-bottom:14px">Access control: ${posture}
+      <span class="dim">· ${data.clients.length} client${data.clients.length === 1 ? "" : "s"}${data.enforced ? ": /mcp needs a key bound to one of them" : ": add one and /mcp starts requiring a client key"}</span></div>` +
+    (data.orphan_keys && data.orphan_keys.length
+      ? `<div class="error-banner">${data.orphan_keys.length} key(s) are bound to a client that is not configured and are refused: ${esc(data.orphan_keys.map((k) => `${k.id} (${k.client})`).join(", "))}</div>`
+      : "") +
+    (data.clients.length
+      ? `<div class="panel" style="padding:6px 0;overflow-x:auto"><table class="table">
+          <thead><tr><th>Client</th><th>Servers</th><th>Ceilings (scope, risk)</th><th>Keys</th><th></th></tr></thead>
+          <tbody>${rows}</tbody></table></div>`
+      : `<div class="empty"><div class="empty-ico">☺</div><div class="empty-title">No clients yet</div>
+          <div>Add one for each tool that calls Switchboard (Claude Code, Codex, a local model) so each has its own key, its own servers and its own ceiling.</div></div>`);
+
+  $("#cl-new").addEventListener("click", () => {
+    const m = openModal({
+      title: "Add a client",
+      body: clientFormHtml({ servers: ["*"], max_scope: "read", max_risk: "low" }, true),
+      footer: `<button class="btn" data-close="1" id="cl-cancel">Cancel</button>
+               <button class="btn btn-primary" id="cl-create">Create client</button>`,
+    });
+    $("#cl-cancel", m.root).addEventListener("click", m.close);
+    $("#cl-create", m.root).addEventListener("click", async () => {
+      const btn = $("#cl-create", m.root);
+      btn.disabled = true;
+      btn.innerHTML = `<span class="spinner"></span>`;
+      try {
+        const body = readClientForm(m, null);
+        body.id = $("#c-id", m.root).value.trim();
+        await api("/api/clients", { method: "POST", body: JSON.stringify(body) });
+        m.close();
+        toast("Client created. Its key is in the protected key file for the bridge.", "ok");
+        renderClients();
+      } catch (e) {
+        toast(e.message, "error");
+        btn.disabled = false;
+        btn.textContent = "Create client";
+      }
+    });
+  });
+
+  $$("[data-edit]").forEach((b) =>
+    b.addEventListener("click", () => {
+      const c = data.clients.find((x) => x.id === b.dataset.edit);
+      if (!c) return;
+      const m = openModal({
+        title: `Edit ${c.id}`,
+        body: clientFormHtml(c, false),
+        footer: `<button class="btn" data-close="1" id="cl-cancel">Cancel</button>
+                 <button class="btn btn-primary" id="cl-save">Save</button>`,
+      });
+      $("#cl-cancel", m.root).addEventListener("click", m.close);
+      $("#cl-save", m.root).addEventListener("click", async () => {
+        const btn = $("#cl-save", m.root);
+        btn.disabled = true;
+        btn.innerHTML = `<span class="spinner"></span>`;
+        try {
+          await api(`/api/clients/${encodeURIComponent(c.id)}`, { method: "PUT", body: JSON.stringify(readClientForm(m, c)) });
+          m.close();
+          toast("Saved. A running gateway applies it on the next call.", "ok");
+          renderClients();
+        } catch (e) {
+          toast(e.message, "error");
+          btn.disabled = false;
+          btn.textContent = "Save";
+        }
+      });
+    })
+  );
+
+  $$("[data-rotate]").forEach((b) =>
+    b.addEventListener("click", () => {
+      const id = b.dataset.rotate;
+      confirmModal({
+        title: `Rotate the key of ${id}?`,
+        body: "A new key replaces the old one in the client key file. The old key stops working at once, so a client that holds it directly must be given the new one.",
+        confirmLabel: "Rotate key",
+        onConfirm: async () => {
+          await api(`/api/clients/${encodeURIComponent(id)}/rotate`, { method: "POST", body: "{}" });
+          toast("Key rotated. The bridge reads the new one from the key file.", "ok");
+          renderClients();
+        },
+      });
+    })
+  );
+
+  $$("[data-revoke]").forEach((b) =>
+    b.addEventListener("click", () => {
+      const id = b.dataset.revoke;
+      confirmModal({
+        title: `Revoke the keys of ${id}?`,
+        body: "Every key of this client stops working and its key file is deleted. The client entry stays, so you can rotate a new key in later.",
+        confirmLabel: "Revoke keys",
+        danger: true,
+        onConfirm: async () => {
+          await api(`/api/clients/${encodeURIComponent(id)}?purge=0`, { method: "DELETE" });
+          toast("Keys revoked.", "ok");
+          renderClients();
+        },
+      });
+    })
+  );
+
+  $$("[data-remove]").forEach((b) =>
+    b.addEventListener("click", () => {
+      const id = b.dataset.remove;
+      confirmModal({
+        title: `Remove ${id}?`,
+        body: "Its keys are revoked, its key file is deleted and the client is removed from the config. This cannot be undone.",
+        confirmLabel: "Remove client",
+        danger: true,
+        onConfirm: async () => {
+          await api(`/api/clients/${encodeURIComponent(id)}`, { method: "DELETE" });
+          toast("Client removed.", "ok");
+          renderClients();
+        },
+      });
+    })
+  );
+}
+
+// ============================================================================
+// Chrome: pending count, kill-switch banner and toggle, sign out
+// ============================================================================
+function updateNavCount(n) {
+  const el = $("#nav-approvals-count");
+  if (!el) return;
+  el.hidden = !(n > 0);
+  el.textContent = String(n);
+}
+
+let killActive = false;
+
+function paintKill(st) {
+  killActive = Boolean(st && st.active);
+  let banner = $("#kill-banner");
+  if (killActive) {
+    if (!banner) {
+      banner = document.createElement("div");
+      banner.id = "kill-banner";
+      banner.className = "kill-banner";
+      banner.setAttribute("role", "alert");
+      document.body.prepend(banner);
+    }
+    banner.textContent = `Kill switch is ON${st.since ? ` since ${new Date(st.since).toLocaleString()}` : ""}: every tool call, resource read and prompt get is refused until it is turned off.`;
+  } else if (banner) {
+    banner.remove();
+  }
+  const btn = $("#kill-toggle");
+  if (btn) {
+    btn.textContent = killActive ? "Kill switch ON: turn off" : "Kill switch off: turn on";
+    btn.classList.toggle("btn-danger", !killActive);
+    btn.classList.toggle("btn-primary", killActive);
+  }
+}
+
+async function refreshChrome() {
+  try {
+    const [s, a] = await Promise.all([api("/api/state", { quiet: true }), api("/api/approvals", { quiet: true })]);
+    paintKill(s.kill_switch);
+    updateNavCount((a.pending || []).length);
+  } catch {
+    /* the sign-in banner already explains a 401; a transient failure just leaves the last state */
+  }
+}
+
+$("#kill-toggle").addEventListener("click", () => {
+  if (killActive) {
+    confirmModal({
+      title: "Turn the kill switch off?",
+      body: "Every tool call, resource read and prompt get is allowed again. Windows Hello (or the gateway's terminal) will ask you to confirm you are present on the machine that runs the gateway.",
+      confirmLabel: "Turn off",
+      onConfirm: async () => {
+        paintKill(await api("/api/kill", { method: "POST", body: JSON.stringify({ on: false }) }));
+        toast("Kill switch off. Calls are allowed again.", "ok");
+      },
+    });
+  } else {
+    confirmModal({
+      title: "Turn the kill switch on?",
+      body: "Every tool call, resource read and prompt get is refused at once, for every client, until you turn it off.",
+      confirmLabel: "Turn on",
+      danger: true,
+      onConfirm: async () => {
+        paintKill(await api("/api/kill", { method: "POST", body: JSON.stringify({ on: true }) }));
+        toast("Kill switch on. Everything is refused.", "ok");
+      },
+    });
+  }
+});
+
+$("#sign-out").addEventListener("click", async () => {
+  try {
+    await api("/api/session", { method: "DELETE" });
+  } catch {
+    /* already signed out */
+  }
+  clearSession();
+  stopApprovalsTimers();
+  paintKill(null);
+  view().innerHTML = pageHead("Signed out", "Run switchboard dashboard login in a terminal on this machine to sign in again.");
+  showSignInBanner("You signed out.");
+});
+
+setInterval(() => {
+  if (sessionId && !document.hidden) refreshChrome();
+}, 10000);
+
+// ============================================================================
+// VIEW: OAuth consent (design 3.15). A client asked to connect through the OAuth server; the owner decides here, with
+// the session header and the CSRF value (the old page and its cookie are gone). Reached from the link on the page the
+// client's browser shows: #/oauth/<pending id>.
+// ============================================================================
+async function renderOAuthConsent(pendingId) {
+  loadingView();
+  const head = pageHead("Authorize a client", "A client asked to connect to this MCP Switchboard.");
+  if (!sessionId) {
+    view().innerHTML =
+      head +
+      `<div class="panel"><div class="panel-title">Sign in first</div>
+        <p class="panel-sub">Only the owner of this machine can decide this. Run <code>switchboard dashboard login</code> in a terminal on this machine; it opens a dashboard tab already signed in. Then open this same address in that tab (this tab keeps no sign-in).</p></div>`;
+    return;
+  }
+  let p;
+  try {
+    p = await api(`/api/oauth/pending/${encodeURIComponent(pendingId)}`);
+  } catch (e) {
+    view().innerHTML = head + errorBanner(e);
+    return;
+  }
+  const scopes = (p.scopes || []).map((s) => `<li><code>${esc(s)}</code></li>`).join("");
+  const maps = p.maps_to_client
+    ? `<div class="error-banner">The name this client registered with is <strong>${esc(p.maps_to_client)}</strong>, the id of one of your configured clients. Approving gives it that client's access (servers and ceilings). Approve only if you started this connection yourself.</div>`
+    : "";
+  view().innerHTML =
+    head +
+    `<div class="panel">
+      <div class="panel-title">${esc(p.client_name)}</div>
+      <p class="panel-sub">wants an access token for <code>${esc(p.resource)}</code> with these scopes:</p>
+      <ul>${scopes}</ul>
+      ${maps}
+      <div class="row">
+        <button class="btn" id="oc-deny">Deny</button>
+        <button class="btn btn-primary" id="oc-approve">Approve</button>
+      </div>
+    </div>`;
+  const decide = async (decision) => {
+    $("#oc-deny").disabled = true;
+    $("#oc-approve").disabled = true;
+    try {
+      const r = await api("/api/oauth/consent", { method: "POST", body: JSON.stringify({ pending_id: pendingId, decision }) });
+      window.location.assign(r.redirect);
+    } catch (e) {
+      toast(e.message, "error");
+      $("#oc-deny").disabled = false;
+      $("#oc-approve").disabled = false;
+    }
+  };
+  $("#oc-deny").addEventListener("click", () => decide("deny"));
+  $("#oc-approve").addEventListener("click", () => decide("approve"));
+}
+
+// ============================================================================
 // Router
 // ============================================================================
 const routes = {
   "/catalog": renderCatalog,
   "/accounts": renderAccounts,
+  "/connectors": renderConnectors,
   "/servers": renderServers,
+  "/clients": renderClients,
+  "/approvals": renderApprovals,
   "/triggers": renderTriggers,
   "/playground": renderPlayground,
   "/logs": renderLogs,
@@ -1732,7 +2924,9 @@ function setActiveNav(path) {
 
 async function router() {
   const path = currentPath();
-  const fn = routes[path] || routes["/catalog"];
+  const consent = /^\/oauth\/([A-Za-z0-9_-]{1,128})$/.exec(path);
+  const fn = consent ? () => renderOAuthConsent(consent[1]) : routes[path] || routes["/catalog"];
+  stopApprovalsTimers();
   setActiveNav(path);
   window.scrollTo(0, 0);
   try {
@@ -1743,15 +2937,19 @@ async function router() {
 }
 
 window.addEventListener("hashchange", router);
-window.addEventListener("DOMContentLoaded", () => {
-  if (!location.hash) location.hash = "#/catalog";
-  refreshSidebar();
-  router();
-});
 
-// DOMContentLoaded may have already fired (script is at end of body).
-if (document.readyState !== "loading") {
+let started = false;
+async function start() {
+  if (started) return;
+  started = true;
+  await establishSession(); // redeem #login=<code> or recover the CSRF value, before any view fetches
   if (!location.hash) location.hash = "#/catalog";
   refreshSidebar();
+  refreshChrome();
   router();
 }
+
+window.addEventListener("DOMContentLoaded", start);
+
+// DOMContentLoaded may have already fired (script is at end of body).
+if (document.readyState !== "loading") start();

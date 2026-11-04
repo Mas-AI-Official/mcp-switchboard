@@ -26,8 +26,7 @@ process.env.SWITCHBOARD_AUTO_APPROVE = "1"; // defensive: no approval gate is co
 const { Gateway } = await import("../dist/gateway.js");
 const { recentAudit, usageStats } = await import("../dist/audit.js");
 const { listTriggerTemplates, getTriggerTemplate, templateToDefinition } = await import("../dist/trigger-templates.js");
-const { Server } = await import("@modelcontextprotocol/sdk/server/index.js");
-const { CallToolRequestSchema, ListToolsRequestSchema } = await import("@modelcontextprotocol/sdk/types.js");
+const { Server } = await import("@modelcontextprotocol/server");
 
 const SECRET = "s3cr3t-trigger-signing-key";
 const checks = [];
@@ -80,8 +79,8 @@ const TOOLS = [
   { name: "read_blob", description: "read blob", inputSchema: { type: "object", additionalProperties: true } },
   { name: "delete_item", description: "delete an item", inputSchema: { type: "object", additionalProperties: true } },
 ];
-echo.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
-echo.setRequestHandler(CallToolRequestSchema, async (req) => {
+echo.setRequestHandler("tools/list", async () => ({ tools: TOOLS }));
+echo.setRequestHandler("tools/call", async (req) => {
   const n = req.params.name;
   if (n === "read_items") return { content: [{ type: "text", text: JSON.stringify({ items }) }] };
   if (n === "read_blob") return { content: [{ type: "text", text: JSON.stringify({ blob }) }] };
@@ -96,6 +95,8 @@ const cfg = {
   servers: [],
   settings: {
     logs: { capture_io: false },
+    // The receiver listens on loopback; since the SSRF guard (src/netguard.ts) a loopback webhook target must be allowlisted.
+    network: { allow_private: ["127.0.0.1"] },
     webhook: { enabled: false, url: RECV_URL, events: [], secret_ref: "" },
     triggers: {
       enabled: false,

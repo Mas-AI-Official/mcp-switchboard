@@ -17,19 +17,21 @@
  * the `credentials` map is rendered into request headers.
  */
 
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import { Client, InMemoryTransport, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
+import type { Transport } from "@modelcontextprotocol/client";
+import type { Server, Tool } from "@modelcontextprotocol/server";
 import type { Scope, ServerConfig } from "./types.js";
 import type { Vault } from "./vault.js";
 import type { OAuthStore } from "./oauth.js";
+import { guardedMcpFetch, type NetworkSource } from "./netguard.js";
+import { checkNpmSpec } from "./packagespec.js";
+import { safeText } from "./safetext.js";
 import { buildOpenApiServer } from "./openapi.js";
 import { buildHttpToolServer } from "./httptool.js";
+import { buildConnectorServer, type ConnectorHooks } from "./connectors/mcpserver.js";
 import { authSchemeEnv, authSchemeHeaders } from "./authscheme.js";
+import { baseChildEnv, exactChildEnv, passthroughEnv } from "./childenv.js";
 import { log } from "./logger.js";
 
 /** `${oauth:provider}` reference — resolved to a bare access token at mount time. */
@@ -42,6 +44,16 @@ export interface MountedServer {
   tools: Tool[];
   /** Per-tool scope hints for app2mcp-generated tools (verb→scope). */
   scopeHints?: Record<string, Scope>;
+  /**
+   * Tools that are callable and searchable but not listed (a connector toolkit lists only its `important`
+   * set; the rest are found with `find_tools` and called with `call_tool`).
+   */
+  unlisted?: Tool[];
+  /**
+   * A connector toolkit's facts for the router: each action's risk, outward and approval flags, and the pre-approval
+   * plan (the resolved account and built request an approval is bound to). Set for `source: connector` only.
+   */
+  connector?: ConnectorHooks;
 }
 
 export class Registry {
@@ -50,6 +62,8 @@ export class Registry {
   constructor(
     private readonly vault: Vault,
     private readonly oauth?: OAuthStore,
+    /** Live `settings.network` for the SSRF guard used by generated (app2mcp / http-tool) servers. */
+    private readonly network?: NetworkSource,
   ) {}
 
   list(): MountedServer[] {
@@ -71,12 +85,26 @@ export class Registry {
 
     const client = new Client({ name: `switchboard:${config.id}`, version: "0.1.0" });
     let scopeHints: Record<string, Scope> | undefined;
+    let unlisted: Tool[] | undefined;
+    let connector: ConnectorHooks | undefined;
 
-    if (config.source === "app2mcp") {
+    if (config.source === "connector") {
+      // A toolkit of the connector kit (YouTube, Gmail, ...): an in-process MCP server over the toolkit's
+      // actions, calling the provider with a connected account. Refuses to mount until the provider has an
+      // ACTIVE, probed account (fail closed).
+      if (!this.oauth) throw new Error(`server '${config.id}': source 'connector' needs the connector layer, which this registry was built without`);
+      const built = await buildConnectorServer(this.oauth.connectors.kit, config);
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      await built.server.connect(serverTransport);
+      await client.connect(clientTransport);
+      scopeHints = built.scopeHints;
+      unlisted = built.unlisted;
+      connector = built.hooks;
+    } else if (config.source === "app2mcp") {
       // Generate an in-process MCP server from the OpenAPI/Swagger spec and link it to
       // our client over an in-memory transport. Credentials become request headers,
       // resolved lazily (per call) so OAuth tokens can refresh between invocations.
-      const generated = await buildOpenApiServer(config, () => this.resolveHeaders(config));
+      const generated = await buildOpenApiServer(config, () => this.resolveHeaders(config), this.network);
       const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
       await generated.server.connect(serverTransport);
       await client.connect(clientTransport);
@@ -84,7 +112,7 @@ export class Registry {
     } else if (config.source === "http-tool") {
       // Hand-declared HTTP endpoints → an in-process MCP server, linked over an in-memory
       // transport exactly like app2mcp. Auth headers resolve lazily per call (OAuth-refresh-safe).
-      const generated = await buildHttpToolServer(config, () => this.resolveHeaders(config));
+      const generated = await buildHttpToolServer(config, () => this.resolveHeaders(config), this.network);
       const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
       await generated.server.connect(serverTransport);
       await client.connect(clientTransport);
@@ -95,9 +123,9 @@ export class Registry {
 
     const { tools } = await client.listTools();
 
-    const mounted: MountedServer = { id: config.id, config, client, tools, scopeHints };
+    const mounted: MountedServer = { id: config.id, config, client, tools, scopeHints, ...(unlisted ? { unlisted } : {}), ...(connector ? { connector } : {}) };
     this.mounted.set(config.id, mounted);
-    log.ok(`mounted '${config.id}' — ${tools.length} tool${tools.length === 1 ? "" : "s"}`);
+    log.ok(`mounted '${config.id}': ${tools.length} tool${tools.length === 1 ? "" : "s"}${unlisted?.length ? ` (+${unlisted.length} searchable)` : ""}`);
     return mounted;
   }
 
@@ -147,8 +175,11 @@ export class Registry {
     if (config.source === "remote") {
       if (!config.url) throw new Error(`server '${config.id}': remote source needs a 'url'`);
       const headers = await this.resolveHeaders(config);
+      // Every request of the transport (POSTs, the event stream, redirects) goes through the SSRF guard, with the
+      // live `settings.network`: a remote upstream gets no wider reach than an http-tool or a webhook does.
       return new StreamableHTTPClientTransport(new URL(config.url), {
         requestInit: { headers },
+        fetch: guardedMcpFetch(this.network),
       });
     }
 
@@ -159,6 +190,10 @@ export class Registry {
 
     if (config.source === "npx") {
       if (!config.package) throw new Error(`server '${config.id}': npx source needs a 'package'`);
+      // Config load already refuses a bad string; this is the same check for a config object that did not come
+      // through it (the dashboard toggling an in-memory entry, an embedding application). Nothing is spawned first.
+      const bad = checkNpmSpec(config.package);
+      if (bad) throw new Error(`server '${config.id}': npx package ${JSON.stringify(safeText(config.package, 80))} refused: ${bad}`);
       command = process.platform === "win32" ? "npx.cmd" : "npx";
       args = ["-y", config.package, ...(config.args ?? [])];
     } else {
@@ -167,15 +202,20 @@ export class Registry {
       args = config.args ?? [];
     }
 
-    return new StdioClientTransport({ command, args, env, stderr: "inherit" });
+    return new StdioClientTransport({ command, args, env: exactChildEnv(env), stderr: "inherit" });
   }
 
-  /** Inherit the parent env (PATH etc.) and layer resolved env + credentials on top. */
+  /**
+   * Build a stdio child's environment (design 3.6): the SDK safe defaults plus a platform allowlist,
+   * then the operator's `env_passthrough` names, then the server's resolved `env` and `credentials`.
+   * The gateway's own environment is NOT inherited wholesale: provider keys and tokens in the
+   * operator's shell never reach an upstream unless the config says so by name.
+   */
   private async childEnv(config: ServerConfig): Promise<Record<string, string>> {
-    const env: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (typeof v === "string") env[k] = v;
-    }
+    const env: Record<string, string> = {
+      ...baseChildEnv(),
+      ...passthroughEnv(config.id, config.env_passthrough, config.env_passthrough_secrets),
+    };
     for (const [k, v] of Object.entries(config.env ?? {})) env[k] = this.vault.resolve(v);
     for (const [k, v] of Object.entries(config.credentials ?? {})) env[k] = await this.resolveRef(v);
     if (config.auth_scheme) {

@@ -1,0 +1,61 @@
+{
+  "$schema": "../schemas/provider.schema.json",
+  "slug": "linear",
+  "name": "Linear",
+  "categories": ["developer", "productivity"],
+  "api_hosts": ["api.linear.app"],
+  "docs_url": "https://linear.app/developers/oauth-2-0-authentication",
+  "owner_setup": {
+    "console_url": "https://linear.app/settings/api",
+    "steps": [
+      "Create an OAuth application in Linear (Settings, API) and set its callback URL to the redirect URI below",
+      "Store the client id and secret in the vault: switchboard vault set linear_client_id and switchboard vault set linear_client_secret",
+      "Register them: switchboard authconfig add linear --client-id-ref linear_client_id --client-secret-ref linear_client_secret",
+      "Connect: switchboard connect linear"
+    ],
+    "redirect_uris": ["{loopback_redirect}"],
+    "notes": [
+      "Carried over from the table that lived in oauth.ts: PKCE optional, comma separated scopes, refresh tokens rotate (persist the newest).",
+      "The identity probe (a GraphQL viewer query) and the console URL were not re-fetched when this file was written."
+    ]
+  },
+  "identity_probe": {
+    "method": "POST",
+    "url": "https://api.linear.app/graphql",
+    "body": { "query": "{ viewer { id name } }" },
+    "id_path": "data.viewer.id",
+    "name_path": "data.viewer.name"
+  },
+  "auth": [
+    {
+      "id": "oauth2",
+      "mode": "oauth2",
+      "label": "OAuth application",
+      "default": true,
+      "oauth2": {
+        "authorize_url": "https://linear.app/oauth/authorize",
+        "token_url": "https://api.linear.app/oauth/token",
+        "pkce": "supported",
+        "client_auth": "body",
+        "client_secret_at_exchange": "optional",
+        "scope_separator": ",",
+        "default_scopes": ["read", "write"],
+        "scope_catalog": [
+          { "scope": "read", "description": "Read access" },
+          { "scope": "write", "description": "Write access" }
+        ],
+        "redirect": "loopback",
+        "accept_json": true,
+        "refresh": { "kind": "refresh_token", "rotates": true }
+      },
+      "inject": { "in": "header", "name": "Authorization", "template": "Bearer {token}" },
+      "fields": {
+        "auth_config_creation": [
+          { "name": "client_id", "label": "Client ID", "required": true, "secret": false },
+          { "name": "client_secret", "label": "Client secret", "required": false, "secret": true }
+        ],
+        "connected_account_initiation": []
+      }
+    }
+  ]
+}

@@ -4,7 +4,12 @@
  * Turns an OpenAPI 3.x or Swagger 2.0 spec into a real in-process MCP `Server`:
  * each operation (path × method) becomes one tool whose `inputSchema` is the
  * flattened union of its path / query / header parameters and JSON request body.
- * Tool calls are executed with the global `fetch` (Node ≥18.18) — **zero deps**.
+ * Tool calls (and the spec fetch itself) go through the SSRF guard (`guardedFetch`, src/netguard.ts):
+ * **zero deps**. Private, loopback and metadata targets are refused unless the exact host is in
+ * `settings.network.allow_private`, redirects are re-validated hop by hop and never carry credentials
+ * to another origin, and every call has a deadline and a response-size cap. A spec is untrusted input:
+ * when the server carries credentials or inject_args, the base URL must be set explicitly in the config
+ * and the spec's own `servers` host must match it (see `assertCredentialHost`).
  *
  * Scope inference follows the project rule: GET/HEAD → read, POST/PUT/PATCH →
  * write, DELETE → full. The generated server does NOT itself enforce scope — the
@@ -19,24 +24,25 @@
 import { readFileSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
+import { Server } from "@modelcontextprotocol/server";
+import type { CallToolResult, Tool } from "@modelcontextprotocol/server";
 import type { Scope, ServerConfig } from "./types.js";
+import { BULK_DOCUMENT_MAX_BYTES, BULK_DOCUMENT_TIMEOUT_MS, guardedFetch, type NetworkSource } from "./netguard.js";
+import { dotSegmentProblem, pathParamProblem } from "./pathparam.js";
 
 const HTTP_METHODS = ["get", "put", "post", "delete", "options", "head", "patch", "trace"] as const;
 const MAX_RESPONSE_CHARS = 50_000;
 
-type ParamLocation = "path" | "query" | "header" | "body";
+export type ParamLocation = "path" | "query" | "header" | "body";
 
-interface FlatParam {
+export interface FlatParam {
   location: ParamLocation;
   /** The real name to send upstream. `__body__` means "the entire request body". */
   originalName: string;
   required: boolean;
 }
 
-interface GeneratedOp {
+export interface GeneratedOp {
   toolName: string;
   method: string; // upper-case HTTP method
   pathTemplate: string; // e.g. /pet/{petId}
@@ -53,7 +59,7 @@ export interface OpenApiServer {
 }
 
 /** GET/HEAD/OPTIONS/TRACE → read, DELETE → full, everything else → write. */
-function scopeForMethod(method: string): Scope {
+export function scopeForMethod(method: string): Scope {
   const m = method.toLowerCase();
   if (m === "get" || m === "head" || m === "options" || m === "trace") return "read";
   if (m === "delete") return "full";
@@ -66,7 +72,7 @@ function scopeForMethod(method: string): Scope {
  * and a dangling pointer resolves to `{}` (fail-soft, never throw mid-generation).
  * Supports OpenAPI 3.x (`#/components/...`) and Swagger 2.0 (`#/definitions/...`).
  */
-function makeDeref(root: unknown): (node: unknown) => any {
+export function makeDeref(root: unknown): (node: unknown) => any {
   function resolvePointer(ref: string): unknown {
     if (!ref.startsWith("#/")) return undefined;
     const parts = ref.slice(2).split("/").map((p) => p.replace(/~1/g, "/").replace(/~0/g, "~"));
@@ -109,7 +115,7 @@ function paramSchema(param: any, deref: (n: unknown) => any): any {
 }
 
 /** Sanitize to the MCP tool-name charset `[a-z0-9_-]{1,64}`, truncated for headroom. */
-function sanitizeName(raw: string): string {
+export function sanitizeName(raw: string): string {
   let name = raw.toLowerCase().replace(/[^a-z0-9_-]/g, "_");
   name = name.replace(/_+/g, "_").replace(/^[_-]+/, "");
   if (name.length === 0) name = "op";
@@ -126,10 +132,12 @@ function uniqueKey(base: string, taken: Set<string>): string {
 }
 
 /** Load + parse a spec from a local path or http(s) URL. YAML parser also reads JSON. */
-async function loadSpec(source: string): Promise<any> {
+async function loadSpec(source: string, network: NetworkSource): Promise<any> {
   let raw: string;
   if (/^https?:\/\//i.test(source)) {
-    const resp = await fetch(source);
+    // Specs are bulk public documents (a large API's spec runs to many MiB), so they get the bulk caps,
+    // not the tool-response cap; the address checks and redirect rules are the same as for any call.
+    const resp = await guardedFetch(source, { maxBytes: BULK_DOCUMENT_MAX_BYTES, timeoutMs: BULK_DOCUMENT_TIMEOUT_MS }, network);
     if (!resp.ok) {
       throw new Error(`failed to fetch OpenAPI spec '${source}': HTTP ${resp.status}`);
     }
@@ -175,17 +183,78 @@ function deriveBaseUrl(config: ServerConfig, spec: any, isSwagger2: boolean): st
   return url.replace(/\/$/, "");
 }
 
-/** Flatten one operation into a tool definition + an invocation plan. */
-function buildOperation(
+const hasKeys = (o?: Record<string, unknown>) => !!o && Object.keys(o).length > 0;
+
+/** True when calls made through this server carry the operator's secrets or forced arguments. */
+function carriesCredentials(config: ServerConfig): boolean {
+  return (
+    hasKeys(config.credentials) ||
+    hasKeys(config.inject_args) ||
+    Object.values(config.tools ?? {}).some((t) => hasKeys(t?.inject_args)) ||
+    Boolean(config.auth_scheme) ||
+    (config.auth !== undefined && config.auth !== "none")
+  );
+}
+
+/** The host (and non-default port) the spec itself declares for its API, or undefined when it names none. */
+function specDeclaredHost(spec: any, isSwagger2: boolean): string | undefined {
+  try {
+    if (isSwagger2) return typeof spec.host === "string" && spec.host ? new URL(`https://${spec.host}`).host : undefined;
+    const server = spec.servers?.[0];
+    if (typeof server?.url !== "string") return undefined;
+    const vars = server.variables ?? {};
+    const url = server.url.replace(/\{([^}]+)\}/g, (_m: string, name: string) => vars[name]?.default ?? `{${name}}`);
+    return /^https?:\/\//i.test(url) ? new URL(url).host : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * A spec is attacker-influenced input. When the server carries credentials or inject_args, the host
+ * they are sent to must be the operator's, not the spec's: `base_url` is required, and a spec whose own
+ * `servers[0]` (or Swagger `host`) names a different host is refused rather than silently ignored,
+ * because a mismatch means a stale or hostile spec.
+ */
+function assertCredentialHost(config: ServerConfig, spec: any, isSwagger2: boolean): void {
+  if (!carriesCredentials(config)) return;
+  if (!config.base_url) {
+    throw new Error(
+      `server '${config.id}': it carries credentials or inject_args, so base_url must be set explicitly; ` +
+        `the host the spec declares is not trusted with them`,
+    );
+  }
+  let baseHost: string;
+  try {
+    baseHost = new URL(config.base_url).host;
+  } catch {
+    throw new Error(`server '${config.id}': base_url '${config.base_url}' is not a valid absolute URL`);
+  }
+  const declared = specDeclaredHost(spec, isSwagger2);
+  if (declared && declared.toLowerCase() !== baseHost.toLowerCase()) {
+    throw new Error(
+      `server '${config.id}': the spec declares host '${declared}' but base_url is host '${baseHost}'; ` +
+        `refusing to send credentials until the two agree (use a trusted copy of the spec or fix base_url)`,
+    );
+  }
+}
+
+/**
+ * Flatten one operation into a tool definition + an invocation plan. `toolNameOverride` lets a caller that
+ * owns naming (the connector importers, which must keep `<toolkit>__<action>` within 64 characters) supply
+ * the final name; it is used as given and still recorded in `takenToolNames`.
+ */
+export function buildOperation(
   rawPath: string,
   method: string,
   op: any,
   pathLevelParams: any[],
   deref: (n: unknown) => any,
   takenToolNames: Set<string>,
+  toolNameOverride?: string,
 ): { tool: Tool; plan: GeneratedOp } {
   const candidate = op["x-mcp-tool-name"] ?? op.operationId ?? `${method}_${sanitizeName(rawPath)}`;
-  const toolName = uniqueKey(sanitizeName(String(candidate)), takenToolNames);
+  const toolName = toolNameOverride ?? uniqueKey(sanitizeName(String(candidate)), takenToolNames);
   takenToolNames.add(toolName);
 
   const properties: Record<string, any> = {};
@@ -292,6 +361,7 @@ async function invokeOperation(
   op: GeneratedOp,
   args: Record<string, unknown>,
   authHeaders: Record<string, string>,
+  network: NetworkSource,
 ): Promise<CallToolResult> {
   let path = op.pathTemplate;
   const queryPairs: [string, string][] = [];
@@ -307,6 +377,11 @@ async function invokeOperation(
     switch (meta.location) {
       case "path": {
         const serialized = Array.isArray(value) ? value.join(",") : String(value);
+        // `.` and `..` survive encodeURIComponent and are navigation to a URL parser: refuse before a request exists.
+        const bad = pathParamProblem(serialized);
+        if (bad) {
+          return { content: [{ type: "text", text: `refusing request: path parameter '${meta.originalName}': ${bad}` }], isError: true };
+        }
         path = path.replace(`{${meta.originalName}}`, encodeURIComponent(serialized));
         break;
       }
@@ -334,10 +409,17 @@ async function invokeOperation(
     }
   }
 
+  // Two values that only form a dot segment together (`{a}{b}`), or a template that carries one, are refused too.
+  const dot = dotSegmentProblem(path);
+  if (dot) return { content: [{ type: "text", text: `refusing request: path parameter substitution: ${dot}` }], isError: true };
   const url = new URL(baseUrl + path);
+  // Belt and braces behind the build-time path check: the final URL must stay on the base origin.
+  if (url.origin !== new URL(baseUrl).origin) {
+    return { content: [{ type: "text", text: "refusing request: the operation path changes the host of the base URL" }], isError: true };
+  }
   for (const [k, v] of queryPairs) url.searchParams.append(k, v);
 
-  const init: RequestInit = { method: op.method, headers };
+  let payload: string | undefined;
   const sendsBody = op.method !== "GET" && op.method !== "HEAD";
   let body: unknown;
   if (haveWholeBody) body = wholeBody;
@@ -347,17 +429,19 @@ async function invokeOperation(
     if (op.bodyContentType === "form" && body !== null && typeof body === "object") {
       const form = new URLSearchParams();
       for (const [k, v] of Object.entries(body as Record<string, unknown>)) form.append(k, String(v));
-      init.body = form.toString();
+      payload = form.toString();
       headers["content-type"] = "application/x-www-form-urlencoded";
     } else {
-      init.body = JSON.stringify(body);
+      payload = JSON.stringify(body);
       headers["content-type"] = "application/json";
     }
   }
 
-  let resp: Response;
+  let resp: Awaited<ReturnType<typeof guardedFetch>>;
   try {
-    resp = await fetch(url, init);
+    // Every header except accept/content-type may carry a secret (auth headers, operation header params).
+    const sensitive = Object.keys(headers).filter((h) => h !== "accept" && h !== "content-type");
+    resp = await guardedFetch(url, { method: op.method, headers, body: payload, credentialHeaders: sensitive }, network);
   } catch (err) {
     return {
       content: [{ type: "text", text: `request to ${op.method} ${url.pathname} failed: ${(err as Error).message}` }],
@@ -383,21 +467,24 @@ async function invokeOperation(
  *
  * @param resolveHeaders called per tool-call to produce auth headers (e.g.
  *   `{ Authorization: "Bearer …" }`) — async so OAuth tokens can refresh.
+ * @param network the live `settings.network` (or a thunk returning it) for the SSRF guard.
  */
 export async function buildOpenApiServer(
   config: ServerConfig,
   resolveHeaders: () => Promise<Record<string, string>>,
+  network?: NetworkSource,
 ): Promise<OpenApiServer> {
   if (!config.openapi) {
     throw new Error(`server '${config.id}': source 'app2mcp' requires an 'openapi' spec path or URL`);
   }
 
-  const spec = await loadSpec(config.openapi);
+  const spec = await loadSpec(config.openapi, network);
   const isSwagger2 = typeof spec.swagger === "string" && spec.swagger.startsWith("2");
   if (!isSwagger2 && !spec.openapi) {
     throw new Error(`server '${config.id}': '${config.openapi}' is neither OpenAPI 3.x nor Swagger 2.0`);
   }
 
+  assertCredentialHost(config, spec, isSwagger2);
   const baseUrl = deriveBaseUrl(config, spec, isSwagger2);
   const deref = makeDeref(spec);
 
@@ -410,6 +497,12 @@ export async function buildOpenApiServer(
   const paths: Record<string, any> = spec.paths ?? {};
   for (const [rawPath, pathItem] of Object.entries(paths)) {
     if (!pathItem || typeof pathItem !== "object") continue;
+    // A path key is appended to the base URL. One that does not start with "/" ("@evil.example/x",
+    // ".evil.example/x", ":99/x") would rewrite the host of the final URL, so it is never mounted.
+    if (!rawPath.startsWith("/")) {
+      warnings.push(`path '${rawPath}': does not start with '/', skipped (it could change the request host)`);
+      continue;
+    }
     const pathLevelParams: any[] = Array.isArray((pathItem as any).parameters) ? (pathItem as any).parameters : [];
     for (const method of HTTP_METHODS) {
       const op = (pathItem as any)[method];
@@ -439,8 +532,8 @@ export async function buildOpenApiServer(
     { capabilities: { tools: {} } },
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
-  server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToolResult> => {
+  server.setRequestHandler("tools/list", async () => ({ tools }));
+  server.setRequestHandler("tools/call", async (request): Promise<CallToolResult> => {
     const plan = plans.get(request.params.name);
     if (!plan) {
       return { content: [{ type: "text", text: `unknown tool '${request.params.name}'` }], isError: true };
@@ -453,7 +546,7 @@ export async function buildOpenApiServer(
       // Fail closed: a missing/expired credential must not silently send an unauthenticated call.
       return { content: [{ type: "text", text: `credential error: ${(err as Error).message}` }], isError: true };
     }
-    return invokeOperation(baseUrl, plan, args, authHeaders);
+    return invokeOperation(baseUrl, plan, args, authHeaders, network);
   });
 
   return { server, scopeHints, toolCount: tools.length };

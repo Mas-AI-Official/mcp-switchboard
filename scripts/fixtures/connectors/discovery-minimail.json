@@ -1,0 +1,357 @@
+{
+  "kind": "discovery#restDescription",
+  "discoveryVersion": "v1",
+  "id": "minimail:v1",
+  "name": "minimail",
+  "version": "v1",
+  "revision": "20261002",
+  "title": "Mini Mail API (fixture, shaped like Gmail API v1)",
+  "rootUrl": "https://minimail.fixture.test/",
+  "servicePath": "",
+  "baseUrl": "https://minimail.fixture.test/",
+  "basePath": "",
+  "parameters": {
+    "fields": {
+      "type": "string",
+      "location": "query",
+      "description": "Selector specifying which fields to include in a partial response."
+    },
+    "alt": {
+      "type": "string",
+      "location": "query",
+      "enum": [
+        "json",
+        "media",
+        "proto"
+      ],
+      "default": "json",
+      "description": "Data format for response."
+    },
+    "key": {
+      "type": "string",
+      "location": "query",
+      "description": "API key."
+    },
+    "access_token": {
+      "type": "string",
+      "location": "query",
+      "description": "OAuth access token."
+    },
+    "uploadType": {
+      "type": "string",
+      "location": "query",
+      "description": "Legacy upload protocol for media."
+    }
+  },
+  "schemas": {
+    "Message": {
+      "id": "Message",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "readOnly": true
+        },
+        "raw": {
+          "type": "string",
+          "format": "byte",
+          "annotations": {
+            "required": [
+              "minimail.users.messages.send"
+            ]
+          },
+          "description": "The entire email in RFC 2822 format, base64url."
+        },
+        "labelIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "payload": {
+          "$ref": "MessagePart"
+        }
+      }
+    },
+    "MessagePart": {
+      "id": "MessagePart",
+      "type": "object",
+      "properties": {
+        "partId": {
+          "type": "string"
+        },
+        "parts": {
+          "type": "array",
+          "items": {
+            "$ref": "MessagePart"
+          }
+        }
+      }
+    },
+    "Draft": {
+      "id": "Draft",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "message": {
+          "$ref": "Message"
+        }
+      }
+    },
+    "Profile": {
+      "id": "Profile",
+      "type": "object",
+      "properties": {
+        "emailAddress": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "resources": {
+    "users": {
+      "methods": {
+        "getProfile": {
+          "id": "minimail.users.getProfile",
+          "path": "minimail/v1/users/{userId}/profile",
+          "flatPath": "minimail/v1/users/{userId}/profile",
+          "httpMethod": "GET",
+          "description": "Gets the current user's profile.",
+          "parameterOrder": [
+            "userId"
+          ],
+          "response": {
+            "$ref": "Profile"
+          },
+          "scopes": [
+            "https://www.googleapis.com/auth/minimail.readonly"
+          ],
+          "parameters": {
+            "userId": {
+              "type": "string",
+              "location": "path",
+              "required": true,
+              "default": "me",
+              "description": "The user's email address. The special value me can be used."
+            }
+          }
+        }
+      },
+      "resources": {
+        "messages": {
+          "methods": {
+            "list": {
+              "id": "minimail.users.messages.list",
+              "path": "minimail/v1/users/{userId}/messages",
+              "flatPath": "minimail/v1/users/{userId}/messages",
+              "httpMethod": "GET",
+              "description": "Lists the messages in the user's mailbox.",
+              "parameterOrder": [
+                "userId"
+              ],
+              "scopes": [
+                "https://www.googleapis.com/auth/minimail.readonly"
+              ],
+              "parameters": {
+                "userId": {
+                  "type": "string",
+                  "location": "path",
+                  "required": true,
+                  "default": "me"
+                },
+                "q": {
+                  "type": "string",
+                  "location": "query",
+                  "description": "Only return messages matching the specified query."
+                },
+                "labelIds": {
+                  "type": "string",
+                  "location": "query",
+                  "repeated": true
+                },
+                "maxResults": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "location": "query",
+                  "default": "100"
+                }
+              }
+            },
+            "get": {
+              "id": "minimail.users.messages.get",
+              "path": "minimail/v1/users/{userId}/messages/{id}",
+              "flatPath": "minimail/v1/users/{userId}/messages/{id}",
+              "httpMethod": "GET",
+              "description": "Gets the specified message.",
+              "parameterOrder": [
+                "userId",
+                "id"
+              ],
+              "response": {
+                "$ref": "Message"
+              },
+              "scopes": [
+                "https://www.googleapis.com/auth/minimail.readonly"
+              ],
+              "parameters": {
+                "userId": {
+                  "type": "string",
+                  "location": "path",
+                  "required": true,
+                  "default": "me"
+                },
+                "id": {
+                  "type": "string",
+                  "location": "path",
+                  "required": true
+                },
+                "format": {
+                  "type": "string",
+                  "location": "query",
+                  "enum": [
+                    "full",
+                    "metadata",
+                    "minimal",
+                    "raw"
+                  ]
+                }
+              }
+            },
+            "send": {
+              "id": "minimail.users.messages.send",
+              "path": "minimail/v1/users/{userId}/messages/send",
+              "flatPath": "minimail/v1/users/{userId}/messages/send",
+              "httpMethod": "POST",
+              "description": "Sends the specified message to the recipients in the To, Cc, and Bcc headers.",
+              "parameterOrder": [
+                "userId"
+              ],
+              "request": {
+                "$ref": "Message"
+              },
+              "response": {
+                "$ref": "Message"
+              },
+              "scopes": [
+                "https://www.googleapis.com/auth/minimail.send"
+              ],
+              "parameters": {
+                "userId": {
+                  "type": "string",
+                  "location": "path",
+                  "required": true,
+                  "default": "me"
+                }
+              }
+            },
+            "trash": {
+              "id": "minimail.users.messages.trash",
+              "path": "minimail/v1/users/{userId}/messages/{id}/trash",
+              "flatPath": "minimail/v1/users/{userId}/messages/{id}/trash",
+              "httpMethod": "POST",
+              "description": "Moves the specified message to the trash.",
+              "parameterOrder": [
+                "userId",
+                "id"
+              ],
+              "scopes": [
+                "https://www.googleapis.com/auth/minimail.modify"
+              ],
+              "parameters": {
+                "userId": {
+                  "type": "string",
+                  "location": "path",
+                  "required": true,
+                  "default": "me"
+                },
+                "id": {
+                  "type": "string",
+                  "location": "path",
+                  "required": true
+                }
+              }
+            }
+          }
+        },
+        "drafts": {
+          "methods": {
+            "create": {
+              "id": "minimail.users.drafts.create",
+              "path": "minimail/v1/users/{userId}/drafts",
+              "flatPath": "minimail/v1/users/{userId}/drafts",
+              "httpMethod": "POST",
+              "description": "Creates a new draft.",
+              "parameterOrder": [
+                "userId"
+              ],
+              "request": {
+                "$ref": "Draft"
+              },
+              "response": {
+                "$ref": "Draft"
+              },
+              "scopes": [
+                "https://www.googleapis.com/auth/minimail.compose"
+              ],
+              "parameters": {
+                "userId": {
+                  "type": "string",
+                  "location": "path",
+                  "required": true,
+                  "default": "me"
+                }
+              }
+            },
+            "send": {
+              "id": "minimail.users.drafts.send",
+              "path": "minimail/v1/users/{userId}/drafts/send",
+              "flatPath": "minimail/v1/users/{userId}/drafts/send",
+              "httpMethod": "POST",
+              "description": "Sends the specified existing draft.",
+              "parameterOrder": [
+                "userId"
+              ],
+              "request": {
+                "$ref": "Draft"
+              },
+              "scopes": [
+                "https://www.googleapis.com/auth/minimail.compose"
+              ],
+              "parameters": {
+                "userId": {
+                  "type": "string",
+                  "location": "path",
+                  "required": true,
+                  "default": "me"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "methods": {
+    "topicGet": {
+      "id": "minimail.topicGet",
+      "path": "minimail/v1/{+name}",
+      "flatPath": "minimail/v1/{name}",
+      "httpMethod": "GET",
+      "description": "A reserved expansion path: {+name} keeps its slashes.",
+      "parameterOrder": [
+        "name"
+      ],
+      "scopes": [],
+      "parameters": {
+        "name": {
+          "type": "string",
+          "location": "path",
+          "required": true,
+          "pattern": "^projects/[^/]+/topics/[^/]+$"
+        }
+      }
+    }
+  }
+}

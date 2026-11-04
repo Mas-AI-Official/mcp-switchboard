@@ -1,0 +1,79 @@
+{
+  "$schema": "../schemas/provider.schema.json",
+  "slug": "slack",
+  "name": "Slack",
+  "categories": ["communication"],
+  "api_hosts": ["slack.com", "*.slack.com"],
+  "docs_url": "https://docs.slack.dev/authentication/installing-with-oauth",
+  "owner_setup": {
+    "console_url": "https://api.slack.com/apps",
+    "steps": [
+      "Create a Slack app for your workspace (api.slack.com/apps, Create New App)",
+      "Under OAuth and Permissions add the bot scopes the agents need (for example channels:read and chat:write) and install the app to the workspace",
+      "Copy the Bot User OAuth Token (it starts with xoxb-)",
+      "Connect with it: switchboard connect slack --token-stdin  (paste the token, or pipe it in)",
+      "Browser OAuth instead needs an https redirect URL (see the note below): register a client with switchboard authconfig add slack ... --redirect-uri https://your-tunnel.example/oauth/callback, then switchboard connect slack --auth oauth2"
+    ],
+    "redirect_uris": ["https://YOUR-HTTPS-TUNNEL/oauth/callback"],
+    "notes": [
+      "Slack states that the redirect_uri must use HTTPS and gives no loopback exception (docs: installing with OAuth), so the OAuth flow is refused for a plain http loopback callback. The bot token above avoids the problem.",
+      "Slack sends the app credentials as form fields and the docs do not mention PKCE; scopes are comma separated.",
+      "Token rotation (refresh tokens that expire) exists for apps with granular permissions and is optional; the engine refreshes when a refresh token is present.",
+      "Slack reports a failed token exchange as HTTP 200 with ok:false; the engine reads the body."
+    ]
+  },
+  "identity_probe": {
+    "method": "POST",
+    "url": "https://slack.com/api/auth.test",
+    "ok_field": "ok",
+    "id_path": "user_id",
+    "name_path": "team"
+  },
+  "auth": [
+    {
+      "id": "bot_token",
+      "mode": "bearer",
+      "label": "Bot token (xoxb-)",
+      "default": true,
+      "inject": { "in": "header", "name": "Authorization", "template": "Bearer {token}" },
+      "fields": {
+        "auth_config_creation": [],
+        "connected_account_initiation": [{ "name": "token", "label": "Bot User OAuth Token", "required": true, "secret": true }]
+      }
+    },
+    {
+      "id": "oauth2",
+      "mode": "oauth2",
+      "label": "OAuth v2 (needs an https redirect)",
+      "oauth2": {
+        "authorize_url": "https://slack.com/oauth/v2/authorize",
+        "token_url": "https://slack.com/api/oauth.v2.access",
+        "revoke": { "url": "https://slack.com/api/auth.revoke", "auth": "bearer", "token_param": null },
+        "pkce": "supported",
+        "client_auth": "body",
+        "client_secret_at_exchange": "without_pkce",
+        "scope_separator": ",",
+        "default_scopes": ["channels:read", "chat:write"],
+        "scope_catalog": [
+          { "scope": "channels:read", "description": "View basic information about public channels" },
+          { "scope": "channels:history", "description": "View messages in public channels" },
+          { "scope": "chat:write", "description": "Send messages as the app" },
+          { "scope": "files:write", "description": "Upload and edit files" },
+          { "scope": "users:read", "description": "View people in the workspace" }
+        ],
+        "redirect": "https",
+        "accept_json": true,
+        "token_shape": "slack",
+        "refresh": { "kind": "refresh_token", "rotates": true }
+      },
+      "inject": { "in": "header", "name": "Authorization", "template": "Bearer {token}" },
+      "fields": {
+        "auth_config_creation": [
+          { "name": "client_id", "label": "Client ID", "required": true, "secret": false },
+          { "name": "client_secret", "label": "Client secret", "required": true, "secret": true }
+        ],
+        "connected_account_initiation": []
+      }
+    }
+  ]
+}

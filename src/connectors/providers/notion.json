@@ -1,0 +1,72 @@
+{
+  "$schema": "../schemas/provider.schema.json",
+  "slug": "notion",
+  "name": "Notion",
+  "categories": ["productivity"],
+  "api_hosts": ["api.notion.com"],
+  "docs_url": "https://developers.notion.com/docs/authorization",
+  "api_version_header": { "name": "Notion-Version", "value": "2026-03-11" },
+  "owner_setup": {
+    "console_url": "https://www.notion.so/profile/integrations",
+    "steps": [
+      "Create an internal integration in the Notion developer portal and copy its token from the Configuration tab",
+      "Share each page or database the agents need with the integration (Notion refuses calls to anything not shared)",
+      "Connect: switchboard connect notion --token-stdin",
+      "Public integration (OAuth) instead: create a public integration, register its client with switchboard authconfig add notion ..., then switchboard connect notion --auth oauth2"
+    ],
+    "redirect_uris": ["{loopback_redirect}"],
+    "notes": [
+      "The Notion-Version value is the example the docs give (2026-03-11); every API call carries the header.",
+      "Notion sends client credentials with HTTP Basic, requires owner=user on the authorize URL, and its docs do not mention PKCE.",
+      "Notion issues refresh tokens and returns a new one with each refresh; the engine persists the newest before using the new access token.",
+      "UNVERIFIED: the docs do not state redirect URI rules for http loopback callbacks. The integration page URL above was not fetched when this file was written."
+    ]
+  },
+  "identity_probe": {
+    "method": "GET",
+    "url": "https://api.notion.com/v1/users/me",
+    "id_path": "id",
+    "name_path": "name",
+    "avatar_path": "avatar_url"
+  },
+  "auth": [
+    {
+      "id": "integration_token",
+      "mode": "bearer",
+      "label": "Internal integration token",
+      "default": true,
+      "inject": { "in": "header", "name": "Authorization", "template": "Bearer {token}" },
+      "fields": {
+        "auth_config_creation": [],
+        "connected_account_initiation": [{ "name": "token", "label": "Integration token", "required": true, "secret": true }]
+      }
+    },
+    {
+      "id": "oauth2",
+      "mode": "oauth2",
+      "label": "Public integration (OAuth)",
+      "oauth2": {
+        "authorize_url": "https://api.notion.com/v1/oauth/authorize",
+        "token_url": "https://api.notion.com/v1/oauth/token",
+        "pkce": "unsupported",
+        "client_auth": "basic",
+        "client_secret_at_exchange": "always",
+        "scope_separator": null,
+        "default_scopes": [],
+        "scope_catalog": [],
+        "extra_auth_params": { "owner": "user" },
+        "redirect": "loopback",
+        "accept_json": true,
+        "refresh": { "kind": "refresh_token", "rotates": true }
+      },
+      "inject": { "in": "header", "name": "Authorization", "template": "Bearer {token}" },
+      "fields": {
+        "auth_config_creation": [
+          { "name": "client_id", "label": "OAuth client ID", "required": true, "secret": false },
+          { "name": "client_secret", "label": "OAuth client secret", "required": true, "secret": true }
+        ],
+        "connected_account_initiation": []
+      }
+    }
+  ]
+}

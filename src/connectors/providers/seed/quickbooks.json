@@ -1,0 +1,96 @@
+{
+  "$schema": "../../schemas/provider.schema.json",
+  "slug": "quickbooks",
+  "name": "Quickbooks Online",
+  "categories": [
+    "uncategorized"
+  ],
+  "api_hosts": [
+    "quickbooks.api.intuit.com"
+  ],
+  "docs_url": "https://github.com/activepieces/activepieces/tree/6f4be340d7c4bef9fb6ff874ca72224e4933d3d2/packages/pieces/community/quickbooks/src",
+  "owner_setup": {
+    "console_url": "https://appcenter.intuit.com/",
+    "steps": [
+      "Unverified seed: this definition was derived from another project's published auth settings and has not been tested against the provider. Read the provider's own developer documentation first.",
+      "Create an OAuth app in the provider's developer console and register the redirect URI below (client credentials flows need no redirect).",
+      "Store the client id and secret: switchboard vault set quickbooks_client_id and switchboard vault set quickbooks_client_secret",
+      "Register them: switchboard authconfig add quickbooks --client-id-ref quickbooks_client_id --client-secret-ref quickbooks_client_secret",
+      "Connect: switchboard connect quickbooks --account <label>"
+    ],
+    "redirect_uris": [
+      "{loopback_redirect}"
+    ],
+    "notes": [
+      "SEED, unverified. Facts (URLs, scope names, field names, a product name) were read from the Activepieces community piece 'quickbooks' at commit 6f4be340d7c4 (MIT; see NOTICE). Nothing here was tested against the provider and it never counts as working.",
+      "ASSUMED, not stated by the source: client authentication in the request body; a space between scopes; an http loopback redirect is accepted; refresh tokens that do not rotate; the credential sent as Authorization: Bearer. UNVERIFIED.",
+      "api_hosts are candidates harvested from request URL settings in the piece source. Review them before relying on them: they decide where a credential may be sent."
+    ]
+  },
+  "auth": [
+    {
+      "id": "oauth2",
+      "mode": "oauth2",
+      "label": "OAuth 2.0",
+      "default": true,
+      "oauth2": {
+        "authorize_url": "https://appcenter.intuit.com/connect/oauth2",
+        "token_url": "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer",
+        "pkce": "unsupported",
+        "client_auth": "body",
+        "client_secret_at_exchange": "always",
+        "scope_separator": " ",
+        "default_scopes": [
+          "com.intuit.quickbooks.accounting"
+        ],
+        "scope_catalog": [],
+        "redirect": "loopback",
+        "accept_json": true,
+        "refresh": {
+          "kind": "refresh_token",
+          "rotates": false
+        }
+      },
+      "inject": {
+        "in": "header",
+        "name": "Authorization",
+        "template": "Bearer {token}"
+      },
+      "fields": {
+        "auth_config_creation": [
+          {
+            "name": "client_id",
+            "label": "OAuth client ID",
+            "required": true,
+            "secret": false
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth client secret",
+            "required": true,
+            "secret": true
+          }
+        ],
+        "connected_account_initiation": [
+          {
+            "name": "company_id",
+            "required": true,
+            "secret": false
+          }
+        ]
+      }
+    }
+  ],
+  "provenance": {
+    "derived_from": [
+      "activepieces/activepieces@6f4be340d7c4bef9fb6ff874ca72224e4933d3d2 packages/pieces/community/quickbooks/src"
+    ],
+    "license": "MIT",
+    "attribution": "Copyright (c) 2020-2024 Activepieces Inc. (MIT Expat). Facts only: URLs, scope names, field names. See NOTICE."
+  },
+  "source": {
+    "activepieces_commit": "6f4be340d7c4bef9fb6ff874ca72224e4933d3d2",
+    "piece": "quickbooks"
+  },
+  "verification": "unverified_seed"
+}

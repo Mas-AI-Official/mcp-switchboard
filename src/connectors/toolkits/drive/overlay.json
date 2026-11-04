@@ -1,0 +1,67 @@
+{
+  "toolkit": "drive",
+  "provider": "google",
+  "source": {
+    "kind": "discovery",
+    "url": "https://www.googleapis.com/discovery/v1/apis/drive/v3/rest",
+    "note": "Google Drive API v3 Discovery document. Fetched by `toolkits sync`, never committed."
+  },
+  "description_trim": 300,
+  "rename": {
+    "files_list": "list_files",
+    "files_get": "get_file",
+    "files_create": "create_file",
+    "files_update": "update_file",
+    "files_copy": "copy_file",
+    "files_export": "export_file",
+    "files_delete": "delete_file",
+    "permissions_create": "share_file",
+    "permissions_list": "list_permissions",
+    "permissions_delete": "unshare_file",
+    "about_get": "get_about"
+  },
+  "important": [
+    "files_list",
+    "files_get",
+    "files_create",
+    "files_update",
+    "files_copy",
+    "files_export",
+    "files_delete",
+    "permissions_create",
+    "permissions_list",
+    "permissions_delete",
+    "about_get",
+    "drives_list",
+    "comments_create",
+    "comments_list",
+    "revisions_list"
+  ],
+  "outward": [
+    "permissions_create",
+    "permissions_update",
+    "comments_create",
+    "replies_create"
+  ],
+  "tags": {
+    "files_list": [
+      "search",
+      "find",
+      "folder"
+    ],
+    "files_create": [
+      "upload",
+      "folder",
+      "new"
+    ],
+    "permissions_create": [
+      "share",
+      "permission",
+      "invite"
+    ]
+  },
+  "reconcile": {
+    "files_create": "The file may have been created. List files with a name query in the target folder before creating it again.",
+    "permissions_create": "The share may have been applied. List the file's permissions before sharing again."
+  }
+}

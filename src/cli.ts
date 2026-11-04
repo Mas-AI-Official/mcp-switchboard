@@ -5,15 +5,26 @@
  *   switchboard init                 scaffold a config + home dir
  *   switchboard serve                run the gateway (stdio and/or HTTP per config)
  *   switchboard dashboard            run only the HTTP endpoint + web console
+ *   switchboard dashboard login      sign in: the RUNNING gateway checks you are present, then hands out a one-time login code
  *   switchboard list                 mount everything and print the governed tool list
  *   switchboard doctor               check the environment + config
  *   switchboard catalog              list OAuth providers + connection status
- *   switchboard connect <provider>   authorize a provider via local loopback OAuth
- *   switchboard install <client>     wire MCP Switchboard into an MCP client's config
+ *   switchboard connect <provider>   connect an account (browser OAuth on the loopback callback, or a token / key)
+ *   switchboard accounts ...         list|show|default|disable|enable|revoke|probe connected accounts
+ *   switchboard authconfig ...       add|list|show|rm the OAuth apps your connects use (secrets are vault references)
+ *   switchboard providers ...        list|show the provider definitions
+ *   switchboard install <client>     register MCP Switchboard in an MCP client (bridge by default; preview, backup, probe, rollback)
+ *   switchboard uninstall <client>   remove only the Switchboard entry from an MCP client (backup first)
+ *   switchboard bridge --client <id> relay a client's stdio to the shared HTTP gateway as that client
+ *   switchboard client add|list|rotate|rm   register clients (who may call /mcp) and manage their keys (a running gateway checks you are present before it grants one)
+ *   switchboard link|unlink|links    let a client use a connector toolkit (and as which account): edits the same `clients:` config, the one access-control source
  *   switchboard local-llm            detect a local LLM server for the offline council
  *   switchboard local-llm wire       wire a detected local server into the council
  *   switchboard toolkits sync        rebuild the integration catalog from open indexes
  *   switchboard toolkits stats       print catalog counts
+ *   switchboard approvals list|show|approve|deny   decide the calls waiting for the owner (talks to the running gateway)
+ *   switchboard kill on|off|status   refuse every tool call, resource read and prompt get (kill switch)
+ *   switchboard audit verify [--all] walk the audit log's hash chain; report the first break with its seq
  *   switchboard vault set <name>     store a secret (value read from stdin)
  *   switchboard vault list|rm <name> manage secrets
  *
@@ -21,33 +32,53 @@
  */
 
 import { existsSync } from "node:fs";
-import { createServer } from "node:http";
+import { spawn } from "node:child_process";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import { loadConfig, writeConfig, starterConfig } from "./config.js";
-import type { SwitchboardConfig } from "./types.js";
+import type { ClientConfig, Risk, Scope, SwitchboardConfig } from "./types.js";
 import {
   applyProfileEnvOverride,
   describeProfile,
   withActiveProfile,
 } from "./profiles.js";
 import { createGateway } from "./gateway.js";
-import { startDashboard } from "./dashboard.js";
+import { startDashboard, type DashboardHandle } from "./dashboard.js";
+import { assertPortFree } from "./httpsec.js";
 import { runExpose, TUNNEL_KINDS, type TunnelKind } from "./expose.js";
+import { ensureDir } from "./atomicfile.js";
 import { Vault, HOME_DIR } from "./vault.js";
 import { OAuthStore } from "./oauth.js";
+import { registerConnectorCommands } from "./connectors/cli.js";
+import { registerKitCommands, runToolkitSync } from "./connectors/cli-kit.js";
+import { Connectors } from "./connectors/index.js";
+import { linkRows, planLink, planUnlink } from "./connectors/link.js";
 import { ApiKeyStore } from "./apikeys.js";
+import { ClientAdmin, ClientAdminError, NEW_CLIENT_DEFAULTS, type ClientSpec } from "./clientadmin.js";
+import { ClientConfigWatcher } from "./clientconfig.js";
+import { APPROVAL_ID_RE, APPROVALS_FILE, summarizeArgs, type ApprovalView } from "./approvals.js";
+import { ControlError, askGateway, controlRequest } from "./controlclient.js";
+import { readClientKey } from "./clientkeys.js";
+import { readJsonFileSync } from "./atomicfile.js";
+import { BAD_CLIENT_ID, isValidClientId, type Principal } from "./principal.js";
 import { inferScope } from "./policy.js";
+import { killFilePath, killStatus, setKillFile } from "./killswitch.js";
+import { verifyAudit } from "./audit.js";
 import { buildDoctorReport } from "./doctor.js";
 import {
   ingestCatalogVerbose,
   loadCatalog,
   writeCatalog,
   defaultCatalogPath,
+  discoverToolkits,
+  fetchAwesomeTaxonomy,
+  applyTaxonomyToSnapshot,
 } from "./catalog.js";
-import { SUPPORTED_CLIENTS, buildPlan, writePlan, type ClientId } from "./clients.js";
+import { SUPPORTED_CLIENTS, type ClientId } from "./clients.js";
+import { runInstall, runUninstall } from "./installer.js";
+import { DEFAULT_BRIDGE_URL, runBridge } from "./bridge.js";
 import {
   KNOWN_RUNTIMES,
   probeRuntime,
@@ -55,10 +86,13 @@ import {
   pickDefaultModel,
   buildLocalProvider,
   withLocalProvider,
+  withLocalAllowance,
   wireAdvice,
   installGuide,
 } from "./localllm.js";
 import { log, out } from "./logger.js";
+import { safeText } from "./safetext.js";
+import { guardedFetch, type NetworkSettings } from "./netguard.js";
 
 const DEFAULT_CONFIG = "switchboard.config.yaml";
 const program = new Command();
@@ -84,6 +118,43 @@ function bootConfig(path: string): SwitchboardConfig {
   return config;
 }
 
+/**
+ * The `settings.network` of the config on disk, or undefined when there is no readable config. For
+ * commands that make outbound calls (catalog sync, local-llm probes) but must not require a valid config.
+ */
+function networkFromConfig(): NetworkSettings | undefined {
+  try {
+    return loadConfig(configPath()).settings?.network;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Start the HTTP listener or stop the whole process. A busy port used to be reported as success
+ * (the listen error was swallowed), leaving a second instance that looked healthy beside a stranger.
+ * Now it logs the reason, tears the gateway down so no upstream child is orphaned, and exits non-zero.
+ */
+async function startHttpOrExit(gateway: Awaited<ReturnType<typeof createGateway>>, cfg: SwitchboardConfig, path: string): Promise<DashboardHandle> {
+  try {
+    return await startDashboard(gateway, cfg, path);
+  } catch (err) {
+    log.error(err instanceof Error ? err.message : String(err));
+    await gateway.shutdown().catch(() => {});
+    process.exit(1);
+  }
+}
+
+/** Check the HTTP port BEFORE mounting upstream servers, so a doomed start does not spawn them at all. */
+async function requireFreeHttpPort(cfg: SwitchboardConfig): Promise<void> {
+  try {
+    await assertPortFree(cfg.gateway.http.host, cfg.gateway.http.port);
+  } catch (err) {
+    log.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  }
+}
+
 program
   .command("init")
   .description("create a starter config and home directory")
@@ -93,6 +164,7 @@ program
       log.warn(`config already exists at ${path} — leaving it untouched`);
       return;
     }
+    ensureDir(HOME_DIR);
     writeConfig(path, starterConfig());
     log.ok(`wrote ${path}`);
     out(`Home: ${HOME_DIR}`);
@@ -102,18 +174,58 @@ program
 program
   .command("serve")
   .description("run the gateway (transports come from config)")
-  .action(async () => {
+  .option("--client <id>", "serve this registered client on the stdio transport (needs the client's key, the same one `bridge` reads: a client whose keys were revoked is not served)")
+  .action(async (opts: { client?: string }) => {
     const path = configPath();
     const cfg = bootConfig(path);
+    const wantsHttp = cfg.gateway.transport.includes("http");
+    let wantsStdio = cfg.gateway.transport.includes("stdio");
+
+    // Who the stdio transport speaks to (design 3.1 and 3.15). The launching process names the client, and the
+    // client's key must still be valid: an entry whose keys were revoked (`client rm`) or never issued is not served,
+    // so revoking a client revokes it on stdio too. Recorded as via "stdio". Clients configured and no --client:
+    // stdio is not served unidentified.
+    let stdioPrincipal: Principal | undefined;
+    if (opts.client !== undefined) {
+      if (!isValidClientId(opts.client)) {
+        log.error(BAD_CLIENT_ID);
+        process.exit(1);
+      }
+      if (!Object.prototype.hasOwnProperty.call(cfg.clients ?? {}, opts.client)) {
+        log.error(`client '${opts.client}' is not configured: run \`switchboard client add ${opts.client}\` first`);
+        process.exit(1);
+      }
+      let keyOk = false;
+      try {
+        const stored = readClientKey(opts.client);
+        keyOk = stored !== null && new ApiKeyStore().inspect(stored)?.client === opts.client;
+      } catch {
+        keyOk = false; // unreadable or foreign key file: not a working key
+      }
+      if (!keyOk) {
+        log.error(`client '${opts.client}' has no working key, so stdio does not serve it (a key is revoked by \`client rm\`, replaced by \`client rotate\`): issue one with \`switchboard client add ${opts.client}\``);
+        process.exit(1);
+      }
+      stdioPrincipal = { id: opts.client, client: opts.client, via: "stdio" };
+    } else if (wantsStdio && Object.keys(cfg.clients ?? {}).length > 0) {
+      if (!wantsHttp) {
+        log.error("clients are configured, so the stdio transport needs --client <id> (or use `switchboard bridge --client <id>` against a running gateway)");
+        process.exit(1);
+      }
+      log.warn("clients are configured: the stdio transport is not served without --client <id>; the HTTP endpoint continues");
+      wantsStdio = false;
+    }
+
+    if (!wantsHttp) {
+      log.warn("the HTTP listener is off (gateway.transport has no http): calls that need approval cannot be approved, because approvals are decided on the dashboard or with `switchboard approvals` against the running listener, and `switchboard kill off`, `switchboard dashboard login` and the client grants of `switchboard client` and `install` cannot reach this gateway for the same reason (`kill on` still works)");
+    }
+    if (wantsHttp) await requireFreeHttpPort(cfg);
     const gateway = await createGateway(cfg);
 
-    const wantsHttp = cfg.gateway.transport.includes("http");
-    const wantsStdio = cfg.gateway.transport.includes("stdio");
-
-    if (wantsHttp) await startDashboard(gateway, cfg, path);
+    if (wantsHttp) await startHttpOrExit(gateway, cfg, path);
 
     if (wantsStdio) {
-      await gateway.serveStdio(); // resolves once connected; process stays alive on the transport
+      await gateway.serveStdio(stdioPrincipal); // resolves once connected; process stays alive on the transport
     } else if (!wantsHttp) {
       log.error("no transports enabled in config (gateway.transport) — nothing to do");
       process.exitCode = 1;
@@ -123,16 +235,57 @@ program
     // If only http, the express listener keeps the event loop alive.
   });
 
-program
+const dashboardCmd = program
   .command("dashboard")
   .description("run only the HTTP endpoint + web console")
   .action(async () => {
     const path = configPath();
     const cfg = bootConfig(path);
+    await requireFreeHttpPort(cfg);
     const gateway = await createGateway(cfg);
-    const handle = await startDashboard(gateway, cfg, path);
-    out(`Open ${handle.url}`);
+    const handle = await startHttpOrExit(gateway, cfg, path);
+    out(`Open ${handle.url}  (sign in first: \`switchboard dashboard login\`)`);
   });
+
+/** Open a URL in the default browser without a shell (no quoting hazards for the `#login=` fragment). */
+function openInBrowser(url: string): void {
+  const [cmd, args]: [string, string[]] =
+    process.platform === "win32"
+      ? ["rundll32", ["url.dll,FileProtocolHandler", url]]
+      : process.platform === "darwin"
+        ? ["open", [url]]
+        : ["xdg-open", [url]];
+  const child = spawn(cmd, args, { stdio: "ignore", detached: true, windowsHide: true });
+  child.on("error", () => log.warn("could not open a browser; open the URL above by hand"));
+  child.unref();
+}
+
+dashboardCmd
+  .command("login")
+  .description("sign in to the dashboard: the running gateway checks you are present (Windows Hello, or a challenge at its own console), then a one-time login code opens it")
+  .option("--no-open", "print the login URL but do not open the browser")
+  .action(
+    approvalAction(async (opts: { open: boolean }) => {
+      const cfg = loadConfig(configPath());
+      out("asking the gateway to verify you are present (Windows Hello on this machine, or a challenge at the gateway's terminal)...");
+      let r;
+      try {
+        r = await controlCall("POST", "/login", 150_000);
+      } catch (err) {
+        if (err instanceof CliFail && /no gateway answered|no control key/.test(err.message)) {
+          throw new CliFail(`${err.message} The login code is minted inside the running gateway, after its own presence check, so there is nothing to sign in to until one runs: start it with \`switchboard dashboard\` or \`switchboard serve\`, then run this again.`);
+        }
+        throw err;
+      }
+      if (r.status !== 200 || typeof r.body.code !== "string") throw new CliFail(String(r.body.error ?? `the gateway answered ${r.status}`));
+      const url = `http://127.0.0.1:${cfg.gateway.http.port}/#login=${r.body.code}`;
+      log.ok(`login code minted (presence: ${String(r.body.presence)}); it works once and expires in ${String(r.body.expires_in)} seconds`);
+      out("");
+      out(`  ${url}`);
+      out("");
+      if (opts.open) openInBrowser(url);
+    }),
+  );
 
 program
   .command("expose")
@@ -155,16 +308,45 @@ program
       return;
     }
 
+    // A busy port is checked before any key is minted or upstream mounted (fail loudly, exit non-zero).
+    try {
+      await assertPortFree("127.0.0.1", port);
+    } catch (err) {
+      log.error(err instanceof Error ? err.message : String(err));
+      process.exitCode = 1;
+      return;
+    }
+
     // Refuse to expose without auth: ensure at least one key exists. Mint+print one if the
     // store is empty (or the operator asked for a fresh one); otherwise reuse what's there.
     const apiKeys = new ApiKeyStore();
     let issuedToken: string | null = null;
-    if (opts.newToken || apiKeys.count === 0) {
+    if (Object.keys(cfg.clients ?? {}).length > 0) {
+      // With clients configured an unbound key is refused on /mcp, so minting one would hand out a dead credential.
+      log.info("clients are configured: connect with a client key (`switchboard client add <id>`, or `switchboard client rotate <id> --print`)");
+    } else if (opts.newToken || apiKeys.count === 0) {
       issuedToken = apiKeys.issue("expose").token;
     }
 
     const gateway = await createGateway(cfg);
-    await runExpose(gateway, cfg, apiKeys, { tunnel, port, issuedToken });
+    // Pinned (design 3.15): this process has no control API to ask, so a client changed in the file waits for a restart.
+    const clientWatcher = new ClientConfigWatcher(cfg, configPath(), { pinned: true });
+    try {
+      await runExpose(gateway, cfg, apiKeys, {
+        tunnel,
+        port,
+        issuedToken,
+        clients: () => {
+          clientWatcher.sync();
+          return cfg.clients;
+        },
+      });
+    } catch (err) {
+      // A busy port or a tunnel that never came up: say why, stop the upstream children, exit non-zero.
+      log.error(err instanceof Error ? err.message : String(err));
+      await gateway.shutdown().catch(() => {});
+      process.exit(1);
+    }
   });
 
 program
@@ -176,8 +358,8 @@ program
     const tools = gateway.router.listTools();
     out(`\n${tools.length} tools exposed:\n`);
     for (const t of tools) {
-      const scope = inferScope(t.name.split("__").pop() ?? t.name);
-      out(`  ${t.name.padEnd(42)} [${scope}]  ${t.description?.split("\n")[0] ?? ""}`);
+      const scope = inferScope(t.name.split("__").pop() ?? t.name, t.annotations);
+      out(`  ${safeText(t.name, 42).padEnd(42)} [${scope}]  ${safeText(t.description?.split("\n")[0], 160)}`);
     }
     await gateway.shutdown();
   });
@@ -220,7 +402,8 @@ program
     }
 
     out("");
-    if (report.ok) log.ok("config looks healthy");
+    for (const w of report.warnings) log.warn(`WARNING: ${w}`);
+    if (report.ok) log.ok(report.warnings.length === 0 ? "config looks healthy" : `config is valid, but ${report.warnings.length} warning(s) above should be fixed`);
     else log.error(`${report.problems.length} issue(s) found (see above)`);
     process.exitCode = report.ok ? 0 : 1;
   });
@@ -246,17 +429,43 @@ const toolkitsCmd = program
   .description("manage the browsable integration catalog (the dashboard's toolkit grid)");
 
 toolkitsCmd
-  .command("sync")
-  .description("rebuild data/catalog.json from the open MCP Registry + APIs.guru indexes")
-  .action(async () => {
+  .command("sync [target]")
+  .description("no argument: rebuild data/catalog.json from the open MCP Registry + APIs.guru indexes. With a provider, a toolkit or `all`: fetch the provider's public spec through the SSRF guard and write the connector toolkit")
+  .option("--check", "with a target: fetch and compare the spec hash with the synced version, write nothing, exit 1 on drift")
+  .action(async (target: string | undefined, opts: { check?: boolean }) => {
+    if (target) {
+      await runToolkitSync(
+        {
+          vaultBackend: () => {
+            try {
+              return loadConfig(configPath()).vault.backend;
+            } catch {
+              return "encrypted-file";
+            }
+          },
+          network: () => networkFromConfig(),
+          configPath: () => configPath(),
+        },
+        target,
+        opts,
+      );
+      return;
+    }
     out("Syncing catalog from the MCP Registry and APIs.guru…");
-    const { snapshot, errors } = await ingestCatalogVerbose();
+    const { snapshot, errors, enrichment } = await ingestCatalogVerbose(networkFromConfig());
     snapshot.generated_at = new Date().toISOString();
     const path = defaultCatalogPath();
     writeCatalog(snapshot, path);
     log.ok(
       `wrote ${snapshot.counts.total} toolkits (${snapshot.counts.mcp_registry} MCP, ${snapshot.counts.apis_guru} OpenAPI) to ${path}`,
     );
+    if (enrichment.taxonomy_entries > 0) {
+      log.ok(
+        `awesome-mcp taxonomy: ${enrichment.taxonomy_entries} categorized repos → ${enrichment.reclassified} registry servers reclassified`,
+      );
+    } else {
+      log.warn("awesome-mcp taxonomy unavailable: categories fell back to the keyword heuristic");
+    }
     for (const e of errors) log.warn(`partial: ${e.source} failed — ${e.message}`);
   });
 
@@ -277,119 +486,178 @@ toolkitsCmd
     for (const cat of c.categories) out(`    ${cat.name.padEnd(22)} ${cat.count}`);
   });
 
-program
-  .command("connect <provider>")
-  .description("authorize an OAuth provider via the local loopback flow")
-  .action(async (provider: string) => {
-    const cfg = loadConfig(configPath());
-    const oauth = new OAuthStore(new Vault(cfg.vault.backend));
-    const { host, port } = cfg.gateway.http;
-    const redirectUri = `http://${host}:${port}/oauth/callback`;
-
-    let authorizeUrl: string;
+toolkitsCmd
+  .command("discover <query...>")
+  .description("live-search awesome-mcp-servers for MCP servers NOT in our snapshot (never persisted)")
+  .option("-n, --limit <n>", "max results", "20")
+  .action(async (query: string[], opts: { limit: string }) => {
+    const q = query.join(" ");
+    out(`Searching awesome-mcp-servers live for "${q}" (discovery only: nothing is written)…`);
+    let results;
     try {
-      ({ authorizeUrl } = oauth.beginAuth(provider, redirectUri));
+      results = await discoverToolkits(q, { limit: Number(opts.limit) || 20, network: networkFromConfig() });
     } catch (err) {
-      log.error(err instanceof Error ? err.message : String(err));
+      log.error(`discovery failed: ${err instanceof Error ? err.message : String(err)}`);
       process.exitCode = 1;
       return;
     }
-
-    // Spin up a one-shot loopback listener to catch the provider's redirect, complete the
-    // exchange, then shut down. Tokens are sealed by OAuthStore — nothing is printed.
-    await new Promise<void>((done) => {
-      const server = createServer(async (req, res) => {
-        const url = new URL(req.url ?? "/", `http://${host}:${port}`);
-        if (url.pathname !== "/oauth/callback") {
-          res.writeHead(404).end("not found");
-          return;
-        }
-        const state = url.searchParams.get("state") ?? "";
-        const code = url.searchParams.get("code") ?? "";
-        const error = url.searchParams.get("error") ?? "";
-        try {
-          if (error) throw new Error(`provider returned: ${error}`);
-          if (!state || !code) throw new Error("missing 'state' or 'code' in callback");
-          const token = await oauth.completeAuth(state, code);
-          res.writeHead(200, { "content-type": "text/html" }).end("<h1>Connected — you can close this tab.</h1>");
-          log.ok(`connected '${token.provider}'`);
-        } catch (err) {
-          res.writeHead(400, { "content-type": "text/html" }).end("<h1>Authorization failed.</h1>");
-          log.error(err instanceof Error ? err.message : String(err));
-          process.exitCode = 1;
-        } finally {
-          server.close(() => done());
-        }
-      });
-      server.on("error", (err) => {
-        const msg = (err as NodeJS.ErrnoException).code === "EADDRINUSE"
-          ? `port ${port} is busy — stop \`switchboard serve\` and retry, or use the dashboard's Connect button`
-          : err.message;
-        log.error(msg);
-        process.exitCode = 1;
-        done();
-      });
-      server.listen(port, host, () => {
-        out(`\nOpen this URL in your browser to authorize:\n\n  ${authorizeUrl}\n\nWaiting for the callback…`);
-      });
-    });
+    if (results.length === 0) {
+      out("no new servers found (all matches are already in the snapshot, or no match)");
+      return;
+    }
+    out(`\n${results.length} discovery result(s): vet before mounting, none are auto-installed:`);
+    for (const r of results) {
+      out(`  • ${safeText(r.name, 80)}  [${safeText(r.category, 40)}]`);
+      out(`    ${safeText(r.repository, 200)}`);
+      if (r.description) out(`    ${safeText(r.description, 300)}`);
+    }
   });
+
+toolkitsCmd
+  .command("recategorize")
+  .description("re-apply the awesome-mcp category taxonomy to the existing catalog (no full re-fetch)")
+  .action(async () => {
+    const path = defaultCatalogPath();
+    const c = loadCatalog(path);
+    if (c.counts.total === 0) {
+      out("catalog is empty: run `switchboard toolkits sync` first");
+      return;
+    }
+    out("Fetching the awesome-mcp-servers category taxonomy (categories only: no server lists)…");
+    let taxonomy: Map<string, string>;
+    try {
+      taxonomy = await fetchAwesomeTaxonomy(networkFromConfig());
+    } catch (err) {
+      log.error(`taxonomy fetch failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 1;
+      return;
+    }
+    if (taxonomy.size === 0) {
+      log.error("taxonomy fetch returned no categories: catalog left unchanged");
+      process.exitCode = 1;
+      return;
+    }
+    const { matched, changed } = applyTaxonomyToSnapshot(c, taxonomy);
+    c.generated_at = new Date().toISOString();
+    writeCatalog(c, path);
+    log.ok(
+      `awesome-mcp taxonomy: ${taxonomy.size} categorized repos → ${matched} catalog entries matched, ${changed} recategorized (${path})`,
+    );
+  });
+
+registerConnectorCommands(program, {
+  vaultBackend: () => {
+    try {
+      return loadConfig(configPath()).vault.backend;
+    } catch {
+      return "encrypted-file";
+    }
+  },
+  network: () => networkFromConfig(),
+  gatewayAddress: () => {
+    try {
+      const { host, port } = loadConfig(configPath()).gateway.http;
+      return { host, port };
+    } catch {
+      return { host: "127.0.0.1", port: 8088 };
+    }
+  },
+});
+
+registerKitCommands(program, toolkitsCmd, {
+  vaultBackend: () => {
+    try {
+      return loadConfig(configPath()).vault.backend;
+    } catch {
+      return "encrypted-file";
+    }
+  },
+  network: () => networkFromConfig(),
+  configPath: () => configPath(),
+});
+
+/** Shared body of `install` and `uninstall`: validate the flags, load the config, run, set the exit code. */
+async function installAction(
+  client: string,
+  opts: { mode?: string; scope?: string; global?: boolean; dir?: string; name: string; dshProfile: string; yes?: boolean; dryRun?: boolean; print?: boolean },
+  uninstall: boolean,
+): Promise<void> {
+  try {
+    if (!SUPPORTED_CLIENTS.includes(client as ClientId)) {
+      log.error(`unknown client '${client}'. Supported: ${SUPPORTED_CLIENTS.join(", ")}`);
+      process.exitCode = 1;
+      return;
+    }
+    const mode = opts.mode ?? "bridge";
+    if (mode !== "bridge" && mode !== "http") throw new Error("--mode must be bridge or http");
+    if (opts.scope !== undefined && opts.scope !== "user" && opts.scope !== "project") throw new Error("--scope must be user or project");
+    if (opts.global && opts.scope === "project") throw new Error("--global means --scope user; it conflicts with --scope project");
+    const scope: "user" | "project" = opts.scope === "project" ? "project" : "user";
+    const cfgPath = configPath();
+    const cfg = loadConfig(cfgPath);
+    const common = {
+      client: client as ClientId,
+      scope,
+      name: opts.name,
+      dir: resolve(opts.dir ?? process.cwd()),
+      dshProfile: opts.dshProfile,
+      yes: opts.yes === true,
+      dryRun: opts.dryRun === true || opts.print === true,
+      cfg,
+      cfgPath,
+    };
+    // import.meta.url is dist/cli.js at runtime: exactly what a bridge entry must run.
+    const result = uninstall ? await runUninstall(common) : await runInstall({ ...common, mode, nodePath: process.execPath, cliPath: fileURLToPath(import.meta.url) });
+    process.exitCode = result.exitCode;
+  } catch (err) {
+    log.error(err instanceof Error ? err.message : String(err));
+    process.exitCode = 1;
+  }
+}
 
 program
   .command("install <client>")
-  .description(`wire MCP Switchboard into an MCP client's config (${SUPPORTED_CLIENTS.join(", ")})`)
-  .option("--global", "write the client's user/global config instead of a project-local one")
-  .option("--dir <path>", "project directory for project-local configs (default: cwd)")
+  .description(`register MCP Switchboard in an MCP client: preview, back up, write, probe, roll back on failure (${SUPPORTED_CLIENTS.join(", ")})`)
+  .option("--mode <mode>", "bridge (default: the client starts `switchboard bridge`, which authenticates as that client) or http (the client dials the gateway URL)", "bridge")
+  .option("--scope <scope>", "user (default) or project (<dir>/.mcp.json, .cursor, .vscode, .codex, .gemini)")
+  .option("--yes", "do not ask for confirmation")
+  .option("--dry-run", "show the plan and change nothing (no file, no client, no command that writes)")
+  .option("--dsh-profile <name>", "dsh profile whose cordis.patch.yml is edited", "web")
+  .option("--dir <path>", "project directory for --scope project (default: cwd)")
   .option("--name <name>", "server name to register under", "switchboard")
-  .option("--print", "print the resulting config without writing it")
-  .action(
-    (
-      client: string,
-      opts: { global?: boolean; dir?: string; name: string; print?: boolean },
-    ) => {
-      if (!SUPPORTED_CLIENTS.includes(client as ClientId)) {
-        log.error(`unknown client '${client}' — supported: ${SUPPORTED_CLIENTS.join(", ")}`);
-        process.exitCode = 1;
-        return;
-      }
-      const cfgPath = configPath();
-      const cfg = loadConfig(cfgPath);
-      // import.meta.url is dist/cli.js at runtime — exactly what a stdio launcher must exec.
-      const cliPath = fileURLToPath(import.meta.url);
-      const plan = buildPlan(client as ClientId, {
-        name: opts.name,
-        endpoint: {
-          host: cfg.gateway.http.host,
-          port: cfg.gateway.http.port,
-          requireAuth: cfg.gateway.http.require_auth,
-        },
-        launcher: { command: process.execPath, cliPath, configPath: cfgPath },
-        global: opts.global,
-        baseDir: opts.dir ? resolve(opts.dir) : undefined,
-      });
+  .option("--global", "same as --scope user (kept for older scripts)")
+  .option("--print", "same as --dry-run (kept for older scripts)")
+  .action((client: string, opts) => installAction(client, opts, false));
 
-      if (opts.print) {
-        out(`\n# ${plan.target.label} — ${plan.target.path}\n`);
-        out(plan.content);
-        for (const note of plan.notes) out(`note: ${note}`);
-        return;
-      }
-      if (plan.existed && !plan.changed) {
-        log.ok(`${plan.target.label} already points at this MCP Switchboard (${plan.target.path}) — no change`);
-      } else {
-        writePlan(plan);
-        log.ok(`${plan.existed ? "updated" : "wrote"} ${plan.target.label} config → ${plan.target.path}`);
-      }
-      for (const note of plan.notes) out(`  → ${note}`);
-    },
-  );
+program
+  .command("uninstall <client>")
+  .description("remove only the MCP Switchboard entry from an MCP client (a backup is taken first); the Switchboard client and its key are kept")
+  .option("--scope <scope>", "user (default) or project", undefined)
+  .option("--yes", "do not ask for confirmation")
+  .option("--dry-run", "show what would be removed and change nothing")
+  .option("--dsh-profile <name>", "dsh profile whose cordis.patch.yml is edited", "web")
+  .option("--dir <path>", "project directory for --scope project (default: cwd)")
+  .option("--name <name>", "server name the entry is registered under", "switchboard")
+  .option("--global", "same as --scope user (kept for older scripts)")
+  .action((client: string, opts) => installAction(client, opts, true));
+
+program
+  .command("bridge")
+  .description("relay a client's stdio (JSON-RPC lines) to the shared HTTP gateway, authenticating as that client")
+  .requiredOption("--client <id>", "the registered client this bridge speaks for (its key is read from the client key store)")
+  .option("--url <url>", "the gateway's /mcp endpoint", DEFAULT_BRIDGE_URL)
+  .option("--key-file <path>", "read the bearer token from a plain-text file (used after SWITCHBOARD_KEY, before the key store)")
+  .action(async (opts: { client: string; url: string; keyFile?: string }) => {
+    // stdout is the JSON-RPC channel: runBridge writes nothing else there, and flushes it before returning.
+    process.exit(await runBridge({ clientId: opts.client, url: opts.url, keyFile: opts.keyFile }));
+  });
 
 const llmCmd = program
   .command("local-llm")
   .description("detect a local OpenAI-compatible LLM server (Ollama/LM Studio/llama.cpp/vLLM) for the offline council")
   .action(async () => {
     out("\nProbing localhost for OpenAI-compatible model servers…");
-    const results = await probeAll();
+    const results = await probeAll(undefined, undefined, networkFromConfig());
     const live = results.filter((r) => r.reachable);
     if (live.length === 0) {
       log.warn("no local model server reachable on the usual ports.");
@@ -400,8 +668,8 @@ const llmCmd = program
     out("");
     for (const r of live) {
       const n = r.models.length;
-      out(`  ${r.runtime.label.padEnd(26)} ${r.runtime.baseUrl}  (${n} model${n === 1 ? "" : "s"})`);
-      for (const m of r.models.slice(0, 8)) out(`      - ${m}`);
+      out(`  ${safeText(r.runtime.label, 26).padEnd(26)} ${safeText(r.runtime.baseUrl, 120)}  (${n} model${n === 1 ? "" : "s"})`);
+      for (const m of r.models.slice(0, 8)) out(`      - ${safeText(m, 80)}`);
       if (r.models.length > 8) out(`      … and ${r.models.length - 8} more`);
     }
     out("\nWire one into the council: `switchboard local-llm wire` (uses the first reachable server + a sensible model).");
@@ -426,11 +694,11 @@ llmCmd
         baseUrl = opts.baseUrl;
         if (!model) {
           const trimmed = opts.baseUrl.replace(/\/$/, "");
-          const probe = await probeRuntime({ id: "custom", label: "custom", baseUrl: trimmed, modelsUrl: `${trimmed}/models` });
+          const probe = await probeRuntime({ id: "custom", label: "custom", baseUrl: trimmed, modelsUrl: `${trimmed}/models` }, undefined, cfg.settings?.network);
           model = pickDefaultModel(probe.models);
         }
       } else {
-        const results = await probeAll();
+        const results = await probeAll(undefined, undefined, cfg.settings?.network);
         const live = results.filter((r) => r.reachable && r.models.length > 0);
         const chosen = opts.runtime ? live.find((r) => r.runtime.id === opts.runtime) : live[0];
         if (!chosen) {
@@ -455,7 +723,14 @@ llmCmd
 
       const provider = buildLocalProvider(baseUrl, model);
       const result = withLocalProvider(cfg, provider);
+      // The SSRF guard refuses loopback and LAN targets unless the exact host is allowlisted, so wire it too.
+      const allowance = await withLocalAllowance(result.config, baseUrl);
+      if (allowance.changed) {
+        result.config = allowance.config;
+        result.changed = true;
+      }
       const advice = wireAdvice(result, model);
+      if (allowance.host) advice.push(`added '${allowance.host}' to settings.network.allow_private (the outbound network guard refuses local hosts otherwise).`);
 
       if (opts.print) {
         out("\n# settings.council.providers.local\n");
@@ -472,6 +747,289 @@ llmCmd
       for (const line of advice) out(`  → ${line}`);
     },
   );
+
+/** Is the gateway on this config's port refusing calls? true or false from its own /healthz, null when nothing answers. */
+async function gatewayKillState(cfg: SwitchboardConfig | undefined): Promise<boolean | null> {
+  if (!cfg) return null;
+  try {
+    const res = await guardedFetch(`http://127.0.0.1:${cfg.gateway.http.port}/healthz`, { timeoutMs: 1500, allowLoopback: true });
+    const body = (await res.json()) as { service?: unknown; kill_switch?: unknown };
+    return body.service === "switchboard" ? body.kill_switch === true : null;
+  } catch {
+    return null;
+  }
+}
+
+program
+  .command("kill <action>")
+  .description("kill switch: refuse every tool call, resource read and prompt get until cleared (on | off | status). Turning it off needs the running gateway to verify you are present")
+  .action(
+    approvalAction(async (action: string) => {
+      if (action !== "on" && action !== "off" && action !== "status") {
+        log.error(`unknown action '${action}': use 'switchboard kill on', 'off' or 'status'`);
+        process.exitCode = 1;
+        return;
+      }
+      // The config is optional here: the file switch must work even when the config is missing or broken.
+      let cfg: SwitchboardConfig | undefined;
+      try {
+        cfg = loadConfig(configPath());
+      } catch {
+        cfg = undefined;
+      }
+      // This process is not the gateway: it looks at the file and the config only (passive), and asks the gateway what
+      // IT is doing, because a gateway that has seen the switch on keeps refusing even when the file is gone (design 3.15).
+      const report = async () => {
+        const st = killStatus(cfg, undefined, { passive: true });
+        const gw = await gatewayKillState(cfg);
+        const on = st.active || gw === true;
+        out(`kill switch: ${on ? "ON" : "OFF"}`);
+        out(`  file:   ${killFilePath()} (${st.file ? `present${st.since ? `, since ${st.since}` : ""}` : "absent"})`);
+        out(`  config: gateway.kill_switch is ${st.config ? "true" : cfg ? "not set" : "unknown (no readable config)"}`);
+        if (gw !== null) {
+          out(`  gateway: ${gw ? "refusing every call" : "answering calls"}${gw && !st.file && !st.config ? " (latched in its memory although the KILL file is gone: deleting the file is not a way to turn it off)" : ""}`);
+        }
+        return { ...st, active: on, gateway: gw };
+      };
+      const configStillHolds = () => {
+        log.error("the KILL file is cleared but gateway.kill_switch is still true in the config: set it to false and restart the gateway");
+        process.exitCode = 1;
+      };
+      if (action === "status") {
+        await report();
+        return;
+      }
+      if (action === "on") {
+        const wasOn = killStatus(cfg, undefined, { passive: true }).file;
+        // A running gateway writes the file AND latches the switch in its own memory in one step, so a delete of the
+        // file right afterwards cannot beat it. No gateway, or any failure to ask: the file alone still stops it.
+        let viaGateway = false;
+        if (cfg) {
+          try {
+            const g = await askGateway(cfg.gateway.http.port, "POST", "/kill/on", 10_000);
+            viaGateway = g !== null && g.status === 200;
+          } catch {
+            viaGateway = false;
+          }
+        }
+        if (!viaGateway) setKillFile(true);
+        log.warn(wasOn ? "kill switch was already on" : "kill switch ON: every tool call, resource read and prompt get is now refused");
+        out(
+          viaGateway
+            ? "the running gateway has latched it in its own memory too: deleting the KILL file does not turn it off. Clear it with 'switchboard kill off' (the gateway asks you to prove you are present)."
+            : "a running gateway sees the file on its next call and latches it in memory from then on; no restart needed. Clear it with 'switchboard kill off' (the gateway asks you to prove you are present).",
+        );
+        await report();
+        return;
+      }
+      // OFF re-opens every tool, so it is the one direction that needs the owner present. The CLI cannot show a trusted
+      // prompt itself (anything that can run this command could run a copy of it that skipped the prompt), so it asks the
+      // RUNNING gateway, which performs the presence check (Windows Hello, or a challenge at its own console) and clears
+      // the file and its own latch. With nothing to clear (no file, and no gateway refusing) there is nothing to protect,
+      // so that case needs no gateway.
+      const before = killStatus(cfg, undefined, { passive: true });
+      const gateway = await gatewayKillState(cfg);
+      if (!before.file && gateway !== true) {
+        const st = await report();
+        if (st.active) configStillHolds();
+        else log.ok("kill switch was already off");
+        return;
+      }
+      out("asking the gateway to verify you are present (Windows Hello on this machine, or a challenge at the gateway's terminal)...");
+      let r;
+      try {
+        r = await controlCall("POST", "/kill/off", 150_000);
+      } catch (err) {
+        if (err instanceof CliFail && /no gateway answered|no control key/.test(err.message)) {
+          throw new CliFail(
+            `${err.message} The kill switch stays ON: clearing it needs the running gateway to check owner presence (Windows Hello), and no gateway is reachable. Start one (\`switchboard dashboard\` or \`switchboard serve\`; it refuses every call while the KILL file exists), then run \`switchboard kill off\` again.`,
+          );
+        }
+        throw err;
+      }
+      if (r.status !== 200) throw new CliFail(String(r.body.error ?? `the gateway answered ${r.status}`));
+      const st = await report();
+      if (st.active) configStillHolds();
+      else log.ok("kill switch OFF: calls are allowed again");
+    }),
+  );
+
+// ── approvals (design 3.3) ───────────────────────────────────────────────────────────────────────
+
+const approvalsCmd = program
+  .command("approvals")
+  .description("decide the calls that wait for the owner: list, show, approve, deny (talks to the running gateway)");
+
+/** An error the user should read as one line, with its exit code. */
+class CliFail extends Error {}
+
+/**
+ * Call the RUNNING gateway's control API. The CLI never decides anything itself: `approve` makes the gateway ask
+ * for owner presence (Windows Hello, or a challenge at the gateway's own console) and sign the decision. The
+ * control token that authenticates this call is a convenience, not the security boundary: anything that runs as
+ * this OS user can read it, so the presence prompt inside the gateway is the real gate (controlclient.ts).
+ */
+async function controlCall(
+  method: "GET" | "POST",
+  path: string,
+  timeoutMs: number,
+  body?: unknown,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const cfg = loadConfig(configPath());
+  try {
+    return await controlRequest(cfg.gateway.http.port, method, path, timeoutMs, body);
+  } catch (err) {
+    if (err instanceof ControlError) throw new CliFail(err.message);
+    throw err;
+  }
+}
+
+function checkApprovalId(id: string): void {
+  if (!APPROVAL_ID_RE.test(id)) throw new CliFail(`'${id}' is not an approval id (they look like ap_7KQ2M9XD)`);
+}
+
+function until(iso: string): string {
+  const ms = Date.parse(iso) - Date.now();
+  if (!Number.isFinite(ms)) return iso;
+  if (ms <= 0) return "expired";
+  const s = Math.round(ms / 1000);
+  return s < 90 ? `${s}s` : s < 5400 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`;
+}
+
+function approvalLine(a: ApprovalView): string {
+  const who = a.client ?? a.principal;
+  const state = a.status === "pending" || a.status === "approved" ? `${a.status}, ${until(a.expires)} left` : a.status;
+  return `  ${a.id}  ${a.risk.padEnd(6)} ${a.server}__${a.tool}  ${who}  [${state}]  ${summarizeArgs(a.args_preview, 70)}`;
+}
+
+function approvalAction<A extends unknown[]>(fn: (...args: A) => Promise<void>): (...args: A) => Promise<void> {
+  return async (...args: A) => {
+    try {
+      await fn(...args);
+    } catch (err) {
+      log.error(err instanceof CliFail || err instanceof Error ? err.message : String(err));
+      process.exitCode = 1;
+    }
+  };
+}
+
+approvalsCmd
+  .command("list")
+  .description("list the calls waiting for the owner, and the latest decisions")
+  .option("--all", "also show the finished ones (approved and used, denied, expired)")
+  .action(
+    approvalAction(async (opts: { all?: boolean }) => {
+      let data: { pending?: ApprovalView[]; approved?: ApprovalView[]; history?: ApprovalView[] };
+      try {
+        const r = await controlCall("GET", "/approvals", 15_000);
+        if (r.status !== 200) throw new CliFail(String(r.body.error ?? `the gateway answered ${r.status}`));
+        data = r.body as typeof data;
+      } catch (err) {
+        if (!(err instanceof CliFail) || !/no gateway answered|no control key/.test(err.message)) throw err;
+        // The gateway is not running. The file is all there is, and nothing in it is verified: say so.
+        log.warn(`${err.message}`);
+        log.warn(`showing the raw ${APPROVALS_FILE} instead. These records are NOT verified (only a running gateway can tell a real one from a forged one), and nothing can be approved until a gateway runs.`);
+        const raw = readJsonFileSync<{ approvals?: ApprovalView[] }>(resolve(HOME_DIR, APPROVALS_FILE))?.approvals ?? [];
+        data = { pending: raw.filter((a) => a.status === "pending"), approved: [], history: raw.filter((a) => a.status !== "pending") };
+      }
+      const pending = data.pending ?? [];
+      const approved = data.approved ?? [];
+      out(pending.length === 0 ? "no calls are waiting for the owner" : `${pending.length} waiting for the owner:`);
+      for (const a of pending) out(approvalLine(a));
+      if (approved.length > 0) {
+        out(`${approved.length} approved, not used yet:`);
+        for (const a of approved) out(approvalLine(a));
+      }
+      if (opts.all) {
+        out(`${(data.history ?? []).length} finished:`);
+        for (const a of data.history ?? []) out(approvalLine(a));
+      }
+      if (pending.length > 0) out("\n  decide with: switchboard approvals approve <id>   |   switchboard approvals deny <id>");
+    }),
+  );
+
+approvalsCmd
+  .command("show <id>")
+  .description("show one approval request in full")
+  .action(
+    approvalAction(async (id: string) => {
+      checkApprovalId(id);
+      const r = await controlCall("GET", `/approvals/${id}`, 15_000);
+      if (r.status !== 200) throw new CliFail(String(r.body.error ?? `the gateway answered ${r.status}`));
+      const a = r.body.approval as ApprovalView;
+      out(`${a.id}  ${a.status}`);
+      out(`  call:      ${a.server}__${a.tool}  (${a.scope} scope, ${a.risk} risk)`);
+      out(`  caller:    ${a.principal}${a.client ? `  client ${a.client}` : ""}`);
+      out(`  why:       ${a.reason}`);
+      out(`  created:   ${a.created}`);
+      out(`  expires:   ${a.expires}  (${until(a.expires)})`);
+      out(`  decided:   ${a.decided_via ? `${a.decided_via} at ${a.decided_at}${a.presence ? `, presence ${a.presence}` : ""}` : "not yet"}`);
+      out(`  args hash: ${a.args_sha256}`);
+      out(`  arguments: ${JSON.stringify(a.args_preview, null, 2).replace(/\n/g, "\n             ")}`);
+    }),
+  );
+
+approvalsCmd
+  .command("approve <id>")
+  .description("approve one request: the gateway asks for your presence (Windows Hello), then the client may repeat the identical call once")
+  .action(
+    approvalAction(async (id: string) => {
+      checkApprovalId(id);
+      out("asking the gateway to verify you are present (Windows Hello on this machine, or a challenge at the gateway's terminal)...");
+      const r = await controlCall("POST", `/approvals/${id}/approve`, 150_000);
+      if (r.status !== 200) throw new CliFail(String(r.body.error ?? `the gateway answered ${r.status}`));
+      const a = r.body.approval as ApprovalView;
+      log.ok(`approved ${a.id}: ${a.server}__${a.tool} for ${a.client ?? a.principal}`);
+      out(`  valid for ${until(a.expires)}, one use. The client must now repeat the same call with the same arguments.`);
+    }),
+  );
+
+approvalsCmd
+  .command("deny <id>")
+  .description("deny one request (no presence check is needed to say no)")
+  .action(
+    approvalAction(async (id: string) => {
+      checkApprovalId(id);
+      const r = await controlCall("POST", `/approvals/${id}/deny`, 15_000);
+      if (r.status !== 200) throw new CliFail(String(r.body.error ?? `the gateway answered ${r.status}`));
+      const a = r.body.approval as ApprovalView;
+      log.ok(`denied ${a.id}: ${a.server}__${a.tool} for ${a.client ?? a.principal}`);
+    }),
+  );
+
+const auditCmd = program.command("audit").description("inspect the tamper-evident audit log");
+
+auditCmd
+  .command("verify")
+  .description("walk the audit log's hash chain and report the first break (exit 1 on a break); --all includes rotated segments")
+  .option("--all", "verify every rotated segment too, not only the current audit.log")
+  .action((opts: { all?: boolean }) => {
+    let res;
+    try {
+      res = verifyAudit({ all: opts.all === true });
+    } catch (err) {
+      log.error(`could not read the audit log: ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 1;
+      return;
+    }
+    for (const n of res.notes) log.warn(n);
+    if (res.ok) {
+      if (res.rows === 0 && res.legacy_rows === 0) {
+        out(`audit chain: no rows to verify (${res.files.length ? res.files.join(", ") : "no audit.log"})`);
+        return;
+      }
+      out(`audit chain OK: ${res.rows} row(s)${res.rows ? `, seq ${res.first_seq}..${res.last_seq}` : ""} in ${res.files.join(", ")}`);
+      if (res.last_hash) out(`  last hash: ${res.last_hash}`);
+      return;
+    }
+    const b = res.break!;
+    log.error(`audit chain BROKEN at seq ${b.seq} (${b.file}, line ${b.line}): ${b.reason}`);
+    out(`audit chain BROKEN at seq ${b.seq}`);
+    out(`  file:   ${b.file} line ${b.line}`);
+    out(`  reason: ${b.reason}`);
+    out(`  ${res.rows} row(s) before the break verified`);
+    process.exitCode = 1;
+  });
 
 const profileCmd = program
   .command("profile")
@@ -597,9 +1155,43 @@ const apikeyCmd = program
 apikeyCmd
   .command("new <name>")
   .description("issue a new API key — the token is shown once and stored only as a one-way hash")
-  .action((name: string) => {
-    const { token, record } = new ApiKeyStore().issue(name);
-    log.ok(`issued API key '${record.name}' (id ${record.id})`);
+  .option("--client <id>", "bind the key to a registered client (every key must be bound once clients are configured; prefer `switchboard client add`)")
+  .action(async (name: string, opts: { client?: string }) => {
+    if (opts.client !== undefined) {
+      if (!isValidClientId(opts.client)) {
+        log.error(BAD_CLIENT_ID);
+        process.exitCode = 1;
+        return;
+      }
+      let cfg: SwitchboardConfig;
+      try {
+        cfg = loadConfig(configPath());
+      } catch (err) {
+        log.error(err instanceof Error ? err.message : String(err));
+        process.exitCode = 1;
+        return;
+      }
+      if (!Object.prototype.hasOwnProperty.call(cfg.clients ?? {}, opts.client)) {
+        log.error(`client '${opts.client}' is not configured: run \`switchboard client add ${opts.client}\` first`);
+        process.exitCode = 1;
+        return;
+      }
+      // A key bound to a client is a grant of access. A running gateway grants only after its own presence check
+      // (design 3.15), so this path, which has none, refuses while one answers.
+      let running = true;
+      try {
+        running = (await runningGateway(cfg)) !== null;
+      } catch {
+        running = true;
+      }
+      if (running) {
+        log.error(`a running gateway issues client keys only after it checks you are present: run \`switchboard client rotate ${opts.client} --print\``);
+        process.exitCode = 1;
+        return;
+      }
+    }
+    const { token, record } = new ApiKeyStore().issue(name, opts.client ? { client: opts.client } : {});
+    log.ok(`issued API key '${record.name}' (id ${record.id}${record.client ? `, client ${record.client}` : ""})`);
     out("");
     out("  Token (shown once — copy it now):");
     out("");
@@ -622,7 +1214,7 @@ apikeyCmd
     }
     for (const k of keys) {
       const used = k.last_used ? `last used ${k.last_used}` : "never used";
-      out(`  ${k.id}  ${k.name.padEnd(16)} ${k.prefix}…  (created ${k.created}, ${used})`);
+      out(`  ${k.id}  ${k.name.padEnd(16)} ${k.prefix}…  (created ${k.created}, ${used}${k.client ? `, client ${k.client}` : ""})`);
     }
   });
 
@@ -637,6 +1229,283 @@ apikeyCmd
       process.exitCode = 1;
     }
   });
+
+// ── clients (design 3.1) ─────────────────────────────────────────────────────────────────────────
+
+const clientCmd = program
+  .command("client")
+  .description("register the clients that may call /mcp (servers, tools, scope ceiling) and manage their keys");
+
+/**
+ * Run a client subcommand: a failure is one clear line and exit code 1, never a stack. The ClientAdmin it hands over
+ * is the OFFLINE one, used only when no gateway answers: nothing there proves the owner, and its audit row says so.
+ * With a gateway running every grant (add, rotate) goes through the gateway instead, which checks presence first.
+ */
+function clientAction<A extends unknown[]>(fn: (admin: ClientAdmin, cfg: SwitchboardConfig, ...args: A) => Promise<void>): (...args: A) => Promise<void> {
+  return async (...args: A) => {
+    try {
+      const path = configPath();
+      const cfg = loadConfig(path);
+      await fn(new ClientAdmin({ cfg, configPath: path, apiKeys: new ApiKeyStore(), actor: "cli" }), cfg, ...args);
+    } catch (err) {
+      log.error(err instanceof ClientAdminError || err instanceof Error ? err.message : String(err));
+      process.exitCode = 1;
+    }
+  };
+}
+
+const csv = (v: string): string[] => v.split(",").map((x) => x.trim()).filter(Boolean);
+
+/** Is a gateway running that this CLI can ask? Its answer to the (presence-free) list request, or null. */
+async function runningGateway(cfg: SwitchboardConfig): Promise<Record<string, unknown> | null> {
+  const r = await askGateway(cfg.gateway.http.port, "GET", "/clients", 15_000);
+  if (r === null) return null;
+  if (r.status !== 200) throw new CliFail(String(r.body.error ?? `the gateway answered ${r.status}`));
+  return r.body;
+}
+
+/** A change request to the running gateway. A refusal (presence, validation) is an error with the gateway's words. */
+async function gatewayChange(path: string, body: unknown, prompt: boolean): Promise<Record<string, unknown>> {
+  if (prompt) out("asking the gateway to verify you are present (Windows Hello on this machine, or a challenge at the gateway's terminal)...");
+  const r = await controlCall("POST", path, 150_000, body);
+  if (r.status !== 200) throw new CliFail(String(r.body.error ?? `the gateway answered ${r.status}`));
+  return r.body;
+}
+
+const OFFLINE_NOTE =
+  "no gateway answered: the config file and the key store are written, and a gateway that starts later loads them. A gateway that is already running ignores file edits (it applies a change only when this command reaches it, after its presence check), so run this again while it is up if it is.";
+
+function showToken(token: string): void {
+  out("");
+  out("  Token (shown once, copy it now):");
+  out("");
+  out(`    ${token}`);
+  out("");
+  out("  Stored one-way hashed in the key store; the bridge reads its own copy from the client key file.");
+}
+
+clientCmd
+  .command("add <id>")
+  .description("create or update a client and issue its key (stored for `switchboard bridge --client <id>`; printed only with --print). A running gateway checks you are present first")
+  .option("--servers <list>", `comma separated server id globs the client may see and call (new client default: ${NEW_CLIENT_DEFAULTS.servers.join(",")})`)
+  .option("--max-scope <scope>", `scope ceiling: read | write | full (new client default: ${NEW_CLIENT_DEFAULTS.max_scope})`)
+  .option("--max-risk <risk>", `highest risk it may request: low | medium | high (new client default: ${NEW_CLIENT_DEFAULTS.max_risk}; a call above it is refused, high still needs an approval)`)
+  .option("--print", "print the token once (otherwise it goes only to the client key file)")
+  .action(
+    clientAction(async (admin, cfg, id: string, opts: { servers?: string; maxScope?: string; maxRisk?: string; print?: boolean }) => {
+      const spec: ClientSpec = {};
+      if (opts.servers !== undefined) spec.servers = csv(opts.servers);
+      if (opts.maxScope !== undefined) {
+        if (!["read", "write", "full"].includes(opts.maxScope)) throw new Error("--max-scope must be read, write or full");
+        spec.max_scope = opts.maxScope as ClientSpec["max_scope"];
+      }
+      if (opts.maxRisk !== undefined) {
+        if (!["low", "medium", "high"].includes(opts.maxRisk)) throw new Error("--max-risk must be low, medium or high");
+        spec.max_risk = opts.maxRisk as ClientSpec["max_risk"];
+      }
+      let r: { created: boolean; client: ClientConfig; keyKept: boolean; token?: string; revoked: number; keyFile: string };
+      let offline = false;
+      if ((await runningGateway(cfg)) !== null) {
+        r = (await gatewayChange(`/clients/${encodeURIComponent(id)}/add`, { spec, print: opts.print === true }, true)) as typeof r;
+      } else {
+        r = admin.add(id, spec);
+        offline = true;
+      }
+      const c = r.client;
+      log.ok(`client '${id}' ${r.created ? "created" : "updated"}: servers ${c.servers.join(",") || "(none)"}, max_scope ${c.max_scope ?? "(server ceiling)"}, max_risk ${c.max_risk ?? "high"}`);
+      if (r.keyKept) {
+        out(`  key: the existing key is kept (${r.keyFile}); \`switchboard client rotate ${id}\` issues a new one`);
+        if (opts.print) log.warn("--print: nothing to print, the existing token cannot be recovered");
+      } else {
+        out(`  key: issued and stored for the bridge (${r.keyFile})${r.revoked ? `; replaced ${r.revoked} earlier key(s)` : ""}`);
+        if (opts.print && r.token) showToken(r.token);
+      }
+      out(`  next: \`switchboard bridge --client ${id}\`. ${offline ? OFFLINE_NOTE : "The running gateway has this client and its key now."}`);
+    }),
+  );
+
+clientCmd
+  .command("list")
+  .description("list registered clients and their keys (no secrets); a running gateway's view when one answers")
+  .action(
+    clientAction(async (admin, cfg) => {
+      const live = await runningGateway(cfg);
+      type Row = { id: string; config: ClientConfig; keys: { id: string; created: string; last_used?: string }[]; key_file: boolean };
+      let clients: Row[];
+      let orphan_keys: { id: string; client?: string }[];
+      if (live) {
+        const rows = (live.clients ?? []) as (ClientConfig & { id: string; keys: Row["keys"]; key_file: boolean })[];
+        clients = rows.map(({ id, keys, key_file, ...config }) => ({ id, config: config as ClientConfig, keys, key_file }));
+        orphan_keys = (live.orphan_keys ?? []) as typeof orphan_keys;
+        out("(the running gateway's view: these are the clients in force)");
+        if (live.drift === true) {
+          log.warn("the config file differs from these clients (it was edited behind the running gateway's back): the file is not applied until the gateway restarts; review it before you restart");
+        }
+      } else {
+        const l = admin.list();
+        clients = l.clients;
+        orphan_keys = l.orphan_keys;
+        out("(no gateway answered: this is the config file and the key store)");
+      }
+      if (clients.length === 0) {
+        out("no clients registered: /mcp is in single-user mode. Register one with `switchboard client add <id>`.");
+      }
+      for (const c of clients) {
+        const cfgc = c.config;
+        out(`  ${c.id}${cfgc.description ? `  ${cfgc.description}` : ""}`);
+        out(`      servers: ${cfgc.servers.join(", ") || "(none)"}${cfgc.tools?.length ? `  tools: ${cfgc.tools.join(", ")}` : ""}${cfgc.exclude_tools?.length ? `  exclude: ${cfgc.exclude_tools.join(", ")}` : ""}`);
+        out(`      max_scope: ${cfgc.max_scope ?? "(server ceiling)"}  max_risk: ${cfgc.max_risk ?? "high"}${cfgc.limits ? `  limits: ${JSON.stringify(cfgc.limits)}` : ""}`);
+        const keys = c.keys.map((k) => `${k.id} (created ${k.created}${k.last_used ? `, last used ${k.last_used}` : ", never used"})`);
+        out(`      keys: ${keys.length ? keys.join("; ") : "none"}   key file: ${c.key_file ? "present" : "missing"}`);
+      }
+      if (orphan_keys.length > 0) {
+        log.warn(`${orphan_keys.length} key(s) are bound to a client that is not configured and are refused: ${orphan_keys.map((k) => `${k.id} -> ${k.client}`).join(", ")}`);
+      }
+    }),
+  );
+
+clientCmd
+  .command("rotate <id>")
+  .description("issue a new key for a client; its earlier keys stop working at once. A running gateway checks you are present first")
+  .option("--print", "print the token once (otherwise it goes only to the client key file)")
+  .action(
+    clientAction(async (admin, cfg, id: string, opts: { print?: boolean }) => {
+      let r: { token?: string; revoked: number; keyFile: string };
+      let offline = false;
+      if ((await runningGateway(cfg)) !== null) {
+        r = (await gatewayChange(`/clients/${encodeURIComponent(id)}/rotate`, { print: opts.print === true }, true)) as typeof r;
+      } else {
+        r = admin.rotate(id);
+        offline = true;
+      }
+      log.ok(`rotated the key of client '${id}': new key stored (${r.keyFile}), ${r.revoked} earlier key(s) revoked`);
+      if (opts.print && r.token) showToken(r.token);
+      if (offline) out(`  ${OFFLINE_NOTE}`);
+    }),
+  );
+
+clientCmd
+  .command("rm <id>")
+  .description("revoke a client's keys and delete its key file; the config entry is removed only with --purge (no presence check: revoking is always safe)")
+  .option("--purge", "also remove the client from the config file")
+  .action(
+    clientAction(async (admin, cfg, id: string, opts: { purge?: boolean }) => {
+      let r: { revokedKeys: number; keyFileRemoved: boolean; purged: boolean };
+      let offline = false;
+      if ((await runningGateway(cfg)) !== null) {
+        r = (await gatewayChange(`/clients/${encodeURIComponent(id)}/rm`, { purge: opts.purge === true }, false)) as typeof r;
+      } else {
+        r = admin.remove(id, { purge: opts.purge === true });
+        offline = true;
+      }
+      log.ok(`client '${id}': ${r.revokedKeys} key(s) revoked, key file ${r.keyFileRemoved ? "removed" : "was absent"}${r.purged ? ", config entry removed" : ""}`);
+      if (!r.purged) out("  the config entry stays (it grants nothing without a key); add --purge to remove it too.");
+      if (offline) out(`  ${OFFLINE_NOTE}`);
+    }),
+  );
+
+// ── connector links (one access-control source: the `clients:` section) ─────────────────────────────
+
+/** Apply a client change: through the running gateway (presence first) when one answers, else the offline admin. */
+async function applyClientSpec(admin: ClientAdmin, cfg: SwitchboardConfig, id: string, spec: ClientSpec): Promise<{ client: ClientConfig; created: boolean; keyFile: string; offline: boolean }> {
+  if ((await runningGateway(cfg)) !== null) {
+    const r = (await gatewayChange(`/clients/${encodeURIComponent(id)}/add`, { spec, print: false }, true)) as { created: boolean; client: ClientConfig; keyFile: string };
+    return { client: r.client, created: r.created, keyFile: r.keyFile, offline: false };
+  }
+  const r = admin.add(id, spec);
+  return { client: r.client, created: r.created, keyFile: r.keyFile, offline: true };
+}
+
+function connectorsForCli(cfg: SwitchboardConfig): Connectors {
+  const network = networkFromConfig();
+  return new Connectors({ vault: new Vault(cfg.vault.backend), ...(network ? { network } : {}) });
+}
+
+program
+  .command("link <client> <toolkit>")
+  .description(
+    "let a client use a toolkit: adds the toolkit's server to the client's `servers` in the clients config (the one access-control source; `client add` edits the same section), optionally with its ceilings and the account it uses. A running gateway checks you are present first",
+  )
+  .option("--account <ref>", "the connected account of the toolkit's provider this client uses (its `accounts` entry; without it the client uses the provider default)")
+  .option("--max-scope <scope>", "read, write or full (a new client starts at read)")
+  .option("--max-risk <risk>", "low, medium or high (a new client starts at low)")
+  .action(
+    clientAction(async (admin, cfg, client: string, toolkit: string, opts: { account?: string; maxScope?: string; maxRisk?: string }) => {
+      if (opts.maxScope !== undefined && !["read", "write", "full"].includes(opts.maxScope)) throw new Error("--max-scope must be read, write or full");
+      if (opts.maxRisk !== undefined && !["low", "medium", "high"].includes(opts.maxRisk)) throw new Error("--max-risk must be low, medium or high");
+      const rt = connectorsForCli(cfg);
+      // The target is a toolkit slug, or the id of a connector server in the config (a second mount of a toolkit has its own id).
+      const isServerId = cfg.servers.some((s) => s.source === "connector" && s.id === toolkit);
+      if (toolkit !== "*" && !isServerId && !rt.kit.toolkits.slugs().includes(toolkit)) throw new Error(`no toolkit or connector server '${toolkit}' is defined here (switchboard toolkits list)`);
+      // The account is checked before anything is written, so a bad --account never leaves a half-applied link.
+      let account: { provider: string; ref: string } | undefined;
+      if (opts.account) {
+        if (toolkit === "*") throw new Error("--account needs a specific toolkit");
+        const slug = cfg.servers.find((s) => s.source === "connector" && s.id === toolkit)?.toolkit ?? toolkit;
+        const provider = rt.providers.providerForToolkit(slug);
+        const acct = rt.accounts.require(opts.account);
+        if (!provider || acct.provider !== provider.slug) throw new Error(`account ${acct.id} belongs to ${acct.provider}, not to ${toolkit}'s provider`);
+        account = { provider: provider.slug, ref: acct.id };
+      }
+      const plan = planLink(cfg, client, toolkit, {
+        ...(opts.maxScope ? { maxScope: opts.maxScope as Scope } : {}),
+        ...(opts.maxRisk ? { maxRisk: opts.maxRisk as Risk } : {}),
+        ...(account ? { account } : {}),
+      });
+      if (plan.noServer) log.warn(`no connector server for '${toolkit}' is in the config yet: linked to the id '${plan.serverIds[0]}', which \`switchboard toolkits enable ${toolkit}\` uses by default`);
+      if (Object.keys(plan.spec).length === 0) {
+        out(`${client} may already use ${plan.serverIds.join(", ")}: nothing to change`);
+        return;
+      }
+      const r = await applyClientSpec(admin, cfg, client, plan.spec);
+      const c = r.client;
+      log.ok(`${client} ${r.created ? "created and linked" : "linked"}: servers ${c.servers.join(",") || "(none)"}, max_scope ${c.max_scope ?? "(server ceiling)"}, max_risk ${c.max_risk ?? "high"}${c.accounts && Object.keys(c.accounts).length ? `, accounts ${Object.entries(c.accounts).map(([p, a]) => `${p}=${a}`).join(",")}` : ""}`);
+      if (r.created) out(`  a key was issued for it (${r.keyFile}); \`switchboard bridge --client ${client}\` uses it`);
+      if (r.offline) out(`  ${OFFLINE_NOTE}`);
+    }),
+  );
+
+program
+  .command("unlink <client> [toolkit]")
+  .description("remove a toolkit's server from a client's `servers` (or every connector server and the account bindings when no toolkit is named); the client and its key stay, `client rm` removes those. A running gateway checks you are present first")
+  .action(
+    clientAction(async (admin, cfg, client: string, toolkit: string | undefined) => {
+      const plan = planUnlink(cfg, client, toolkit, connectorsForCli(cfg).kit.toolkits.slugs());
+      if (!plan || (plan.removed.length === 0 && !plan.clearsAccounts)) {
+        out("nothing to remove");
+        if (plan && plan.stillCovered.length > 0) log.warn(`'${plan.stillCovered.join("', '")}' still covers ${toolkit ?? "the connector servers"}: edit the client's servers with \`switchboard client add ${client} --servers ...\``);
+        return;
+      }
+      const r = await applyClientSpec(admin, cfg, client, plan.spec);
+      log.ok(`${client}${toolkit ? ` is no longer linked to ${toolkit}` : " no longer has any connector server or account binding"}: servers ${r.client.servers.join(",") || "(none)"}`);
+      if (plan.stillCovered.length > 0) log.warn(`'${plan.stillCovered.join("', '")}' still covers ${toolkit ?? "a connector server"}: a glob cannot be narrowed here, use \`switchboard client add ${client} --servers ...\``);
+      if (r.offline) out(`  ${OFFLINE_NOTE}`);
+    }),
+  );
+
+program
+  .command("links")
+  .description("which client may use which connector toolkit, how far, as which account (the clients config; a running gateway's view when one answers)")
+  .action(
+    clientAction(async (_admin, cfg) => {
+      let clients: Record<string, ClientConfig> | undefined = cfg.clients;
+      const live = await runningGateway(cfg);
+      if (live) {
+        const rows = (live.clients ?? []) as (ClientConfig & { id: string; keys?: unknown; key_file?: unknown })[];
+        clients = Object.fromEntries(rows.map(({ id, keys: _k, key_file: _f, ...config }) => [id, config as ClientConfig]));
+        out("(the running gateway's view: these are the clients in force)");
+      }
+      const rows = linkRows(clients);
+      if (rows.length === 0) {
+        out("no client is configured: every caller may use every enabled toolkit (single-user mode). `switchboard link <client> <toolkit>` starts restricting.");
+        return;
+      }
+      const head = ["client", "servers", "max scope", "max risk", "accounts"];
+      const body = rows.map((r) => [r.client, r.servers, r.max_scope, r.max_risk, r.accounts]);
+      const widths = head.map((_, i) => Math.max(...[head, ...body].map((row) => row[i]!.length)));
+      for (const row of [head, ...body]) out(row.map((cell, i) => cell.padEnd(widths[i]!)).join("  ").trimEnd());
+    }),
+  );
 
 /** Read a secret from a pipe (preferred) or an interactive prompt. */
 function readSecret(prompt: string): Promise<string> {

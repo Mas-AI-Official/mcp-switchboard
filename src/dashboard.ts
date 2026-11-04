@@ -7,31 +7,80 @@
  *
  * Bound to `gateway.http.host` (127.0.0.1 by default) — local-first means the
  * endpoint is not exposed to the network unless the operator deliberately changes it.
+ *
+ * Hardening (design vNext 3.2, see httpsec.ts): every route passes a Host allowlist and an Origin check;
+ * every response carries the security headers; every `/api/*` route except `/healthz`, `/api/health`, the
+ * login exchange and the control API needs an owner session in the X-Switchboard-Session header (plus a CSRF
+ * header when it mutates; never a cookie, see httpsec.ts). Client API keys authenticate `/mcp` only and are
+ * never read by the admin API.
  */
 
 import { createHmac } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import express, { type Request, type Response } from "express";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import {
+  createMcpHandler,
+  isLegacyRequest,
+  WebStandardStreamableHTTPServerTransport,
+  type AuthInfo,
+  type McpHandlerRequestOptions,
+} from "@modelcontextprotocol/server";
+import { toNodeHandler } from "@modelcontextprotocol/node";
+import { mountMediaRoutes } from "./connectors/mediastage.js";
+import { AdminError, ConnectorAdmin, type ConnectBody } from "./connectors/admin.js";
+import { isConnectorError } from "./connectors/errors.js";
 import type { Gateway } from "./gateway.js";
 import { VERSION } from "./gateway.js";
-import type { SwitchboardConfig, SettingsConfig, ServerConfig, CouncilConfig } from "./types.js";
+import type { SwitchboardConfig, SettingsConfig, ServerConfig, CouncilConfig, ClientConfig } from "./types.js";
 import type { BreakerHealth, BreakerState } from "./breaker.js";
-import { writeConfig, parseTriggersConfig } from "./config.js";
-import { recentAudit, usageStats } from "./audit.js";
-import { inferScope } from "./policy.js";
+import { writeConfig, parseTriggersConfig, configIssues, uniqueServerId } from "./config.js";
+import { isExactNpmVersion, isPinnedNpmSpec, npmPackageName } from "./packagespec.js";
+import { audit, recentAudit, usageStats } from "./audit.js";
+import { resolveRisk, resolveToolScope, DEFAULT_REQUIRE_FOR_RISK } from "./policy.js";
+import { killStatus, setKillFile } from "./killswitch.js";
+import { DEFAULT_TTL_SECONDS, type ApprovalChannel, type ApprovalOutcome } from "./approvals.js";
+import { bearerOf, controlTokenMatches, newControlToken, writeControlKey } from "./controlkey.js";
 import { activeProfileName, describeProfile } from "./profiles.js";
 import { ApiKeyStore } from "./apikeys.js";
+import { ClientAdmin, ClientAdminError, clientSummaryLine, type ChangeBy } from "./clientadmin.js";
+import { ClientConfigWatcher } from "./clientconfig.js";
+import { establishPrincipal, isValidClientId } from "./principal.js";
 import { loadCatalog, queryCatalog, type CatalogSnapshot, type Toolkit } from "./catalog.js";
 import { listTriggerTemplates } from "./trigger-templates.js";
-import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
-import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
+import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/server-legacy/auth";
 import { resolveOAuthServerOptions, SwitchboardAuthProvider, OAUTH_SCOPES_SUPPORTED } from "./authserver.js";
+import {
+  DcrLimiter,
+  HostGuard,
+  jsonErrorHandler,
+  LOGIN_CODE_TTL_MS,
+  LoginCodeStore,
+  OwnerSessions,
+  assertPortFree,
+  ownerSessionGate,
+  securityHeaders,
+  sessionIdOf,
+  urlLengthGuard,
+  type Clock,
+} from "./httpsec.js";
 import { log } from "./logger.js";
+import { guardedFetch } from "./netguard.js";
+import { safeText } from "./safetext.js";
 
 export interface DashboardHandle {
   url: string;
   close: () => Promise<void>;
+}
+
+/**
+ * Test and embedding seams. Production passes none of these: defaults are the wall clock, the 120 s
+ * login-code TTL, the 12 h session TTL and the 50-client / 20-per-hour DCR limits from design 3.2.
+ */
+export interface DashboardOptions {
+  clock?: Clock;
+  loginCodeTtlMs?: number;
+  sessionTtlMs?: number;
+  dcr?: { maxClients?: number; perHour?: number };
 }
 
 /** Where the built SPA lives: `public/` at the package root (one level above dist/ or src/). */
@@ -61,10 +110,10 @@ function presentedToken(req: Request): string | null {
 }
 
 /**
- * True if the request originated from the local machine (loopback peer address). Every state-mutating
- * dashboard endpoint gates on this so a tunnelled/exposed dashboard can't mint a key, connect an
- * account, toggle/remove a server, or rewrite settings from off-box. Exported so the deterministic
- * oracle can prove the loopback verdict without a live server.
+ * True if the TCP peer is a loopback address. It is NO LONGER an authorization gate: a tunnel binary or a
+ * DNS-rebinding page also connects from loopback, so the peer address proves nothing about who is
+ * asking (defect D4). Admin routes are gated by the owner session in httpsec.ts. The predicate is kept
+ * exported, unchanged, only because the dashboard oracle pins its behaviour.
  */
 export function isLocalRequest(req: Request): boolean {
   const ip = req.ip ?? req.socket.remoteAddress ?? "";
@@ -85,14 +134,14 @@ export function correlateMountedSlugs(toolkits: Toolkit[], servers: ServerConfig
   const byApp2mcp = new Map<string, string>();
   for (const t of toolkits) {
     if (t.mount.source === "remote") byRemote.set(t.mount.url, t.slug);
-    else if (t.mount.source === "npx") byNpx.set(t.mount.package, t.slug);
+    else if (t.mount.source === "npx") byNpx.set(npmPackageName(t.mount.package), t.slug);
     else if (t.mount.source === "app2mcp") byApp2mcp.set(t.mount.openapi, t.slug);
   }
   const mounted = new Set<string>();
   for (const s of servers) {
     let slug: string | undefined;
     if (s.url) slug = byRemote.get(s.url);
-    else if (s.package) slug = byNpx.get(s.package);
+    else if (s.package) slug = byNpx.get(npmPackageName(s.package)); // a pinned `name@1.2.3` is still the catalog's `name`
     else if (s.openapi) slug = byApp2mcp.get(s.openapi);
     if (slug) mounted.add(slug);
   }
@@ -236,6 +285,14 @@ export interface McpEndpointOptions {
    */
   resourceMetadataUrl?: string;
   /**
+   * The configured clients right now (design 3.1), read on every request so a reload takes effect at once.
+   * While it holds an entry, `/mcp` requires a principal bound to a configured client, whatever `requireAuth`
+   * says and whatever the bind host is. Omitted = no clients (the 0.1.0 behavior).
+   */
+  clients?: () => Record<string, ClientConfig> | undefined;
+  /** The name an OAuth client registered with (RFC 7591), used to map an OAuth token to a configured client. */
+  oauthClientName?: (oauthClientId: string) => string | undefined;
+  /**
    * Respond with plain JSON instead of an SSE stream. Needed behind tunnels that do not
    * support Server-Sent Events (e.g. cloudflared quick tunnels). Safe for the stateless
    * server pattern, where each `/mcp` POST is a single request/response.
@@ -251,33 +308,96 @@ export interface McpEndpointOptions {
 export function mountMcpEndpoint(app: express.Express, gateway: Gateway, opts: McpEndpointOptions): void {
   app.all("/mcp", async (req: Request, res: Response) => {
     // Gate before doing any work. Fail closed: a missing/invalid key is a 401, and we
-    // never echo or log the presented token.
-    if (opts.requireAuth()) {
-      const token = presentedToken(req);
-      // Accept either a local API key or — when the OAuth AS is enabled — a valid OAuth
-      // access token. The token value is never echoed or logged.
-      const apiKeyOk = !!token && opts.apiKeys.verify(token);
-      const oauthOk = !apiKeyOk && !!token && !!opts.verifyOAuthToken && (await opts.verifyOAuthToken(token)) !== null;
-      if (!apiKeyOk && !oauthOk) {
+    // never echo or log the presented token. A presented credential is always checked (even when auth is
+    // not required) so the call is attributed to its key; a bad one only matters when a principal is needed.
+    const clients = opts.clients?.();
+    const token = presentedToken(req);
+    let apiKey: ReturnType<ApiKeyStore["authenticate"]> = null;
+    let oauth: { clientId: string; clientName?: string } | null = null;
+    let authInfo: AuthInfo | undefined;
+    if (token) {
+      apiKey = opts.apiKeys.authenticate(token);
+      if (!apiKey && opts.verifyOAuthToken) {
+        // Never throws (the provider's verifyToken swallows errors -> null). The token is not echoed or logged.
+        const info = await opts.verifyOAuthToken(token);
+        if (info) {
+          authInfo = info;
+          oauth = { clientId: info.clientId, clientName: opts.oauthClientName?.(info.clientId) };
+        }
+      }
+    }
+    const decision = establishPrincipal({
+      clients,
+      apiKey: apiKey ? { id: apiKey.id, client: apiKey.client } : null,
+      oauth,
+      authRequired: opts.requireAuth(),
+    });
+    if (!decision.ok) {
+      if (decision.status === 401) {
         // RFC 9728: point spec clients at the protected-resource metadata so they can
         // discover the Authorization Server and run the PKCE flow.
         const challenge = opts.resourceMetadataUrl
           ? `Bearer realm="switchboard", resource_metadata="${opts.resourceMetadataUrl}"`
           : 'Bearer realm="switchboard"';
         res.set("WWW-Authenticate", challenge);
-        res.status(401).json({ error: "unauthorized: missing or invalid API key or OAuth token" });
-        return;
+        res.status(401).json({ error: decision.error });
+      } else {
+        res.status(403).json({ error: decision.error, code: decision.code, hint: decision.hint });
       }
+      return;
     }
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined,
-      ...(opts.enableJsonResponse ? { enableJsonResponse: true } : {}),
+    const principal = decision.principal;
+    // This endpoint is stateless (a fresh Server and transport per request), so there is no session for a standalone
+    // GET to attach a server-to-client stream to. The SDK would open an event stream anyway and hold the socket for
+    // as long as the client likes: an unbounded resource per caller. The Streamable HTTP spec lets a server answer
+    // 405 to say it offers no such stream. Authentication comes first, so an unauthenticated GET is still a 401.
+    if (req.method !== "POST") {
+      res.set("Allow", "POST");
+      res.status(405).json({ error: "method not allowed: this MCP endpoint is stateless and offers no event stream; POST JSON-RPC messages to /mcp" });
+      return;
+    }
+    const json = opts.enableJsonResponse === true;
+    const modern = createMcpHandler(() => gateway.buildServer(principal), {
+      legacy: "reject",
+      onerror: (err) => log.warn(`/mcp request rejected: ${err.message}`),
+      ...(json ? { responseMode: "json" as const } : {}),
     });
-    res.on("close", () => void transport.close());
+    const legacy = async (request: globalThis.Request, handlerOpts?: McpHandlerRequestOptions): Promise<globalThis.Response> => {
+      const transport = new WebStandardStreamableHTTPServerTransport({
+        sessionIdGenerator: undefined,
+        ...(json ? { enableJsonResponse: true } : {}),
+      });
+      await gateway.buildServer(principal).connect(transport);
+      let response: globalThis.Response;
+      try {
+        response = await transport.handleRequest(request, {
+          parsedBody: handlerOpts?.parsedBody,
+          authInfo: handlerOpts?.authInfo,
+        });
+      } catch (err) {
+        void transport.close();
+        throw err;
+      }
+      if (json || !response.body) {
+        void transport.close();
+        return response;
+      }
+      const pass = new TransformStream<Uint8Array, Uint8Array>();
+      void response.body.pipeTo(pass.writable).catch(() => undefined).finally(() => void transport.close());
+      return new globalThis.Response(pass.readable, { status: response.status, headers: response.headers });
+    };
+    const node = toNodeHandler(
+      {
+        fetch: async (request, handlerOpts) =>
+          (await isLegacyRequest(request, handlerOpts?.parsedBody))
+            ? legacy(request, handlerOpts)
+            : modern.fetch(request, handlerOpts),
+      },
+      { onerror: (err) => log.error(`/mcp request failed: ${err.message}`) },
+    );
     try {
-      const server = gateway.buildServer();
-      await server.connect(transport);
-      await transport.handleRequest(req, res, req.body);
+      (req as Request & { auth?: AuthInfo }).auth = authInfo;
+      await node(req, res, req.body);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log.error(`/mcp request failed: ${msg}`);
@@ -294,12 +414,61 @@ export async function startDashboard(
   gateway: Gateway,
   cfg: SwitchboardConfig,
   configPath?: string,
+  opts: DashboardOptions = {},
 ): Promise<DashboardHandle> {
-  const app = express();
-  app.use(express.json());
-
-  const apiKeys = new ApiKeyStore();
   const { host, port } = cfg.gateway.http;
+  // Refuse to start beside another listener (including a wildcard or ::1 bind that would shadow us).
+  await assertPortFree(host, port);
+
+  const clock: Clock = opts.clock ?? Date.now;
+  const app = express();
+  app.disable("x-powered-by");
+  app.use(securityHeaders());
+  // Over-long URLs are refused before the Host check parses the path (DoS review).
+  app.use(urlLengthGuard());
+  // Host and Origin are checked before any body is parsed and before any route runs.
+  const guard = new HostGuard({ port });
+  // The media base URL a tunnel gives this gateway is accepted on public routes (only `/media/<id>` among them).
+  const mediaPublic = cfg.settings?.connectors?.media?.public_base_url;
+  if (mediaPublic) guard.addPublicUrl(mediaPublic);
+  app.use(guard.handler());
+  app.use(express.json());
+  // Ephemeral single-file media URLs for platforms that fetch media themselves (connectors/mediastage.ts).
+  mountMediaRoutes(app, gateway.oauth.connectors.kit.media, `http://${host}:${port}`);
+
+  const sessions = new OwnerSessions({
+    clock,
+    ttlMs: opts.sessionTtlMs,
+    codes: new LoginCodeStore({ clock, ttlMs: opts.loginCodeTtlMs }),
+  });
+  const apiKeys = new ApiKeyStore();
+  // The clients in force change only through ClientAdmin (the dashboard routes below, after an owner session; the
+  // control API, after this gateway's own presence check) and at start (design 3.15). The YAML file is writable by
+  // any process of the same OS user, so the watcher is PINNED: an edit made behind our back is reported (a warning
+  // and one `client.drift_ignored` audit row), never applied, and a restart loads the file as it is.
+  const clientWatcher = new ClientConfigWatcher(cfg, configPath, {
+    pinned: true,
+    onDrift: (d) => {
+      const parts = [d.added.length ? `added ${d.added.join(", ")}` : "", d.removed.length ? `removed ${d.removed.join(", ")}` : "", d.changed.length ? `changed ${d.changed.join(", ")}` : ""].filter(Boolean);
+      try {
+        audit({
+          server: "switchboard",
+          tool: "client.drift_ignored",
+          scope: "full",
+          decision: "deny",
+          reason: `the clients section of the config file was changed behind the running gateway (${safeText(parts.join("; "), 300)}): not applied, it takes effect only at the next restart`,
+          principal: "file:config",
+        });
+      } catch (err) {
+        log.error(`audit write failed for client.drift_ignored: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    },
+  });
+  const clientAdmin = new ClientAdmin({ cfg, configPath, apiKeys, watcher: clientWatcher, actor: "dashboard", proof: "session" });
+  const liveClients = (): Record<string, ClientConfig> | undefined => {
+    clientWatcher.sync();
+    return cfg.clients;
+  };
   // `let`, not `const`: a settings change to require_auth re-evaluates this live.
   let requireAuth = authRequired(cfg.gateway.http.require_auth, host);
 
@@ -318,7 +487,23 @@ export async function startDashboard(
   let oauthProvider: SwitchboardAuthProvider | undefined;
   let resourceMetadataUrl: string | undefined;
   if (oauthOpts) {
-    oauthProvider = new SwitchboardAuthProvider(oauthOpts, cfg.settings?.auth_screen);
+    oauthProvider = new SwitchboardAuthProvider(oauthOpts, cfg.settings?.auth_screen, {
+      resumeUrl: (id) => `http://127.0.0.1:${port}/#/oauth/${encodeURIComponent(id)}`,
+    });
+    // The issuer host is reachable on /mcp and the OAuth routes only (never the dashboard or /api/*).
+    guard.addPublicUrl(oauthOpts.publicUrl);
+    if (!oauthOpts.consent) {
+      log.warn(
+        "settings.oauth_server.consent is false: every registered client is auto-approved WITHOUT an owner session. Set consent: true unless this is a throwaway instance",
+      );
+    }
+    // Registration is open by design (RFC 7591), so bound it: 20 attempts per hour, 50 clients total.
+    // This runs before the SDK router, whose own per-IP limiter is switched off below (behind a tunnel
+    // every caller shares one IP, so an IP key would mean nothing).
+    app.use(
+      "/register",
+      new DcrLimiter({ ...opts.dcr, clock, clientCount: () => oauthProvider!.clientCount() }).handler(),
+    );
     app.use(
       mcpAuthRouter({
         provider: oauthProvider,
@@ -329,25 +514,12 @@ export async function startDashboard(
         scopesSupported: [...OAUTH_SCOPES_SUPPORTED],
         resourceName: "MCP Switchboard",
         // Public clients (claude.ai) register without a secret; any issued secret never expires.
-        clientRegistrationOptions: { clientSecretExpirySeconds: 0 },
+        clientRegistrationOptions: { clientSecretExpirySeconds: 0, rateLimit: false },
       }),
     );
-    // The consent screen rendered by the provider's `authorize()` POSTs the human decision
-    // here. Finalize it and 302 the user-agent back to the client with a code, or 400 an
-    // expired/unknown request with a themed page.
-    app.post("/oauth/consent", express.urlencoded({ extended: false }), (req: Request, res: Response) => {
-      const body = req.body as { pending_id?: unknown; decision?: unknown };
-      const pendingId = typeof body.pending_id === "string" ? body.pending_id : "";
-      const url = oauthProvider!.completeConsent(pendingId, body.decision === "approve");
-      if (!url) {
-        res
-          .status(400)
-          .type("html")
-          .send(callbackPage("This authorization request expired — start again from your client.", false, cfg.settings?.auth_screen));
-        return;
-      }
-      res.redirect(url);
-    });
+    // There is no consent page or form route any more (design 3.15): the owner decides in the dashboard, through
+    // GET /api/oauth/pending/:id and POST /api/oauth/consent below the owner gate, with the session header and the
+    // CSRF value. A cookie cannot carry that decision: it would reach every other local port too.
     resourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(new URL(oauthOpts.canonicalResource));
     // A tunnel-fronted endpoint must NEVER serve `/mcp` unauthenticated. Force the gate on
     // regardless of the loopback `require_auth` heuristic — the public issuer implies exposure.
@@ -363,8 +535,369 @@ export async function startDashboard(
     requireAuth: () => requireAuth,
     apiKeys,
     verifyOAuthToken: oauthProvider ? (t) => oauthProvider!.verifyToken(t) : undefined,
+    oauthClientName: oauthProvider ? (id) => oauthProvider!.clientNameOf(id) : undefined,
+    clients: liveClients,
     resourceMetadataUrl,
   });
+
+  // ====================================================================
+  // Routes outside the owner gate, on purpose: liveness, health, and the login exchange itself.
+  // Registered BEFORE the gate below; Express runs middleware in registration order, so every
+  // /api route registered after `app.use("/api", ...)` is owner-session protected by construction.
+  // ====================================================================
+  // --- Liveness probe: a tiny, dependency-free 200 for uptime monitors / `docker healthcheck` /
+  // k8s readiness. Reveals only the service name + version + process uptime: no config, no server
+  // ids. Registered before the SPA catch-all so the exact path wins over the fallback handler. ---
+  app.get("/healthz", (_req: Request, res: Response) => {
+    res.json({
+      status: "ok",
+      service: "switchboard",
+      version: VERSION,
+      uptime_s: Math.round(process.uptime()),
+      // Liveness is unaffected by the kill switch (the process is up); the flag tells a monitor that
+      // every tool call, resource read and prompt get is currently refused.
+      kill_switch: killStatus(cfg).active,
+    });
+  });
+
+  // --- Readiness/health: per-server mount + circuit-breaker roll-up with one ok/degraded verdict.
+  // Unauthenticated by design (monitors poll it); it exposes only server ids + circuit state, never
+  // secrets. This is the endpoint that wires the otherwise-dead Router.serverHealth() into an
+  // operator-visible surface. ---
+  app.get("/api/health", (_req: Request, res: Response) => {
+    const configured = cfg.servers.map((s) => ({ id: s.id, source: s.source, enabled: s.enabled !== false }));
+    const mounted = new Map<string, number>();
+    for (const s of cfg.servers) {
+      const m = gateway.registry.get(s.id);
+      if (m) mounted.set(s.id, m.tools.length);
+    }
+    const report = buildHealthReport(configured, mounted, gateway.router.serverHealth());
+    // 200 when ready, 503 when degraded, so a monitor polling /api/health gets an honest HTTP signal,
+    // not a green 200 hiding an unmounted/tripped upstream.
+    // The kill switch is an operator decision, not a fault, so like a disabled server it does not
+    // degrade the verdict; it is reported beside it so a monitor can alert on it deliberately.
+    res.status(report.status === "ok" ? 200 : 503).json({ ...report, kill_switch: killStatus(cfg) });
+  });
+
+  // Exchange a one-time login code (minted by THIS gateway, after its own presence check, for `switchboard dashboard
+  // login`) for the owner session. The session id and the CSRF value come back in the body, once, for the SPA to keep
+  // in sessionStorage and send as headers. No cookie is set: a cookie is not scoped by port, so any other local
+  // listener the browser visited would receive a working credential.
+  app.post("/api/session", (req: Request, res: Response) => {
+    res.set("Cache-Control", "no-store");
+    const body = (req.body ?? {}) as { code?: unknown };
+    const session = sessions.login(body.code);
+    if (!session) {
+      res.status(401).json({ error: "invalid, expired or already used login code", code: "SB_LOGIN_CODE" });
+      return;
+    }
+    res.json({ session: session.sid, csrf: session.csrf, expires_at: new Date(session.expires).toISOString() });
+  });
+
+  // ====================================================================
+  // Control API (design 3.3): how `switchboard approvals ...` reaches THIS running gateway. It is a separate
+  // router with its own credential, the control token minted at start and kept in SWITCHBOARD_HOME/control.key
+  // (DPAPI-wrapped). An owner session does not open it and the control token does not open the owner routes.
+  // The token is a convenience that keeps stray local callers out; the security boundary is the owner presence
+  // check the gateway performs inside approve() (Windows Hello), which no caller can answer for the owner.
+  // ====================================================================
+  const approvals = gateway.approvals;
+  const controlToken = newControlToken();
+  try {
+    writeControlKey(controlToken);
+  } catch (err) {
+    log.warn(`could not store the control key (${err instanceof Error ? err.message : String(err)}): \`switchboard approvals\` cannot reach this gateway; decide approvals in the dashboard`);
+  }
+
+  const outcomeToResponse = (res: Response, out: ApprovalOutcome, key: string): void => {
+    if (out.ok) {
+      res.json({ [key]: true, approval: out.record });
+      return;
+    }
+    res.status(out.status).json({ error: out.error, code: out.code, ...(out.record ? { approval: out.record } : {}) });
+  };
+  const approvalError = (res: Response, err: unknown): void => {
+    res.status(500).json({ error: `the approval store cannot be used: ${err instanceof Error ? err.message : String(err)}`, code: "SB_APPROVAL_STORE" });
+  };
+  /** Approve through the gateway's own presence check, whichever door the request came through. */
+  const approveVia = (via: ApprovalChannel) => async (req: Request, res: Response): Promise<void> => {
+    try {
+      outcomeToResponse(res, await approvals.approve(String(req.params.id), via), "approved");
+    } catch (err) {
+      approvalError(res, err);
+    }
+  };
+  const denyVia = (via: ApprovalChannel) => (req: Request, res: Response): void => {
+    try {
+      outcomeToResponse(res, approvals.deny(String(req.params.id), via), "denied");
+    } catch (err) {
+      approvalError(res, err);
+    }
+  };
+  const approvalsPayload = () => ({
+    ...approvals.list(),
+    now: new Date().toISOString(),
+    ttl_seconds: cfg.gateway.approval?.ttl_seconds ?? DEFAULT_TTL_SECONDS,
+    require_for_risk: cfg.gateway.approval?.require_for_risk ?? [...DEFAULT_REQUIRE_FOR_RISK],
+    // Harness switches that weaken the gate: the page says so out loud when either is on.
+    auto_approve: process.env.SWITCHBOARD_AUTO_APPROVE === "1",
+    insecure_presence: process.env.SWITCHBOARD_INSECURE_APPROVAL === "1",
+  });
+
+  // Owner decisions are audited under the channel they came through (`owner:dashboard`, `owner:cli`). A refusal is a
+  // deny row. `principal` overrides the label for an act nothing proved the owner for (`local:cli`).
+  const ownerAudit = (tool: string, reason: string, actor: "dashboard" | "cli", decision: "allow" | "deny" = "allow", principal?: string): void => {
+    try {
+      audit({ server: "switchboard", tool, scope: "full", decision, reason, principal: principal ?? `owner:${actor}` });
+    } catch (err) {
+      log.error(`audit write failed for ${tool}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  // Client administration helpers, shared by the control API (below) and the dashboard routes (further down).
+  const CLIENT_FIELDS = ["description", "servers", "tools", "exclude_tools", "max_scope", "max_risk", "limits", "accounts"] as const;
+  const clientFields = (body: Record<string, unknown>, extra: readonly string[] = []): Record<string, unknown> => {
+    const unknown = Object.keys(body).filter((k) => !(CLIENT_FIELDS as readonly string[]).includes(k) && !extra.includes(k));
+    if (unknown.length > 0) throw new ClientAdminError(`unknown field '${safeText(unknown[0], 64)}'`, 400);
+    const out: Record<string, unknown> = {};
+    for (const k of CLIENT_FIELDS) if (k in body) out[k] = body[k];
+    return out;
+  };
+  const clientError = (res: Response, err: unknown): void => {
+    if (err instanceof ClientAdminError) {
+      res.status(err.status).json({ error: err.message });
+      return;
+    }
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  };
+  const bodyOf = (req: Request): Record<string, unknown> =>
+    req.body && typeof req.body === "object" && !Array.isArray(req.body) ? (req.body as Record<string, unknown>) : {};
+  /**
+   * Turn the kill switch OFF, the one kill-switch direction that re-opens every tool. It is performed by THIS gateway
+   * after its own owner-presence check (Windows Hello, or a challenge at its console), whichever door the request came
+   * through: the dashboard (owner session plus CSRF) or the control API (`switchboard kill off`). A process that is not
+   * the gateway cannot answer the presence prompt, which is the point: `kill off` used to delete the KILL file directly,
+   * so anything that could run the CLI (an agent with a shell) could undo the owner's emergency stop.
+   */
+  const killOff = async (actor: "dashboard" | "cli"): Promise<{ status: number; body: Record<string, unknown> }> => {
+    if (cfg.gateway.kill_switch === true) {
+      return {
+        status: 409,
+        body: { error: "gateway.kill_switch is true in the config, which a running gateway cannot clear: set it to false and restart the gateway", code: "SB_KILL_CONFIG" },
+      };
+    }
+    // Nothing on (no file, nothing latched here): nothing to protect, so no prompt.
+    if (!killStatus(cfg).active) return { status: 200, body: { ...killStatus(cfg) } };
+    const presence = await approvals.verifyPresence("Turn the MCP Switchboard kill switch OFF: tool calls will be allowed again");
+    if (!presence.ok) {
+      ownerAudit("kill.off_refused", `presence check failed (${presence.method}): ${presence.reason}`, actor, "deny");
+      return { status: 403, body: { error: `owner presence was not verified (${presence.method}): ${presence.reason}`, code: "SB_PRESENCE_FAILED" } };
+    }
+    // Removes the file AND drops the latch: the only way back once the gateway has seen the switch on (design 3.15).
+    const { changed, unlatched } = setKillFile(false);
+    ownerAudit("kill.off", `${changed || unlatched ? "kill switch turned OFF" : "kill switch was already off"}${unlatched && !changed ? " (the KILL file was already gone: the latch was cleared)" : ""} from the ${actor === "cli" ? "CLI" : "dashboard"} (presence ${presence.method})`, actor);
+    return { status: 200, body: { ...killStatus(cfg) } };
+  };
+
+  const control = express.Router();
+  control.use((req: Request, res: Response, next: () => void) => {
+    res.setHeader("Cache-Control", "no-store");
+    const presented = bearerOf(req.headers["authorization"]);
+    if (presented === null || !controlTokenMatches(presented, controlToken)) {
+      res.status(401).json({ error: "control token required: `switchboard approvals` reads it from SWITCHBOARD_HOME/control.key", code: "SB_CONTROL_TOKEN" });
+      return;
+    }
+    next();
+  });
+  control.get("/approvals", (_req: Request, res: Response) => {
+    try {
+      res.json(approvalsPayload());
+    } catch (err) {
+      approvalError(res, err);
+    }
+  });
+  control.get("/approvals/:id", (req: Request, res: Response) => {
+    try {
+      const rec = approvals.get(String(req.params.id));
+      if (!rec) res.status(404).json({ error: `no approval '${req.params.id}'`, code: "SB_APPROVAL_UNKNOWN" });
+      else res.json({ approval: rec });
+    } catch (err) {
+      approvalError(res, err);
+    }
+  });
+  control.post("/approvals/:id/approve", approveVia("cli"));
+  control.post("/approvals/:id/deny", denyVia("cli"));
+  // `switchboard kill off`: clearing the switch, the one direction that re-opens every tool, needs presence.
+  control.post("/kill/off", async (_req: Request, res: Response) => {
+    try {
+      const off = await killOff("cli");
+      res.status(off.status).json(off.body);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+  // `switchboard kill on` against a running gateway: the gateway writes the file AND latches the switch in its own
+  // memory in one step, so a delete of the file right afterwards cannot beat it. Turning ON needs no presence (anyone
+  // may stop the gateway; that is what a kill switch is for), so the row is not labelled as an owner act.
+  control.post("/kill/on", (_req: Request, res: Response) => {
+    try {
+      const { changed } = setKillFile(true);
+      ownerAudit("kill.on", changed ? "kill switch turned ON through the control API and latched in the gateway" : "kill switch was already on", "cli", "allow", "local:cli");
+      res.json({ ...killStatus(cfg) });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // `switchboard dashboard login`: the code is minted HERE, after THIS gateway's presence check. The caller supplies
+  // nothing that matters: no presence method, no environment. (A caller's own presence check proved nothing: it could
+  // set SWITCHBOARD_INSECURE_APPROVAL itself, and the old login-codes/ directory was writable by any process.) One
+  // prompt at a time: while one is open, another request is refused instead of queueing a second dialog.
+  let loginPrompt = false;
+  control.post("/login", async (_req: Request, res: Response) => {
+    if (loginPrompt) {
+      res.status(429).json({ error: "a sign-in prompt is already open on this machine: answer it first", code: "SB_PRESENCE_BUSY" });
+      return;
+    }
+    loginPrompt = true;
+    try {
+      const presence = await approvals.verifyPresence("Sign in to the MCP Switchboard dashboard");
+      if (!presence.ok) {
+        ownerAudit("dashboard.login_refused", `presence check failed (${presence.method}): ${presence.reason}`, "cli", "deny");
+        res.status(403).json({ error: `owner presence was not verified (${presence.method}): ${presence.reason}`, code: "SB_PRESENCE_FAILED" });
+        return;
+      }
+      const code = sessions.mintLoginCode();
+      ownerAudit("dashboard.login", `a one-time login code was minted after this gateway's presence check (${presence.method})`, "cli");
+      res.json({ code, expires_in: Math.round((opts.loginCodeTtlMs ?? LOGIN_CODE_TTL_MS) / 1000), presence: presence.method });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    } finally {
+      loginPrompt = false;
+    }
+  });
+
+  // Client administration for `switchboard client ...` and `switchboard install` while a gateway runs (design 3.15). A
+  // client's ceiling decides what an agent may do, so granting one (add, change, rotate a key) needs THIS gateway's
+  // presence check, with the exact grant in the prompt; revoking (rm) does not, like deny. The change is made here, in
+  // the gateway's own memory and the config file, so it is live at once and the pinned watcher has nothing to flag.
+  const cliBy = (proof: string | undefined): ChangeBy => ({ actor: "cli", proof });
+  const refusePresence = (res: Response, tool: string, id: string, presence: { method: string; reason: string }): void => {
+    ownerAudit(tool, `client '${id}': presence check failed (${presence.method}): ${presence.reason}`, "cli", "deny");
+    res.status(403).json({ error: `owner presence was not verified (${presence.method}): ${presence.reason}`, code: "SB_PRESENCE_FAILED" });
+  };
+  control.get("/clients", (_req: Request, res: Response) => {
+    try {
+      const { clients, orphan_keys } = clientAdmin.list();
+      res.json({ clients: clients.map((c) => ({ id: c.id, ...c.config, keys: c.keys, key_file: c.key_file })), orphan_keys, drift: clientAdmin.drifted });
+    } catch (err) {
+      clientError(res, err);
+    }
+  });
+  control.post("/clients/:id/add", async (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const body = bodyOf(req);
+      const spec = clientFields(body.spec && typeof body.spec === "object" && !Array.isArray(body.spec) ? (body.spec as Record<string, unknown>) : {});
+      const wantsToken = body.print === true;
+      const shown = clientAdmin.preview(id, spec);
+      const presence = await approvals.verifyPresence(`${shown.created ? "Register" : "Change"} client '${id}': ${clientSummaryLine(shown.client)}${wantsToken ? ". Its key is handed to the CLI" : ""}`);
+      if (!presence.ok) return refusePresence(res, "client.add_refused", id, presence);
+      // The prompt can stay open for minutes: what was shown must still be what will be done.
+      const now = clientAdmin.preview(id, spec);
+      if (now.created !== shown.created || JSON.stringify(now.client) !== JSON.stringify(shown.client)) {
+        res.status(409).json({ error: `client '${id}' changed while the presence prompt was open: nothing was done, run the command again`, code: "SB_CLIENT_CHANGED" });
+        return;
+      }
+      const r = clientAdmin.add(id, spec, cliBy(presence.method));
+      res.json({ created: r.created, client: r.client, keyKept: r.keyKept, revoked: r.revoked, keyFile: r.keyFile, ...(wantsToken && r.token ? { token: r.token } : {}) });
+    } catch (err) {
+      clientError(res, err);
+    }
+  });
+  control.post("/clients/:id/rotate", async (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const wantsToken = bodyOf(req).print === true;
+      if (!Object.prototype.hasOwnProperty.call(liveClients() ?? {}, id)) {
+        res.status(404).json({ error: `no client '${safeText(id, 64)}': add it first with \`switchboard client add ${safeText(id, 64)}\`` });
+        return;
+      }
+      const presence = await approvals.verifyPresence(`Rotate the key of client '${id}'${wantsToken ? ". The new key is handed to the CLI" : ""}`);
+      if (!presence.ok) return refusePresence(res, "client.rotate_refused", id, presence);
+      const r = clientAdmin.rotate(id, cliBy(presence.method));
+      res.json({ rotated: id, revoked: r.revoked, keyFile: r.keyFile, ...(wantsToken ? { token: r.token } : {}) });
+    } catch (err) {
+      clientError(res, err);
+    }
+  });
+  control.post("/clients/:id/rm", (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const r = clientAdmin.remove(id, { purge: bodyOf(req).purge === true }, cliBy(undefined));
+      res.json({ removed: id, purged: r.purged, revokedKeys: r.revokedKeys, keyFileRemoved: r.keyFileRemoved });
+    } catch (err) {
+      clientError(res, err);
+    }
+  });
+  app.use("/api/control", control);
+
+  // ====================================================================
+  // Owner gate: every /api route below needs a valid owner session (the X-Switchboard-Session header, never a
+  // cookie), and every mutating one the X-Switchboard-CSRF header. Client API keys are never read here (defect D4: a loopback peer is not
+  // the owner).
+  // ====================================================================
+  app.use("/api", ownerSessionGate(sessions));
+  // Pick up a clients change made on the CLI before any admin route reads or rewrites the config.
+  app.use("/api", (_req: Request, _res: Response, next: () => void) => {
+    clientWatcher.sync();
+    next();
+  });
+
+  // Who am I: lets the SPA check that the session it kept is still valid after a reload. The CSRF value is not
+  // returned: the SPA keeps the one it got at login.
+  app.get("/api/session", (_req: Request, res: Response) => {
+    const owner = res.locals.ownerSession as { csrf: string; expires: number };
+    res.json({ authenticated: true, expires_at: new Date(owner.expires).toISOString() });
+  });
+
+  // Sign out: drops the session server side.
+  app.delete("/api/session", (req: Request, res: Response) => {
+    sessions.revoke(sessionIdOf(req));
+    res.json({ ok: true });
+  });
+
+  // --- OAuth consent (design 3.15). The owner decides here, with the session header and the CSRF value, not on a page
+  // of its own. A pending request is only ever described to, and decided by, a signed-in owner. ---
+  if (oauthProvider) {
+    app.get("/api/oauth/pending/:id", (req: Request, res: Response) => {
+      const id = String(req.params.id);
+      const p = oauthProvider!.describePending(id);
+      if (!p) {
+        res.status(404).json({ error: "this authorization request expired or does not exist: start again from the client", code: "SB_OAUTH_PENDING" });
+        return;
+      }
+      // The gateway maps an OAuth client to a configured client by exact name: the owner must see that before approving.
+      const maps = Object.prototype.hasOwnProperty.call(liveClients() ?? {}, p.client_name) ? p.client_name : null;
+      res.json({ pending_id: id, ...p, maps_to_client: maps });
+    });
+    app.post("/api/oauth/consent", (req: Request, res: Response) => {
+      const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? (req.body as Record<string, unknown>) : {};
+      const pendingId = typeof body.pending_id === "string" ? body.pending_id : "";
+      if (body.decision !== "approve" && body.decision !== "deny") {
+        res.status(400).json({ error: "decision must be \"approve\" or \"deny\"", code: "SB_BAD_REQUEST" });
+        return;
+      }
+      const pending = oauthProvider!.describePending(pendingId);
+      const url = oauthProvider!.completeConsent(pendingId, body.decision === "approve");
+      if (!url || !pending) {
+        res.status(404).json({ error: "this authorization request expired or was already decided: start again from the client", code: "SB_OAUTH_PENDING" });
+        return;
+      }
+      ownerAudit("oauth.consent", `OAuth client '${pending.client_name}' ${body.decision === "approve" ? "approved" : "denied"} in the dashboard`, "dashboard");
+      res.json({ redirect: url });
+    });
+  }
 
   // ====================================================================
   // JSON API for the dashboard
@@ -381,7 +914,8 @@ export async function startDashboard(
       const tools = (mounted?.tools ?? []).map((t) => ({
         name: t.name,
         enabled: s.tools?.[t.name]?.enabled !== false,
-        scope: s.tools?.[t.name]?.policy ?? inferScope(t.name),
+        scope: resolveToolScope(t.name, s.tools?.[t.name], mounted?.scopeHints?.[t.name], t.annotations),
+        risk: resolveRisk(s, resolveToolScope(t.name, s.tools?.[t.name], mounted?.scopeHints?.[t.name], t.annotations), s.tools?.[t.name], mounted?.connector?.hints[t.name]),
       }));
       return {
         id: s.id,
@@ -410,9 +944,56 @@ export async function startDashboard(
       tool_exposure: cfg.gateway.tool_exposure,
       default_policy: cfg.gateway.default_policy,
       active_profile: activeProfileName(cfg) ?? null,
+      kill_switch: killStatus(cfg),
       profiles,
       servers,
     });
+  });
+
+  // --- Approvals (design 3.3). Owner session and CSRF as for every /api route; approving also needs the
+  // owner to be PRESENT: the gateway shows Windows Hello (or a challenge on its own console) before it signs. ---
+  app.get("/api/approvals", (_req: Request, res: Response) => {
+    try {
+      res.json(approvalsPayload());
+    } catch (err) {
+      approvalError(res, err);
+    }
+  });
+  app.get("/api/approvals/:id", (req: Request, res: Response) => {
+    try {
+      const rec = approvals.get(String(req.params.id));
+      if (!rec) res.status(404).json({ error: `no approval '${req.params.id}'`, code: "SB_APPROVAL_UNKNOWN" });
+      else res.json({ approval: rec });
+    } catch (err) {
+      approvalError(res, err);
+    }
+  });
+  app.post("/api/approvals/:id/approve", approveVia("dashboard"));
+  app.post("/api/approvals/:id/deny", denyVia("dashboard"));
+
+  // --- Kill switch from the dashboard. ON is immediate. OFF is the dangerous direction (it re-opens every tool),
+  // so it needs the owner present, performed by the gateway (see killOff above), exactly like an approval. ---
+  app.get("/api/kill", (_req: Request, res: Response) => {
+    res.json(killStatus(cfg));
+  });
+  app.post("/api/kill", async (req: Request, res: Response) => {
+    const on = (req.body as { on?: unknown } | undefined)?.on;
+    if (typeof on !== "boolean") {
+      res.status(400).json({ error: "body must be {\"on\": true|false}" });
+      return;
+    }
+    try {
+      if (on) {
+        const { changed } = setKillFile(true);
+        ownerAudit("kill.on", changed ? "kill switch turned ON from the dashboard" : "kill switch was already on", "dashboard");
+        res.json(killStatus(cfg));
+        return;
+      }
+      const off = await killOff("dashboard");
+      res.status(off.status).json(off.body);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
   });
 
   app.get("/api/audit", (_req: Request, res: Response) => {
@@ -424,46 +1005,18 @@ export async function startDashboard(
     res.json(usageStats());
   });
 
-  // --- Liveness probe: a tiny, dependency-free 200 for uptime monitors / `docker healthcheck` /
-  // k8s readiness. Reveals only the service name + version + process uptime — no config, no server
-  // ids. Registered before the SPA catch-all so the exact path wins over the fallback handler. ---
-  app.get("/healthz", (_req: Request, res: Response) => {
-    res.json({ status: "ok", service: "switchboard", version: VERSION, uptime_s: Math.round(process.uptime()) });
-  });
-
-  // --- Readiness/health: per-server mount + circuit-breaker roll-up with one ok/degraded verdict.
-  // Read-only and unauthenticated like /api/state and /api/audit (the dashboard binds loopback by
-  // default); it exposes only server ids + circuit state, never secrets. This is the endpoint that
-  // wires the otherwise-dead Router.serverHealth() into an operator-visible surface. ---
-  app.get("/api/health", (_req: Request, res: Response) => {
-    const configured = cfg.servers.map((s) => ({ id: s.id, source: s.source, enabled: s.enabled !== false }));
-    const mounted = new Map<string, number>();
-    for (const s of cfg.servers) {
-      const m = gateway.registry.get(s.id);
-      if (m) mounted.set(s.id, m.tools.length);
-    }
-    const report = buildHealthReport(configured, mounted, gateway.router.serverHealth());
-    // 200 when ready, 503 when degraded — so a monitor polling /api/health gets an honest HTTP signal,
-    // not a green 200 hiding an unmounted/tripped upstream.
-    res.status(report.status === "ok" ? 200 : 503).json(report);
-  });
-
   // ====================================================================
   // Playground: try any exposed tool against the live gateway. Listing reuses the
   // router's governed tool surface (so `search` mode shows the two meta-tools, namespaced
   // mode shows `server__tool`, etc.); execution routes through `router.callTool`, so policy
   // + approval + audit all apply exactly as they would for a downstream agent. Running a
-  // tool is loopback-only — a tunnelled dashboard must never be able to drive real calls.
+  // tool needs an owner session and CSRF header: nothing else may drive real calls.
   // ====================================================================
   app.get("/api/playground/tools", (_req: Request, res: Response) => {
     res.json({ tools: gateway.router.listTools(), tool_exposure: cfg.gateway.tool_exposure });
   });
 
   app.post("/api/playground/call", async (req: Request, res: Response) => {
-    if (!isLocalRequest(req)) {
-      res.status(403).json({ error: "the playground can only run tools from the local machine" });
-      return;
-    }
     const name = typeof req.body?.name === "string" ? req.body.name : "";
     if (!name) {
       res.status(400).json({ error: "missing tool 'name'" });
@@ -530,14 +1083,9 @@ export async function startDashboard(
     res.json(tk);
   });
 
-  // Add a catalog toolkit as a mounted (disabled) server. Loopback-only: a tunnelled
-  // dashboard must not be able to add servers. The new server starts disabled so the
+  // Add a catalog toolkit as a mounted (disabled) server. The new server starts disabled so the
   // operator wires credentials and flips it on deliberately.
   app.post("/api/toolkits/:slug/add", async (req: Request, res: Response) => {
-    if (!isLocalRequest(req)) {
-      res.status(403).json({ error: "servers can only be added from the local machine" });
-      return;
-    }
     if (catalog.toolkits.length === 0) catalog = loadCatalog();
     const tk = catalog.toolkits.find((t) => t.slug === String(req.params.slug));
     if (!tk) {
@@ -548,18 +1096,43 @@ export async function startDashboard(
       res.status(400).json({ error: `'${tk.name}' must be installed manually: ${tk.mount.note}` });
       return;
     }
-    // Derive a config id from the slug; ensure it is unique.
-    const base = tk.slug.replace(/^[^:]+:/, "").replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase() || "toolkit";
-    let id = base;
-    let n = 1;
-    while (cfg.servers.some((s) => s.id === id)) id = `${base}-${++n}`;
+    // An npx toolkit runs code fetched from the npm registry at every start, so a NEW mount must name one exact
+    // version (`name@1.2.3`): the catalog's own version when it lists one, else the one the owner sends. A floating
+    // name is never added. (An unpinned entry already in a config file still mounts, with a warning.)
+    let npxPackage: string | undefined;
+    if (tk.mount.source === "npx") {
+      const sent = ((req.body ?? {}) as { version?: unknown }).version;
+      const spec = tk.mount.package;
+      const name = npmPackageName(spec);
+      const version = sent !== undefined ? sent : tk.mount.version;
+      if (sent === undefined && isPinnedNpmSpec(spec)) npxPackage = spec;
+      else if (isExactNpmVersion(version)) npxPackage = `${name}@${version as string}`;
+      else {
+        res.status(400).json({
+          error: `'${safeText(tk.name, 80)}' runs the npm package '${safeText(name, 80)}', and a new mount needs one exact version: send {"version": "x.y.z"} (the catalog lists ${tk.mount.version ? `'${safeText(tk.mount.version, 40)}', which is not an exact version` : "none"}). Floating versions such as 'latest' or '^1.2.0' are not added.`,
+          code: "SB_PACKAGE_UNPINNED",
+          package: name,
+        });
+        return;
+      }
+    }
+
+    // Derive a valid config id from the slug; ensure it is unique.
+    const id = uniqueServerId(tk.slug, cfg.servers.map((s) => s.id));
 
     const server: SwitchboardConfig["servers"][number] =
       tk.mount.source === "remote"
         ? { id, source: "remote", url: tk.mount.url, enabled: false, auth: "none" }
         : tk.mount.source === "npx"
-          ? { id, source: "npx", package: tk.mount.package, enabled: false, policy: cfg.gateway.default_policy }
+          ? { id, source: "npx", package: npxPackage, enabled: false, policy: cfg.gateway.default_policy }
           : { id, source: "app2mcp", openapi: tk.mount.openapi, enabled: false, policy: cfg.gateway.default_policy };
+
+    // Whatever is written must load again: refuse an entry the strict schema would reject at the next start.
+    const issues = configIssues({ ...cfg, servers: [...cfg.servers, server] });
+    if (issues) {
+      res.status(400).json({ error: `'${safeText(tk.name, 80)}' cannot be added: ${issues.join("; ")}`, code: "SB_CONFIG_INVALID", issues });
+      return;
+    }
 
     cfg.servers.push(server);
     try {
@@ -575,34 +1148,93 @@ export async function startDashboard(
   // ====================================================================
   // API keys: bearer tokens that authenticate `/mcp` (Composio "API Keys" page)
   // ====================================================================
-  // Listing is redacted (never the hash). Issuing/revoking mutate local state and are
-  // restricted to loopback callers so a tunnelled dashboard can't mint itself a key.
+  // Listing is redacted (never the hash). Issuing/revoking mutate local state and sit behind the owner gate.
   app.get("/api/apikeys", (_req: Request, res: Response) => {
     res.json({ keys: apiKeys.list(), require_auth: cfg.gateway.http.require_auth, enforced: requireAuth });
   });
 
   app.post("/api/apikeys", (req: Request, res: Response) => {
-    if (!isLocalRequest(req)) {
-      res.status(403).json({ error: "API keys can only be issued from the local machine" });
+    const name = typeof req.body?.name === "string" ? req.body.name : "";
+    const client = typeof req.body?.client === "string" && req.body.client !== "" ? req.body.client : undefined;
+    if (client !== undefined && (!isValidClientId(client) || !Object.prototype.hasOwnProperty.call(cfg.clients ?? {}, client))) {
+      res.status(400).json({ error: `unknown client '${client}': add it first with POST /api/clients` });
       return;
     }
-    const name = typeof req.body?.name === "string" ? req.body.name : "";
-    const { token, record } = apiKeys.issue(name);
+    const { token, record } = apiKeys.issue(name, client ? { client } : {});
     // The plaintext token is returned ONCE here and never again.
     res.json({ token, key: record });
   });
 
   app.delete("/api/apikeys/:id", (req: Request, res: Response) => {
-    if (!isLocalRequest(req)) {
-      res.status(403).json({ error: "API keys can only be revoked from the local machine" });
-      return;
-    }
     const removed = apiKeys.revoke(String(req.params.id));
     if (!removed) {
       res.status(404).json({ error: `unknown key '${req.params.id}'` });
       return;
     }
     res.json({ revoked: req.params.id });
+  });
+
+  // ====================================================================
+  // Clients (design 3.1): the principals that may call /mcp, and the keys bound to them. Owner session and
+  // CSRF as for every /api route. No route here ever returns a token: a new or rotated key goes only to the
+  // client's key file (the bridge reads it), exactly as `switchboard client add` does without --print.
+  // ====================================================================
+  app.get("/api/clients", (_req: Request, res: Response) => {
+    const { clients, orphan_keys } = clientAdmin.list();
+    res.json({
+      clients: clients.map((c) => ({ id: c.id, ...c.config, keys: c.keys, key_file: c.key_file })),
+      orphan_keys,
+      // True while /mcp demands a principal bound to one of these clients.
+      enforced: clients.length > 0,
+    });
+  });
+
+  app.post("/api/clients", (req: Request, res: Response) => {
+    try {
+      const body = bodyOf(req);
+      const spec = clientFields(body, ["id"]);
+      const id = typeof body.id === "string" ? body.id : "";
+      if (Object.prototype.hasOwnProperty.call(cfg.clients ?? {}, id)) {
+        res.status(409).json({ error: `client '${id}' already exists: change it with PUT /api/clients/${id}` });
+        return;
+      }
+      const r = clientAdmin.add(id, spec);
+      res.status(201).json({ id, client: r.client, key: r.key ?? null, key_file: true });
+    } catch (err) {
+      clientError(res, err);
+    }
+  });
+
+  app.put("/api/clients/:id", (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const client = clientAdmin.update(id, clientFields(bodyOf(req)));
+      res.json({ id, client });
+    } catch (err) {
+      clientError(res, err);
+    }
+  });
+
+  app.post("/api/clients/:id/rotate", (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const r = clientAdmin.rotate(id);
+      res.json({ rotated: id, key: r.key, revoked: r.revoked });
+    } catch (err) {
+      clientError(res, err);
+    }
+  });
+
+  app.delete("/api/clients/:id", (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      // Default: remove the client entirely. `?purge=0` revokes its keys and key file but keeps the config entry.
+      const purge = req.query.purge !== "0" && req.query.purge !== "false";
+      const r = clientAdmin.remove(id, { purge });
+      res.json({ removed: id, purged: r.purged, revoked_keys: r.revokedKeys, key_file_removed: r.keyFileRemoved });
+    } catch (err) {
+      clientError(res, err);
+    }
   });
 
   // ====================================================================
@@ -644,46 +1276,76 @@ export async function startDashboard(
     });
   });
 
-  // Persist a partial settings/gateway update. Loopback-only (it writes config.yaml).
+  // Persist a partial settings/gateway update (it writes config.yaml).
   app.put("/api/settings", (req: Request, res: Response) => {
-    if (!isLocalRequest(req)) {
-      res.status(403).json({ error: "settings can only be changed from the local machine" });
-      return;
-    }
     const body = (req.body ?? {}) as {
       settings?: SettingsConfig;
       gateway?: { require_auth?: "auto" | "always" | "never"; tool_exposure?: "namespaced" | "flat" | "search"; default_policy?: "read" | "write" | "full" };
     };
 
+    // The change is built on a COPY and checked with the same strict schema the file is loaded with, BEFORE anything
+    // live or on disk changes. 0.1.0 merged the body into the running config and wrote it: `require_auth: "bogus"`
+    // or an unknown key was accepted, saved, and the next start failed to load the file.
+    const next = JSON.parse(JSON.stringify(cfg)) as SwitchboardConfig;
+    next.settings = next.settings ?? {};
+    if (body.settings?.general) next.settings.general = { ...next.settings.general, ...body.settings.general };
+    if (body.settings?.auth_screen) next.settings.auth_screen = { ...next.settings.auth_screen, ...body.settings.auth_screen };
+    if (body.settings?.webhook) next.settings.webhook = { ...next.settings.webhook, ...body.settings.webhook };
+    if (body.gateway?.require_auth) next.gateway.http.require_auth = body.gateway.require_auth;
+    if (body.gateway?.tool_exposure) next.gateway.tool_exposure = body.gateway.tool_exposure;
+    if (body.gateway?.default_policy) next.gateway.default_policy = body.gateway.default_policy;
+    const issues = configIssues(next);
+    if (issues) {
+      res.status(400).json({
+        error: `these settings would make the configuration invalid, so nothing was changed: ${issues.join("; ")}`,
+        code: "SB_CONFIG_INVALID",
+        issues,
+      });
+      return;
+    }
+
+    // Apply only what the body touched, to the live objects the rest of the gateway holds.
+    const hadSettings = cfg.settings !== undefined;
     cfg.settings = cfg.settings ?? {};
-    if (body.settings?.general) cfg.settings.general = { ...cfg.settings.general, ...body.settings.general };
-    if (body.settings?.auth_screen) cfg.settings.auth_screen = { ...cfg.settings.auth_screen, ...body.settings.auth_screen };
-    if (body.settings?.webhook) cfg.settings.webhook = { ...cfg.settings.webhook, ...body.settings.webhook };
+    const before = {
+      general: cfg.settings.general,
+      auth_screen: cfg.settings.auth_screen,
+      webhook: cfg.settings.webhook,
+      require_auth: cfg.gateway.http.require_auth,
+      tool_exposure: cfg.gateway.tool_exposure,
+      default_policy: cfg.gateway.default_policy,
+    };
+    if (body.settings?.general) cfg.settings.general = next.settings.general;
+    if (body.settings?.auth_screen) cfg.settings.auth_screen = next.settings.auth_screen;
+    if (body.settings?.webhook) cfg.settings.webhook = next.settings.webhook;
+    cfg.gateway.http.require_auth = next.gateway.http.require_auth;
+    cfg.gateway.tool_exposure = next.gateway.tool_exposure;
+    cfg.gateway.default_policy = next.gateway.default_policy;
 
-    if (body.gateway?.require_auth) cfg.gateway.http.require_auth = body.gateway.require_auth;
-    if (body.gateway?.tool_exposure) cfg.gateway.tool_exposure = body.gateway.tool_exposure;
-    if (body.gateway?.default_policy) cfg.gateway.default_policy = body.gateway.default_policy;
-
+    try {
+      if (configPath) writeConfig(configPath, cfg);
+    } catch (err) {
+      // The write is atomic, so the old file is intact; put the running config back to match it.
+      cfg.settings.general = before.general;
+      cfg.settings.auth_screen = before.auth_screen;
+      cfg.settings.webhook = before.webhook;
+      if (!hadSettings && Object.values(cfg.settings).every((v) => v === undefined)) cfg.settings = undefined;
+      cfg.gateway.http.require_auth = before.require_auth;
+      cfg.gateway.tool_exposure = before.tool_exposure;
+      cfg.gateway.default_policy = before.default_policy;
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ error: msg });
+      return;
+    }
     // Re-evaluate the live auth posture so a require_auth change takes effect immediately.
     // The OAuth AS, when enabled, is a hard floor: a settings edit must never drop the
     // `/mcp` gate below "required" while a public issuer is exposing the endpoint.
     requireAuth = authRequired(cfg.gateway.http.require_auth, host) || Boolean(oauthOpts);
-
-    try {
-      if (configPath) writeConfig(configPath, cfg);
-      res.json({ ok: true, enforced: requireAuth });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      res.status(500).json({ error: msg });
-    }
+    res.json({ ok: true, enforced: requireAuth });
   });
 
   // Send a sample event to the configured webhook so the operator can verify it end to end.
-  app.post("/api/webhook/test", async (req: Request, res: Response) => {
-    if (!isLocalRequest(req)) {
-      res.status(403).json({ error: "webhook tests can only be triggered from the local machine" });
-      return;
-    }
+  app.post("/api/webhook/test", async (_req: Request, res: Response) => {
     const wh = cfg.settings?.webhook;
     if (!wh?.url) {
       res.status(400).json({ error: "no webhook URL configured" });
@@ -704,16 +1366,12 @@ export async function startDashboard(
         return;
       }
     }
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 8000);
     try {
-      const r = await fetch(wh.url, { method: "POST", headers, body: payload, signal: ctrl.signal });
+      const r = await guardedFetch(wh.url, { method: "POST", headers, body: payload, timeoutMs: 8000 }, () => cfg.settings?.network);
       res.json({ ok: r.ok, status: r.status, signed: Boolean(headers["x-switchboard-signature"]) });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       res.status(502).json({ error: `delivery failed: ${msg}` });
-    } finally {
-      clearTimeout(timer);
     }
   });
 
@@ -721,7 +1379,7 @@ export async function startDashboard(
   // Triggers (poll-first change detection). The definitions live in
   // `settings.triggers` and round-trip to config.yaml like webhook/council;
   // the live poller state (last poll/fire, errors, recent fires) is read from
-  // the running TriggerManager. Mutating endpoints are loopback-only.
+  // the running TriggerManager. Mutating endpoints need the CSRF header on top of the owner session.
   // ====================================================================
   app.get("/api/triggers", (_req: Request, res: Response) => {
     res.json(gateway.triggers.state());
@@ -731,10 +1389,6 @@ export async function startDashboard(
   // Validated with the same strict schema used at startup, persisted, then the
   // poller is reloaded so the change takes effect without a restart.
   app.put("/api/triggers", (req: Request, res: Response) => {
-    if (!isLocalRequest(req)) {
-      res.status(403).json({ error: "triggers can only be changed from the local machine" });
-      return;
-    }
     let parsed;
     try {
       parsed = parseTriggersConfig(req.body?.triggers ?? req.body ?? {});
@@ -754,13 +1408,9 @@ export async function startDashboard(
     res.json({ ok: true, state: gateway.triggers.state() });
   });
 
-  // Run one trigger's poll right now (the "Poll now" button). Loopback-only because
-  // a poll is a real governed tool call. Returns the PollResult (fired? new_count? error?).
+  // Run one trigger's poll right now (the "Poll now" button). A poll is a real governed tool call.
+  // Returns the PollResult (fired? new_count? error?).
   app.post("/api/triggers/:id/poll", async (req: Request, res: Response) => {
-    if (!isLocalRequest(req)) {
-      res.status(403).json({ error: "triggers can only be polled from the local machine" });
-      return;
-    }
     try {
       const result = await gateway.triggers.pollOnce(String(req.params.id));
       res.json(result);
@@ -772,13 +1422,9 @@ export async function startDashboard(
 
   // Pause / resume a single trigger WITHOUT removing its definition. Pause short-circuits the
   // poller before the governed tool call, so the trigger stays configured but goes quiet; resume
-  // re-arms it. Loopback-only (both change live poller behavior). A 404 when the id is unknown so
+  // re-arms it (both change live poller behavior). A 404 when the id is unknown so
   // the dashboard never silently no-ops a typo'd id. Pause state is in-memory and resets on reload.
   app.post("/api/triggers/:id/pause", (req: Request, res: Response) => {
-    if (!isLocalRequest(req)) {
-      res.status(403).json({ error: "triggers can only be paused from the local machine" });
-      return;
-    }
     const id = String(req.params.id);
     if (!gateway.triggers.pauseTrigger(id)) {
       res.status(404).json({ error: `unknown trigger '${id}'` });
@@ -788,10 +1434,6 @@ export async function startDashboard(
   });
 
   app.post("/api/triggers/:id/resume", (req: Request, res: Response) => {
-    if (!isLocalRequest(req)) {
-      res.status(403).json({ error: "triggers can only be resumed from the local machine" });
-      return;
-    }
     const id = String(req.params.id);
     if (!gateway.triggers.resumeTrigger(id)) {
       res.status(404).json({ error: `unknown trigger '${id}'` });
@@ -808,7 +1450,7 @@ export async function startDashboard(
   });
 
   // ====================================================================
-  // OAuth catalog (Connected Accounts): browse providers, connect via loopback
+  // OAuth catalog (Connected Accounts): browse providers, connect via the loopback callback
   // ====================================================================
   const redirectUri = `http://${cfg.gateway.http.host}:${cfg.gateway.http.port}/oauth/callback`;
 
@@ -817,10 +1459,6 @@ export async function startDashboard(
   });
 
   app.post("/api/connect/:provider", (req: Request, res: Response) => {
-    if (!isLocalRequest(req)) {
-      res.status(403).json({ error: "accounts can only be connected from the local machine" });
-      return;
-    }
     try {
       const { authorizeUrl } = gateway.oauth.beginAuth(String(req.params.provider), redirectUri);
       res.json({ authorizeUrl });
@@ -854,11 +1492,67 @@ export async function startDashboard(
     }
   });
 
+  // ====================================================================
+  // Connectors admin: providers (curated and seeded), connect, accounts, toolkit on/off, coverage. Registered
+  // after the owner gate like every /api route, so each needs the owner session and each mutation the CSRF
+  // header. The answers are metadata: no credential is ever returned (connectors/admin.ts).
+  // ====================================================================
+  const admin = new ConnectorAdmin(gateway.oauth.connectors, {
+    config: () => cfg,
+    configPath: () => configPath,
+    mount: (s) => gateway.registry.mount(s),
+    unmount: (id) => gateway.registry.unmount(id),
+    redirectUri: () => redirectUri,
+  });
+  const adminRoute =
+    (fn: (req: Request) => unknown | Promise<unknown>) =>
+    async (req: Request, res: Response): Promise<void> => {
+      try {
+        res.json(await fn(req));
+      } catch (err) {
+        if (err instanceof AdminError) res.status(err.status).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
+        else if (isConnectorError(err)) res.status(400).json({ error: err.message, code: err.code });
+        else {
+          log.error(`connectors admin: ${err instanceof Error ? err.message : String(err)}`);
+          res.status(500).json({ error: "internal error", code: "SB_INTERNAL" });
+        }
+      }
+    };
+  const qstr = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
+  const qnum = (v: unknown): number | undefined => (typeof v === "string" && /^\d{1,6}$/.test(v) ? Number(v) : undefined);
+
+  app.get(
+    "/api/connectors/providers",
+    adminRoute((req) =>
+      admin.listProviders({
+        ...(qstr(req.query.q) !== undefined ? { q: qstr(req.query.q)! } : {}),
+        ...(qstr(req.query.auth) ? { auth: qstr(req.query.auth)! } : {}),
+        ...(qstr(req.query.source) ? { source: qstr(req.query.source)! } : {}),
+        ...(qstr(req.query.connectable) === "1" || qstr(req.query.connectable) === "true" ? { connectable: true } : {}),
+        ...(qnum(req.query.offset) !== undefined ? { offset: qnum(req.query.offset)! } : {}),
+        ...(qnum(req.query.limit) !== undefined ? { limit: qnum(req.query.limit)! } : {}),
+      }),
+    ),
+  );
+  app.get("/api/connectors/providers/:slug", adminRoute((req) => admin.providerDetail(String(req.params.slug))));
+  app.post(
+    "/api/connectors/providers/:slug/connect",
+    adminRoute((req) => admin.connect(String(req.params.slug), (typeof req.body === "object" && req.body !== null && !Array.isArray(req.body) ? req.body : {}) as ConnectBody)),
+  );
+  app.get("/api/connectors/accounts", adminRoute((req) => ({ accounts: admin.accounts(qstr(req.query.provider) ? { provider: qstr(req.query.provider)! } : {}) })));
+  app.post("/api/connectors/accounts/:id/probe", adminRoute((req) => admin.probe(String(req.params.id))));
+  app.get("/api/connectors/toolkits", adminRoute(() => ({ toolkits: admin.toolkits() })));
+  app.post(
+    "/api/connectors/toolkits/:slug/enable",
+    adminRoute((req) => {
+      const account = typeof req.body === "object" && req.body !== null ? (req.body as { account?: unknown }).account : undefined;
+      return admin.enableToolkit(String(req.params.slug), typeof account === "string" ? { account } : {});
+    }),
+  );
+  app.post("/api/connectors/toolkits/:slug/disable", adminRoute((req) => admin.disableToolkit(String(req.params.slug))));
+  app.get("/api/connectors/coverage", adminRoute(() => admin.coverage()));
+
   app.post("/api/servers/:id/toggle", async (req: Request, res: Response) => {
-    if (!isLocalRequest(req)) {
-      res.status(403).json({ error: "servers can only be toggled from the local machine" });
-      return;
-    }
     const id = req.params.id;
     const server = cfg.servers.find((s) => s.id === id);
     if (!server) {
@@ -878,12 +1572,8 @@ export async function startDashboard(
     }
   });
 
-  // Remove a server entirely (loopback-only). Unmounts it first if it's live.
+  // Remove a server entirely. Unmounts it first if it's live.
   app.delete("/api/servers/:id", async (req: Request, res: Response) => {
-    if (!isLocalRequest(req)) {
-      res.status(403).json({ error: "servers can only be removed from the local machine" });
-      return;
-    }
     const id = String(req.params.id);
     const idx = cfg.servers.findIndex((s) => s.id === id);
     if (idx === -1) {
@@ -915,8 +1605,23 @@ export async function startDashboard(
     });
   });
 
+  // Terminal handlers, registered last. Without them Express answers an unmatched route with its own
+  // HTML page (which replaces our CSP) and prints a stack trace, with file paths, for a malformed JSON body.
+  app.use((_req: Request, res: Response) => {
+    res.status(404).json({ error: "not found" });
+  });
+  app.use(jsonErrorHandler());
+
   // Surface the auth posture loudly at startup so a misconfigured exposure is obvious.
-  if (requireAuth) {
+  const startClients = Object.keys(cfg.clients ?? {});
+  if (startClients.length > 0) {
+    log.info(
+      `${startClients.length} client${startClients.length === 1 ? "" : "s"} configured (${startClients.join(", ")}): /mcp requires a key bound to one of them, on every bind host`,
+    );
+    if (apiKeys.count === 0 && !oauthProvider) {
+      log.warn("no client key exists yet: run `switchboard client add <id>` (or rotate) so a client can connect");
+    }
+  } else if (requireAuth) {
     if (apiKeys.count === 0 && !oauthProvider) {
       log.warn(
         `/mcp requires an API key but none exist — run \`switchboard apikey new <name>\` to issue one; clients cannot connect until you do`,
@@ -938,10 +1643,24 @@ export async function startDashboard(
     log.info(`toolkit catalog: ${catalog.counts.total} entries (${catalog.counts.mcp_registry} MCP, ${catalog.counts.apis_guru} OpenAPI)`);
   }
 
-  return new Promise<DashboardHandle>((resolve) => {
-    const httpServer = app.listen(port, host, () => {
+  // No callback on listen: Express 5 invokes a listen callback with the error too, so a callback that
+  // resolves would report "listening" when the bind failed. Resolve on 'listening', reject on 'error'.
+  return new Promise<DashboardHandle>((resolve, reject) => {
+    const httpServer = app.listen(port, host);
+    httpServer.once("error", (err: NodeJS.ErrnoException) => {
+      reject(
+        new Error(
+          err.code === "EADDRINUSE"
+            ? `port ${port} on ${host} is already in use: stop the other process or change gateway.http.port`
+            : `cannot listen on ${host}:${port}: ${err.message}`,
+        ),
+      );
+    });
+    httpServer.once("listening", () => {
+      httpServer.on("error", (err) => log.error(`HTTP server error: ${err.message}`));
       const url = `http://${host}:${port}`;
       log.ok(`dashboard + HTTP endpoint on ${url}`);
+      log.info("the admin API needs an owner session: run `switchboard dashboard login` to sign in");
       resolve({
         url,
         close: () =>

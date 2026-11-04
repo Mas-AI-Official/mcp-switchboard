@@ -8,12 +8,41 @@ export { Registry, type MountedServer } from "./registry.js";
 export { Router } from "./router.js";
 export { Vault, HOME_DIR } from "./vault.js";
 export { OAuthStore, type ProviderStatus } from "./oauth.js";
+export { Connectors, ConnectorError, CONNECTOR_ERR } from "./connectors/index.js";
 export { buildOpenApiServer, type OpenApiServer } from "./openapi.js";
+export { guardedFetch, NetGuardError, classifyAddress, type GuardedInit, type GuardedResponse } from "./netguard.js";
 export { loadConfig, writeConfig, starterConfig } from "./config.js";
-export { evaluate, inferScope, type PolicyDecision } from "./policy.js";
+export { evaluate, inferScope, resolveToolScope, resolveRisk, type PolicyDecision } from "./policy.js";
+export { isKilled, killStatus, setKillFile, killFilePath, type KillStatus } from "./killswitch.js";
 export { approve, setStdioActive } from "./approval.js";
-export { audit, recentAudit, type AuditEntry } from "./audit.js";
+export {
+  Approvals,
+  ApprovalLimitError,
+  argsSha256,
+  presenceMessage,
+  summarizeArgs,
+  type ApprovalRecord,
+  type ApprovalView,
+  type ApprovalStatus,
+  type ApprovalGate,
+  type ApprovalOutcome,
+  type ApprovalRequest,
+  type PresenceProvider,
+} from "./approvals.js";
+export { audit, recentAudit, verifyAudit, AuditLog, type AuditEntry, type AuditVerifyResult } from "./audit.js";
 export { startDashboard, type DashboardHandle } from "./dashboard.js";
+export {
+  isValidClientId,
+  globMatch,
+  resolveClientGate,
+  establishPrincipal,
+  principalLabel,
+  type Principal,
+  type PrincipalVia,
+  type ClientGate,
+} from "./principal.js";
+export { ClientAdmin, ClientAdminError, type ClientSummary } from "./clientadmin.js";
+export { ClientConfigWatcher } from "./clientconfig.js";
 export {
   loadCatalog,
   writeCatalog,

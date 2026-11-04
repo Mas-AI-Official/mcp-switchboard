@@ -18,8 +18,8 @@
 //                           failure returns an isError result and NEVER calls fetch (fail closed).
 // Zero deps (node stdlib + the package's own compiled output + its bundled MCP SDK). Build first.
 import { buildHttpToolServer } from "../dist/httptool.js";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
+import { useFetchStubForTests } from "../dist/netguard.js";
 
 const checks = [];
 const assert = (name, cond, detail = "") => {
@@ -37,6 +37,9 @@ globalThis.fetch = async (url, init) => {
   lastReq = { url: url instanceof URL ? url : new URL(String(url)), init: init ?? {} };
   return nextResponse();
 };
+// Outbound HTTP now goes through the SSRF guard (src/netguard.ts) instead of calling fetch directly:
+// route it to the capturing stub below and answer DNS with a public address, so no check here touches the network.
+const restoreNet = useFetchStubForTests(() => globalThis.fetch);
 
 /** Mount a config's http_tools and return a connected MCP client + the generated server's metadata. */
 async function mount(config, resolveHeaders = async () => ({})) {
@@ -197,6 +200,7 @@ async function open(config, resolveHeaders) {
 }
 
 globalThis.fetch = realFetch;
+restoreNet();
 for (const c of clients) {
   try {
     await c.close();

@@ -32,12 +32,12 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult } from "@modelcontextprotocol/server";
 import type { Router } from "./router.js";
 import type { SwitchboardConfig, TriggerDefinition } from "./types.js";
 import { deliverTriggerWebhook, type SecretResolver, type TriggerWebhookEvent } from "./webhook.js";
+import { readJsonFileSync, writeJsonAtomic } from "./atomicfile.js";
 import { HOME_DIR } from "./vault.js";
 import { log } from "./logger.js";
 
@@ -413,8 +413,7 @@ export class TriggerManager {
 
   private persist(): void {
     try {
-      if (!existsSync(HOME_DIR)) mkdirSync(HOME_DIR, { recursive: true });
-      writeFileSync(STATE_PATH, JSON.stringify(this.data, null, 2));
+      writeJsonAtomic(STATE_PATH, this.data, { mode: 0o600 });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log.warn(`triggers: could not persist state: ${msg}`);
@@ -422,16 +421,17 @@ export class TriggerManager {
   }
 }
 
-/** Load persisted trigger state, tolerating a missing or corrupt file. */
+/**
+ * Load persisted trigger state. A missing file is a first run. A file that exists but does not parse
+ * throws (via readJsonFileSync): an empty state would forget every cursor and re-fire every trigger.
+ */
 function loadState(): StateFile {
-  if (!existsSync(STATE_PATH)) return { triggers: {}, fires: [] };
-  try {
-    const raw = JSON.parse(readFileSync(STATE_PATH, "utf8")) as Partial<StateFile>;
-    return {
-      triggers: raw.triggers && typeof raw.triggers === "object" ? raw.triggers : {},
-      fires: Array.isArray(raw.fires) ? raw.fires : [],
-    };
-  } catch {
-    return { triggers: {}, fires: [] };
-  }
+  const raw = readJsonFileSync<Partial<StateFile>>(STATE_PATH, {
+    validate: (v) => (typeof v === "object" && v !== null && !Array.isArray(v) ? null : "expected a JSON object"),
+  });
+  if (!raw) return { triggers: {}, fires: [] };
+  return {
+    triggers: raw.triggers && typeof raw.triggers === "object" ? raw.triggers : {},
+    fires: Array.isArray(raw.fires) ? raw.fires : [],
+  };
 }

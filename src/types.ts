@@ -9,12 +9,20 @@
 /** Access level a tool is allowed to operate at. Ordered: read < write < full. */
 export type Scope = "read" | "write" | "full";
 
+/** Risk of a call (design 3.4): low, medium or high. Decides approval; scope stays the ceiling check. */
+export type Risk = "low" | "medium" | "high";
+
 /** Per-tool override inside a server block. */
 export interface ToolOverride {
   /** `false` hard-blocks the tool — it never reaches the agent or the upstream. */
   enabled?: boolean;
   /** Pin the scope for this tool instead of inferring it from the name. */
   policy?: Scope;
+  /**
+   * Pin the risk of this tool (design 3.4) instead of deriving it from its scope and the server's
+   * `risk_defaults` / `outward`. The operator's explicit word wins in both directions.
+   */
+  risk?: Risk;
   /** Replace the description agents see for this tool (the upstream call is unaffected). */
   description_override?: string;
   /** Parameters dropped from the exposed input schema; also filtered out of `required`. */
@@ -162,6 +170,7 @@ export type ServerSource =
   | "remote"
   | "app2mcp"
   | "http-tool"
+  | "connector"
   | "council";
 
 /** One mounted (or mountable) upstream MCP server. */
@@ -198,6 +207,12 @@ export interface ServerConfig {
   /** Hand-declared HTTP endpoints exposed as governed MCP tools (source: http-tool). */
   http_tools?: HttpToolDef[];
 
+  // --- connector source (ADR local-composio, section 6.7) ---
+  /** The toolkit this server exposes (`youtube`, `gmail`, ...). Required for `source: connector`; the server id is its on/off switch. */
+  toolkit?: string;
+  /** Connected account this server uses by default (`ca_...`, `provider/label` or a label). A tool argument or a client binding wins over it. */
+  account?: string;
+
   // --- auth + schema shaping (any source) ---
   /**
    * Declarative auth injection resolved per call and mapped to a header (remote/app2mcp/http-tool)
@@ -218,10 +233,32 @@ export interface ServerConfig {
   credentials?: Record<string, string>;
   /** Plain env vars injected into the upstream process (also supports refs). */
   env?: Record<string, string>;
+  /**
+   * Names of variables to copy from the gateway's own environment into a stdio child. A stdio
+   * upstream gets only the SDK safe defaults plus a platform allowlist (PATH, SYSTEMROOT, ...), its own
+   * `env` and `credentials`, and the names listed here. Nothing else crosses.
+   */
+  env_passthrough?: string[];
+  /**
+   * Acknowledgement list for `env_passthrough`: a passthrough name that looks like a secret (KEY,
+   * TOKEN, SECRET, PASSWORD, ...) is refused unless it is also listed here. Every entry must also
+   * appear in `env_passthrough`. Prefer `credentials` with a `${vault:..}` reference for secrets.
+   */
+  env_passthrough_secrets?: string[];
   /** Per-tool enable/scope overrides keyed by the upstream tool name. */
   tools?: Record<string, ToolOverride>;
   /** Approval gates for this server. */
   approval?: ApprovalConfig;
+  /**
+   * Risk of a call by its scope (design 3.4). Defaults: read is `low`, write is `medium`, full is `high`.
+   * A per-tool `risk` overrides this; `outward: true` can only raise it.
+   */
+  risk_defaults?: { read?: Risk; write?: Risk; full?: Risk };
+  /**
+   * The server acts on the outside world (posts, sends, spends, publishes). Its write and full calls are
+   * at least `high` risk, and so need an out-of-band approval under the default `gateway.approval`.
+   */
+  outward?: boolean;
   /** Server-wide rate limits + spend budgets. Stacks under `settings.limits` and over each tool's
    *  `limits` — a call must pass the tool, server, and global ceilings it touches. */
   limits?: LimitSpec;
@@ -248,6 +285,33 @@ export interface GatewayConfig {
   tool_exposure: "namespaced" | "flat" | "search";
   /** Scope ceiling applied to any server that omits its own `policy`. */
   default_policy: Scope;
+  /**
+   * Kill switch: when true, every tools/call, resources/read and prompts/get is refused with
+   * `SB_KILL_SWITCH`. The file `<SWITCHBOARD_HOME>/KILL` (`switchboard kill on|off`) does the same
+   * without a restart; this flag is the declarative form, checked against the in-memory config on every
+   * call (the YAML itself is read at startup, so editing the file needs a restart).
+   */
+  kill_switch?: boolean;
+  /** Out-of-band approvals (design 3.3, 3.4). Optional: every field has a default. */
+  approval?: GatewayApprovalConfig;
+}
+
+/**
+ * `gateway.approval`: which calls need a human decision, and how long a decision request lives.
+ */
+export interface GatewayApprovalConfig {
+  /**
+   * Calls whose risk is listed here need an approval, OR-ed with each server's `approval.require_for`
+   * scopes. Default `[high]`. An empty list turns the risk rule off (the server scopes still apply).
+   */
+  require_for_risk?: Risk[];
+  /** How long a pending or approved record stays valid, seconds. 60 to 86400, default 900. */
+  ttl_seconds?: number;
+  /**
+   * How long a gated call waits for the owner before it returns `SB_APPROVAL_PENDING`, seconds. 0 to 50,
+   * default 0 (return at once and let the client call again after approval).
+   */
+  wait_seconds?: number;
 }
 
 export interface VaultConfig {
@@ -255,8 +319,29 @@ export interface VaultConfig {
   backend: "encrypted-file" | "env";
 }
 
+/**
+ * Outbound network guard (src/netguard.ts). Every request the gateway makes on behalf of config or
+ * tools resolves DNS first and refuses loopback, private, CGNAT, link-local, ULA, unspecified,
+ * multicast and cloud-metadata targets, follows at most 3 redirects with every hop re-validated, and
+ * is bounded in time and size. Defaults are safe; this block only relaxes or tunes them.
+ */
+export interface NetworkSettings {
+  /**
+   * Exact host names or IP addresses that may resolve to non-public addresses, e.g. a local model
+   * server: `["127.0.0.1"]` for Ollama on its default address. No wildcards, CIDR ranges, ports or
+   * schemes. Listing `127.0.0.1` does not allow `localhost` and the reverse.
+   */
+  allow_private?: string[];
+  /** Overall per-request deadline in ms (DNS, connect, headers and body). Default 15000. */
+  timeout_ms?: number;
+  /** Cap on a response body in bytes, enforced while streaming on decoded bytes. Default 5242880 (5 MiB). */
+  max_response_bytes?: number;
+}
+
 /** Dashboard-editable presentation/integration settings (the Composio "Settings" pages). */
 export interface SettingsConfig {
+  /** Outbound SSRF guard tuning. See {@link NetworkSettings}. */
+  network?: NetworkSettings;
   /** `/settings/general` — naming shown across the dashboard. Cosmetic; no effect on routing. */
   general?: {
     organization_name?: string;
@@ -288,6 +373,8 @@ export interface SettingsConfig {
   };
   /** Cross-provider "council" relay tools (`council_consult` / `council_debate`). Off by default. */
   council?: CouncilConfig;
+  /** Connector kit: file upload rules and media staging (ADR local-composio, sections 6.5 and 6.6). */
+  connectors?: ConnectorSettings;
   /**
    * Built-in OAuth 2.1 + PKCE Authorization Server for the `/mcp` endpoint. Off by default.
    * Required for hosted MCP clients (e.g. claude.ai web) that can only reach MCP Switchboard
@@ -341,6 +428,34 @@ export interface SettingsConfig {
   mount_retry?: MountRetryConfig;
 }
 
+/** Settings for the connector kit (`settings.connectors`). Everything defaults closed. */
+export interface ConnectorSettings {
+  /**
+   * Folders a local file may be uploaded from. Empty or absent: no local path is accepted (staged files and
+   * https URLs still are). A path must resolve, by realpath, inside one of them.
+   */
+  upload_allowlist?: string[];
+  /** Extra path segments that are never uploadable. The built-in list (`.ssh`, `.aws`, browser profiles, ...) cannot be shortened. */
+  upload_deny_segments?: string[];
+  /** Largest file an action may upload, bytes. Default 268435456 (256 MiB). */
+  max_upload_bytes?: number;
+  /** Largest file a download may save, bytes. Default 268435456 (256 MiB). */
+  max_download_bytes?: number;
+  /** Ephemeral public URLs for platforms that fetch media themselves (Instagram, TikTok PULL_FROM_URL). */
+  media?: {
+    /** `expose` (default): serve `/media/<id>` from this gateway through a tunnel. `s3`: not implemented in this build; it refuses. */
+    backend?: "expose" | "s3";
+    /** The https URL the tunnel gives this gateway. Required for `expose`. */
+    public_base_url?: string;
+    /** URL lifetime in seconds. Capped at 900 (15 minutes). */
+    ttl_seconds?: number;
+    /** GETs one URL serves before it is deleted. Default 3, at most 10. */
+    max_fetches?: number;
+    /** Tests only: serve the URL on the local listener address and accept an http base. */
+    allow_local?: boolean;
+  };
+}
+
 /**
  * A profile is a named filter over the already-configured servers/tools — a saved "view" the
  * operator can switch between without editing server blocks. It controls visibility (which
@@ -375,6 +490,38 @@ export interface ProfileConfig {
    * Omitted = no extra cap (the server/gateway ceiling stands).
    */
   policy?: Scope;
+}
+
+/**
+ * A registered client (design 3.1): the profile a principal acts under. It controls what a caller may SEE
+ * (servers, tools) and CALL, and a scope ceiling that, like a profile, can only LOWER what the server and
+ * the active profile already allow. The effective ceiling is the tightest of server, active profile and
+ * client. Unlike a profile, an omitted `servers` list means NO server: a client sees only what it is given.
+ */
+export interface ClientConfig {
+  /** Human note shown in `switchboard client list` and the dashboard. */
+  description?: string;
+  /** Server id globs this client may see and call (`*` any run, `?` one character). Empty or omitted = none. */
+  servers: string[];
+  /** Optional allowlist of EXPOSED tool names (globs). Omitted or empty = every tool of the allowed servers. */
+  tools?: string[];
+  /** Exposed tool names (globs) hidden and refused even when `servers` and `tools` would allow them. */
+  exclude_tools?: string[];
+  /** Scope ceiling for this client; can only lower the server and profile ceilings. Omitted = no extra cap. */
+  max_scope?: Scope;
+  /**
+   * Highest risk this client may request (design 3.4). A call above it is refused with `SB_POLICY_DENY`
+   * (before any approval is created); `high` still needs an approval. Omitted = high.
+   */
+  max_risk?: Risk;
+  /** Rate limits and spend budgets for this client, same shape as a server's. A call must also pass every other level. */
+  limits?: LimitSpec;
+  /**
+   * Connector accounts (docs/architecture/CONNECTORS.md): provider slug -> the connected account this client uses
+   * (`ca_...`, `provider/label` or a unique label), or `"*"` to let it choose any account of that provider with a
+   * call's `account` argument. A provider with no entry uses the provider's default account and may name no other.
+   */
+  accounts?: Record<string, string>;
 }
 
 /**
@@ -499,4 +646,10 @@ export interface SwitchboardConfig {
   servers: ServerConfig[];
   /** Dashboard-editable settings. Optional so pre-existing configs remain valid. */
   settings?: SettingsConfig;
+  /**
+   * Registered clients (design 3.1), keyed by client id (^[a-z0-9][a-z0-9_-]{0,63}$). Optional: while it is
+   * absent or empty the gateway is in legacy single-user mode. The moment it holds one entry, `/mcp` requires a
+   * principal bound to a configured client on every request, whatever the bind host.
+   */
+  clients?: Record<string, ClientConfig>;
 }

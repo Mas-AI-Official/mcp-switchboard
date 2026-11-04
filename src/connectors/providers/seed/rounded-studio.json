@@ -1,0 +1,61 @@
+{
+  "$schema": "../../schemas/provider.schema.json",
+  "slug": "rounded-studio",
+  "name": "Call-rounded",
+  "categories": [
+    "uncategorized"
+  ],
+  "api_hosts": [
+    "api.callrounded.com"
+  ],
+  "docs_url": "https://github.com/activepieces/activepieces/tree/6f4be340d7c4bef9fb6ff874ca72224e4933d3d2/packages/pieces/community/rounded-studio/src",
+  "owner_setup": {
+    "console_url": "https://api.callrounded.com/",
+    "steps": [
+      "Unverified seed: this definition was derived from another project's published auth settings and has not been tested against the provider. Read the provider's own developer documentation first.",
+      "Create an API key or token in the provider's account settings.",
+      "Connect: switchboard connect rounded-studio --auth api_key --token-stdin"
+    ],
+    "redirect_uris": [],
+    "notes": [
+      "SEED, unverified. Facts (URLs, scope names, field names, a product name) were read from the Activepieces community piece 'rounded-studio' at commit 6f4be340d7c4 (MIT; see NOTICE). Nothing here was tested against the provider and it never counts as working.",
+      "ASSUMED, not stated by the source: the credential sent as Authorization: Bearer. UNVERIFIED.",
+      "api_hosts are candidates harvested from request URL settings in the piece source. Review them before relying on them: they decide where a credential may be sent."
+    ]
+  },
+  "auth": [
+    {
+      "id": "api_key",
+      "mode": "api_key",
+      "label": "API key",
+      "default": true,
+      "inject": {
+        "in": "header",
+        "name": "Authorization",
+        "template": "Bearer {token}"
+      },
+      "fields": {
+        "auth_config_creation": [],
+        "connected_account_initiation": [
+          {
+            "name": "api_key",
+            "required": true,
+            "secret": true
+          }
+        ]
+      }
+    }
+  ],
+  "provenance": {
+    "derived_from": [
+      "activepieces/activepieces@6f4be340d7c4bef9fb6ff874ca72224e4933d3d2 packages/pieces/community/rounded-studio/src"
+    ],
+    "license": "MIT",
+    "attribution": "Copyright (c) 2020-2024 Activepieces Inc. (MIT Expat). Facts only: URLs, scope names, field names. See NOTICE."
+  },
+  "source": {
+    "activepieces_commit": "6f4be340d7c4bef9fb6ff874ca72224e4933d3d2",
+    "piece": "rounded-studio"
+  },
+  "verification": "unverified_seed"
+}

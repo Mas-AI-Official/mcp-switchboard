@@ -14,17 +14,19 @@
  * Each toolkit carries a `mount` block that maps 1:1 onto a `ServerConfig`, so
  * "Add to MCP Switchboard" can turn a catalog entry into a real mounted server.
  *
- * Zero dependencies — global `fetch` (Node >=18.18) and the standard library only.
+ * Zero dependencies: every fetch goes through the SSRF guard (src/netguard.ts) and the standard library.
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isExactNpmVersion } from "./packagespec.js";
+import { BULK_DOCUMENT_MAX_BYTES, BULK_DOCUMENT_TIMEOUT_MS, guardedFetch, type NetworkSource } from "./netguard.js";
 
 /** How a catalog entry can be mounted. Mirrors the relevant `ServerConfig` fields. */
 export type ToolkitMount =
   | { source: "remote"; url: string; transport: string }
-  | { source: "npx"; package: string }
+  | { source: "npx"; package: string; /** An exact version the registry lists for this package; absent when it lists none or a floating one. */ version?: string }
   | { source: "app2mcp"; openapi: string; base_url?: string }
   | { source: "manual"; note: string };
 
@@ -75,6 +77,11 @@ export interface CatalogSnapshot {
 
 const MCP_REGISTRY_URL = "https://registry.modelcontextprotocol.io/v0/servers?limit=100";
 const APIS_GURU_URL = "https://api.apis.guru/v2/list.json";
+// awesome-mcp-servers (MIT): used ONLY as a category-taxonomy source and for LIVE discovery,
+// never bulk-snapshotted. See docs/COMPOSIO-PARITY.md ("parse awesome-mcp-servers headings";
+// "enrichment registries = discovery only, never snapshot").
+const AWESOME_MCP_README_URL =
+  "https://raw.githubusercontent.com/punkpeye/awesome-mcp-servers/main/README.md";
 const USER_AGENT = "mcp-switchboard catalog sync (+https://github.com/Mas-AI-Official/mcp-switchboard)";
 
 /** Resolve `data/catalog.json` relative to the package root (one level above dist/ or src/). */
@@ -127,8 +134,13 @@ function deriveMcpCategory(name: string, description: string): string {
 }
 
 /** Fetch JSON with a short timeout and a descriptive UA. Throws on non-2xx. */
-async function fetchJson<T>(url: string): Promise<T> {
-  const res = await fetch(url, { headers: { "user-agent": USER_AGENT, accept: "application/json" } });
+async function fetchJson<T>(url: string, network?: NetworkSource): Promise<T> {
+  // Public registries are bulk documents (apis.guru list.json is ~9 MB), so they get the bulk caps.
+  const res = await guardedFetch(
+    url,
+    { headers: { "user-agent": USER_AGENT, accept: "application/json" }, maxBytes: BULK_DOCUMENT_MAX_BYTES, timeoutMs: BULK_DOCUMENT_TIMEOUT_MS },
+    network,
+  );
   if (!res.ok) throw new Error(`${url} -> HTTP ${res.status}`);
   return (await res.json()) as T;
 }
@@ -142,6 +154,7 @@ interface RegistryRemote {
 interface RegistryPackage {
   registryType?: string;
   identifier?: string;
+  version?: string;
   transport?: { type?: string };
 }
 interface RegistryServer {
@@ -170,8 +183,12 @@ function isLatestRow(row: RegistryRow): boolean | undefined {
   return typeof v === "boolean" ? v : undefined;
 }
 
-/** Turn a registry server into a Toolkit, or null if it has no mountable transport. */
-function toolkitFromRegistry(srv: RegistryServer): Toolkit | null {
+/**
+ * Turn a registry server into a Toolkit, or null if it has no mountable transport. When a `taxonomy`
+ * (repo→category, from awesome-mcp-servers) is supplied and this server's repo is in it, that curated
+ * category wins over the keyword heuristic: this is what drains the generic "MCP Servers" catch-all.
+ */
+function toolkitFromRegistry(srv: RegistryServer, taxonomy?: Map<string, string>): Toolkit | null {
   const rawName = (srv.name ?? "").trim();
   if (!rawName) return null;
   const description = oneLine(srv.description);
@@ -187,7 +204,8 @@ function toolkitFromRegistry(srv: RegistryServer): Toolkit | null {
   } else {
     const npm = (srv.packages ?? []).find((p) => p.registryType === "npm" && p.identifier);
     if (npm?.identifier) {
-      mount = { source: "npx", package: npm.identifier };
+      // Keep the registry's version only when it is an exact one: a new mount of this package is pinned to it.
+      mount = { source: "npx", package: npm.identifier, ...(isExactNpmVersion(npm.version) ? { version: npm.version } : {}) };
     } else {
       const other = (srv.packages ?? []).find((p) => p.identifier);
       if (other?.identifier) {
@@ -197,22 +215,25 @@ function toolkitFromRegistry(srv: RegistryServer): Toolkit | null {
   }
   if (!mount) return null;
 
+  const repoUrl = srv.repository?.url;
+  const curatedCategory = taxonomy && repoUrl ? taxonomy.get(normalizeRepoUrl(repoUrl) ?? "") : undefined;
+
   return {
     slug: `mcp:${rawName}`,
     name: display,
     description,
-    category: deriveMcpCategory(rawName, description),
+    category: curatedCategory || deriveMcpCategory(rawName, description),
     tags: rawName.split(/[/.\-_]/).filter((t) => t.length > 1),
     origin: "mcp-registry",
     source_license: "MIT (MCP Registry data)",
-    repository: srv.repository?.url,
-    homepage: srv.repository?.url,
+    repository: repoUrl,
+    homepage: repoUrl,
     mount,
   };
 }
 
 /** Page through the MCP Registry, dedupe to the latest version of each server. */
-async function ingestMcpRegistry(): Promise<Toolkit[]> {
+async function ingestMcpRegistry(taxonomy?: Map<string, string>, network?: NetworkSource): Promise<Toolkit[]> {
   const byName = new Map<string, Toolkit>();
   // Track which names we've seen a `isLatest: true` row for, so older rows can't overwrite it.
   const lockedLatest = new Set<string>();
@@ -221,10 +242,10 @@ async function ingestMcpRegistry(): Promise<Toolkit[]> {
   const maxPages = 60; // safety cap (~6000 rows)
 
   while (url && pages < maxPages) {
-    const page: RegistryPage = await fetchJson<RegistryPage>(url);
+    const page: RegistryPage = await fetchJson<RegistryPage>(url, network);
     pages++;
     for (const row of page.servers ?? []) {
-      const tk = toolkitFromRegistry(row.server);
+      const tk = toolkitFromRegistry(row.server, taxonomy);
       if (!tk) continue;
       const latest = isLatestRow(row);
       if (lockedLatest.has(tk.slug) && latest !== true) continue; // keep the locked latest
@@ -257,8 +278,8 @@ interface ApisGuruEntry {
 }
 
 /** Convert the apis.guru list into Toolkits (one per API, using the preferred version). */
-async function ingestApisGuru(): Promise<Toolkit[]> {
-  const list = await fetchJson<Record<string, ApisGuruEntry>>(APIS_GURU_URL);
+async function ingestApisGuru(network?: NetworkSource): Promise<Toolkit[]> {
+  const list = await fetchJson<Record<string, ApisGuruEntry>>(APIS_GURU_URL, network);
   const out: Toolkit[] = [];
   for (const [key, entry] of Object.entries(list)) {
     const verKey = entry.preferred ?? Object.keys(entry.versions)[0];
@@ -286,6 +307,212 @@ async function ingestApisGuru(): Promise<Toolkit[]> {
     });
   }
   return out;
+}
+
+// --- Adapter C: awesome-mcp-servers (MIT): TAXONOMY + LIVE DISCOVERY ONLY ---
+//
+// Design boundary (docs/COMPOSIO-PARITY.md): awesome-mcp-servers is NOT a bulk-snapshot source
+// (only CC0 sources, MCP Registry + apis.guru, are copied into data/catalog.json). We use it two
+// ways, both allowed: (1) its curated category HEADINGS become a taxonomy we apply to servers we
+// ALREADY hold from CC0 sources, keyed by GitHub repo: a category NAME is a non-copyrightable fact;
+// (2) live `discoverToolkits` surfaces servers NOT in our snapshot at query time, never persisted.
+// Attribution: category taxonomy © the awesome-mcp-servers contributors (MIT).
+
+/**
+ * Reduce any GitHub URL to its canonical `github.com/owner/repo` join key: lowercased, no
+ * protocol / `www.` / `git+` prefix / `.git` suffix / trailing path, first two segments only.
+ * Returns null for non-GitHub or unparseable URLs. This is the key that joins our CC0 registry
+ * entries (which carry `repository.url`) to awesome-mcp-servers' human-curated category headings.
+ */
+export function normalizeRepoUrl(url: string | undefined | null): string | null {
+  if (!url) return null;
+  let s = String(url).trim().replace(/^git\+/i, "");
+  if (s.startsWith("git@github.com:")) s = "https://github.com/" + s.slice("git@github.com:".length);
+  let u: URL;
+  try {
+    u = new URL(s);
+  } catch {
+    return null;
+  }
+  if (!/(^|\.)github\.com$/i.test(u.hostname)) return null;
+  const parts = u.pathname.split("/").filter(Boolean);
+  if (parts.length < 2) return null;
+  const owner = parts[0].toLowerCase();
+  const repo = parts[1].replace(/\.git$/i, "").toLowerCase();
+  return `github.com/${owner}/${repo}`;
+}
+
+/** One parsed awesome-mcp list item: a server under a category heading. */
+export interface AwesomeEntry {
+  category: string;
+  repoUrl: string; // normalized `github.com/owner/repo`
+  name: string; // the markdown link text, e.g. "owner/repo"
+  description: string;
+}
+
+const AWESOME_SECTION_START = /^##\s+Server Implementations\s*$/i;
+const AWESOME_H2 = /^##\s+\S/; // any other H2 closes the Server-Implementations section
+const AWESOME_H3 = /^###\s+(.*\S)\s*$/;
+const AWESOME_BULLET = /^\s*[-*]\s+\S/;
+const AWESOME_LINK_TARGET = /\]\((https?:\/\/[^)\s]+)\)/g; // markdown-link targets, in order
+
+/** Strip the `### <emoji?> <a name="…"></a>Category` chrome down to the plain category label. */
+function cleanAwesomeCategory(raw: string): string {
+  return raw
+    .replace(/<a\b[^>]*>.*?<\/a>/gi, "") // drop the <a name="…"></a> anchor
+    .replace(/<[^>]+>/g, "") // any other stray HTML
+    .replace(/^[^\p{L}\p{N}]+/u, "") // leading emoji / symbols / whitespace ("&"/"/" kept mid-string)
+    .trim();
+}
+
+/** The repo for a bullet is the first GitHub link target on the line (glama badges live on glama.ai). */
+function firstGithubRepo(line: string): string | null {
+  AWESOME_LINK_TARGET.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = AWESOME_LINK_TARGET.exec(line))) {
+    const norm = normalizeRepoUrl(m[1]);
+    if (norm) return norm;
+  }
+  return null;
+}
+
+/** Description = the text after the ` - ` separator, with any leading emoji/dash legend stripped. */
+function awesomeDescription(line: string): string {
+  const idx = line.indexOf(" - ");
+  const tail = idx >= 0 ? line.slice(idx + 3) : "";
+  return oneLine(tail.replace(/^[^\p{L}\p{N}(]+/u, "")); // drop a leading emoji/badge legend run
+}
+
+/**
+ * Parse awesome-mcp-servers' README (MIT) into (category, repo, name, description) records. ONLY the
+ * `## Server Implementations` section is walked: its `### <emoji?> <a name>Category` headings are the
+ * taxonomy, and each `- [text](url) … - desc` bullet is one server. Pure and offline (feed it the
+ * markdown string). The first GitHub link on a bullet is the repo; inline doc links (after the
+ * description dash) and glama score badges are ignored.
+ */
+export function parseAwesomeEntries(markdown: string): AwesomeEntry[] {
+  const lines = markdown.split(/\r?\n/);
+  const entries: AwesomeEntry[] = [];
+  let inSection = false;
+  let category = "";
+  for (const line of lines) {
+    if (!inSection) {
+      if (AWESOME_SECTION_START.test(line)) inSection = true;
+      continue;
+    }
+    if (AWESOME_H2.test(line)) break; // next H2 (e.g. "## Frameworks") ends Server Implementations
+    const h3 = line.match(AWESOME_H3);
+    if (h3) {
+      category = cleanAwesomeCategory(h3[1]);
+      continue;
+    }
+    if (!category || !AWESOME_BULLET.test(line)) continue;
+    const repoUrl = firstGithubRepo(line);
+    if (!repoUrl) continue;
+    const nameMatch = line.match(/^\s*[-*]\s+\[([^\]]*)\]/);
+    const name = (nameMatch?.[1] ?? "").trim() || repoUrl.replace("github.com/", "");
+    entries.push({ category, repoUrl, name, description: awesomeDescription(line) });
+  }
+  return entries;
+}
+
+/** Reduce awesome-mcp entries to a repo→category map (first listing wins on duplicates). */
+export function parseAwesomeTaxonomy(markdown: string): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const e of parseAwesomeEntries(markdown)) {
+    if (!map.has(e.repoUrl)) map.set(e.repoUrl, e.category);
+  }
+  return map;
+}
+
+/** Fetch text (README markdown) with the same UA as the JSON adapters. Throws on non-2xx. */
+async function fetchText(url: string, network?: NetworkSource): Promise<string> {
+  const res = await guardedFetch(
+    url,
+    { headers: { "user-agent": USER_AGENT }, maxBytes: BULK_DOCUMENT_MAX_BYTES, timeoutMs: BULK_DOCUMENT_TIMEOUT_MS },
+    network,
+  );
+  if (!res.ok) throw new Error(`${url} -> HTTP ${res.status}`);
+  return await res.text();
+}
+
+/**
+ * Live, best-effort fetch of awesome-mcp-servers' category taxonomy. Returns a repo→category map,
+ * or an EMPTY map on any failure: category enrichment must never break or fail a catalog sync.
+ */
+export async function fetchAwesomeTaxonomy(network?: NetworkSource): Promise<Map<string, string>> {
+  try {
+    return parseAwesomeTaxonomy(await fetchText(AWESOME_MCP_README_URL, network));
+  } catch {
+    return new Map();
+  }
+}
+
+/**
+ * A live discovery hit from awesome-mcp-servers. DELIBERATELY not a `Toolkit`: it has no `slug`,
+ * `mount`, or snapshot `origin`, so it can never be persisted into data/catalog.json nor mounted
+ * blindly. Discovery is "query live, don't snapshot": surfaced at query time, never written.
+ */
+export interface DiscoveryResult {
+  name: string;
+  repository: string; // https://github.com/owner/repo
+  description: string;
+  category: string;
+  source: "awesome-mcp";
+  installable: false;
+  note: string;
+}
+
+const DISCOVERY_NOTE =
+  "discovery-only (awesome-mcp-servers, MIT): not in the CC0 snapshot; vet before mounting";
+
+/** Pure discovery: filter awesome-mcp entries by query terms, excluding repos we already hold. */
+export function searchAwesomeServers(
+  markdown: string,
+  query: string,
+  opts: { exclude?: Set<string>; limit?: number } = {},
+): DiscoveryResult[] {
+  const exclude = opts.exclude ?? new Set<string>();
+  const limit = Math.min(50, Math.max(1, opts.limit ?? 20));
+  const terms = (query ?? "").toLowerCase().split(/\s+/).filter(Boolean);
+  const seen = new Set<string>();
+  const out: DiscoveryResult[] = [];
+  for (const e of parseAwesomeEntries(markdown)) {
+    if (exclude.has(e.repoUrl) || seen.has(e.repoUrl)) continue;
+    const hay = `${e.name} ${e.description} ${e.category}`.toLowerCase();
+    if (terms.length && !terms.every((t) => hay.includes(t))) continue;
+    seen.add(e.repoUrl);
+    out.push({
+      name: e.name,
+      repository: `https://${e.repoUrl}`,
+      description: e.description,
+      category: e.category,
+      source: "awesome-mcp",
+      installable: false,
+      note: DISCOVERY_NOTE,
+    });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+/**
+ * Live discovery lookup: search awesome-mcp-servers for MCP servers matching `query` that are NOT
+ * already in our CC0 snapshot. Fetches live and returns transient results: nothing is written to
+ * disk (honors the catalog boundary: enrichment registries are discovery-only, never snapshotted).
+ */
+export async function discoverToolkits(
+  query: string,
+  opts: { limit?: number; catalog?: CatalogSnapshot; network?: NetworkSource } = {},
+): Promise<DiscoveryResult[]> {
+  const snapshot = opts.catalog ?? loadCatalog();
+  const exclude = new Set<string>();
+  for (const t of snapshot.toolkits) {
+    const n = normalizeRepoUrl(t.repository);
+    if (n) exclude.add(n);
+  }
+  const md = await fetchText(AWESOME_MCP_README_URL, opts.network);
+  return searchAwesomeServers(md, query, { exclude, limit: opts.limit });
 }
 
 /**
@@ -317,8 +544,9 @@ export function tallyCategories(toolkits: Toolkit[]): { name: string; count: num
  * Fetch both sources and assemble a snapshot. `generated_at` is left as an empty
  * string here (the script runtime forbids reading the clock); the CLI stamps it.
  */
-export async function ingestCatalog(): Promise<CatalogSnapshot> {
-  const results = await Promise.allSettled([ingestMcpRegistry(), ingestApisGuru()]);
+export async function ingestCatalog(network?: NetworkSource): Promise<CatalogSnapshot> {
+  const taxonomy = await fetchAwesomeTaxonomy(network); // best-effort; empty map on failure
+  const results = await Promise.allSettled([ingestMcpRegistry(taxonomy, network), ingestApisGuru(network)]);
   const mcp = results[0].status === "fulfilled" ? results[0].value : [];
   const apis = results[1].status === "fulfilled" ? results[1].value : [];
   if (results[0].status === "rejected" && results[1].status === "rejected") {
@@ -340,12 +568,14 @@ export async function ingestCatalog(): Promise<CatalogSnapshot> {
   };
 }
 
-/** Per-source failure detail, for callers that want to report partial syncs. */
-export async function ingestCatalogVerbose(): Promise<{
+/** Per-source failure detail + taxonomy-enrichment stats, for callers that want to report syncs. */
+export async function ingestCatalogVerbose(network?: NetworkSource): Promise<{
   snapshot: CatalogSnapshot;
   errors: { source: string; message: string }[];
+  enrichment: { taxonomy_entries: number; reclassified: number };
 }> {
-  const results = await Promise.allSettled([ingestMcpRegistry(), ingestApisGuru()]);
+  const taxonomy = await fetchAwesomeTaxonomy(network); // best-effort; empty map on failure
+  const results = await Promise.allSettled([ingestMcpRegistry(taxonomy, network), ingestApisGuru(network)]);
   const errors: { source: string; message: string }[] = [];
   const mcp = results[0].status === "fulfilled" ? results[0].value : (errors.push({ source: "mcp-registry", message: String((results[0] as PromiseRejectedResult).reason) }), []);
   const apis = results[1].status === "fulfilled" ? results[1].value : (errors.push({ source: "apis-guru", message: String((results[1] as PromiseRejectedResult).reason) }), []);
@@ -355,6 +585,10 @@ export async function ingestCatalogVerbose(): Promise<{
   const bySlug = new Map<string, Toolkit>();
   for (const t of [...mcp, ...apis]) bySlug.set(t.slug, t);
   const toolkits = [...bySlug.values()].sort((a, b) => a.name.localeCompare(b.name));
+  // How many registry servers got a curated category from the awesome-mcp taxonomy (repo matched).
+  const reclassified = taxonomy.size
+    ? mcp.filter((t) => { const n = normalizeRepoUrl(t.repository); return n ? taxonomy.has(n) : false; }).length
+    : 0;
   return {
     snapshot: {
       generated_at: "",
@@ -363,7 +597,41 @@ export async function ingestCatalogVerbose(): Promise<{
       toolkits,
     },
     errors,
+    enrichment: { taxonomy_entries: taxonomy.size, reclassified },
   };
+}
+
+/**
+ * Re-apply the awesome-mcp category taxonomy to an ALREADY-LOADED snapshot, in place, WITHOUT a full
+ * registry re-fetch. For every `mcp-registry` toolkit whose GitHub repo is in the taxonomy, its primary
+ * `category` is overridden with the curated one: identical semantics to `toolkitFromRegistry`'s
+ * `curatedCategory || deriveMcpCategory`, just applied post-hoc so `toolkits recategorize` can enrich
+ * the shipped catalog cheaply (small reviewable diff, no network re-snapshot). apis-guru entries are
+ * NEVER touched (origin-scoped): they carry their own provider-domain categories. The histogram is
+ * recomputed so the count==content invariant still holds. Empty taxonomy is a no-op (never wipes
+ * categories). Mutates `snapshot`; returns how many entries matched a taxonomy repo and how many
+ * actually changed category.
+ */
+export function applyTaxonomyToSnapshot(
+  snapshot: CatalogSnapshot,
+  taxonomy: Map<string, string>,
+): { matched: number; changed: number } {
+  let matched = 0;
+  let changed = 0;
+  if (taxonomy.size === 0) return { matched, changed };
+  for (const t of snapshot.toolkits) {
+    if (t.origin !== "mcp-registry") continue;
+    const n = normalizeRepoUrl(t.repository);
+    const curated = n ? taxonomy.get(n) : undefined;
+    if (!curated) continue;
+    matched++;
+    if (t.category !== curated) {
+      t.category = curated;
+      changed++;
+    }
+  }
+  snapshot.categories = tallyCategories(snapshot.toolkits);
+  return { matched, changed };
 }
 
 /** Load the on-disk snapshot. Returns an empty catalog if the file is missing. */

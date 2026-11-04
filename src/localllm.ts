@@ -16,6 +16,7 @@
  */
 
 import type { LocalProviderConfig, SwitchboardConfig } from "./types.js";
+import { NetGuardError, assertUrlAllowed, guardedFetch, parseAllowEntry, type NetworkSource } from "./netguard.js";
 
 /** A local server we know how to probe. `baseUrl` is the OpenAI-compatible root (ends in `/v1`). */
 export interface LocalRuntime {
@@ -198,23 +199,61 @@ export interface ProbeResult {
   error?: string;
 }
 
-/** Probe one runtime's `/v1/models` with a short timeout. Impure (network) — kept out of the oracle. */
-export async function probeRuntime(runtime: LocalRuntime, timeoutMs = 1500): Promise<ProbeResult> {
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), timeoutMs);
+/**
+ * Probe one runtime's `/v1/models` with a short timeout. Impure (network), so it is kept out of the oracle.
+ * This is an EXPLICIT LOCAL PROBE: loopback targets pass the SSRF guard without a settings.network entry
+ * (the known runtimes are fixed 127.0.0.1 addresses). Nothing else is exempt: a LAN or metadata URL is
+ * refused unless its exact host is in `settings.network.allow_private`.
+ */
+export async function probeRuntime(runtime: LocalRuntime, timeoutMs = 1500, network?: NetworkSource): Promise<ProbeResult> {
   try {
-    const res = await fetch(runtime.modelsUrl, { signal: ac.signal, headers: { accept: "application/json" } });
+    const res = await guardedFetch(runtime.modelsUrl, { headers: { accept: "application/json" }, timeoutMs, allowLoopback: true }, network);
     if (!res.ok) return { runtime, reachable: false, models: [], error: `HTTP ${res.status}` };
     const body = await res.json();
     return { runtime, reachable: true, models: parseOpenAiModels(body) };
   } catch (err) {
     return { runtime, reachable: false, models: [], error: err instanceof Error ? err.message : String(err) };
-  } finally {
-    clearTimeout(timer);
   }
 }
 
 /** Probe every known runtime in parallel. */
-export async function probeAll(runtimes: LocalRuntime[] = KNOWN_RUNTIMES, timeoutMs = 1500): Promise<ProbeResult[]> {
-  return Promise.all(runtimes.map((runtime) => probeRuntime(runtime, timeoutMs)));
+export async function probeAll(
+  runtimes: LocalRuntime[] = KNOWN_RUNTIMES,
+  timeoutMs = 1500,
+  network?: NetworkSource,
+): Promise<ProbeResult[]> {
+  return Promise.all(runtimes.map((runtime) => probeRuntime(runtime, timeoutMs, network)));
+}
+
+/**
+ * The council's `local` provider is a loopback or LAN address by design, and the SSRF guard refuses those
+ * unless the exact host is listed in `settings.network.allow_private`. This adds that entry (to a COPY of
+ * the config) when, and only when, the guard would currently refuse `baseUrl`, so `local-llm wire` yields
+ * a config that works. Idempotent: an already-allowed host leaves the config untouched.
+ */
+export async function withLocalAllowance(
+  cfg: SwitchboardConfig,
+  baseUrl: string,
+): Promise<{ config: SwitchboardConfig; changed: boolean; host?: string }> {
+  try {
+    await assertUrlAllowed(baseUrl, cfg.settings?.network);
+    return { config: cfg, changed: false };
+  } catch (err) {
+    if (!(err instanceof NetGuardError) || (err.code !== "blocked_address" && err.code !== "blocked_host")) {
+      return { config: cfg, changed: false };
+    }
+  }
+  let parsed: ReturnType<typeof parseAllowEntry>;
+  try {
+    parsed = parseAllowEntry(new URL(baseUrl).hostname);
+  } catch {
+    return { config: cfg, changed: false };
+  }
+  if (!("host" in parsed)) return { config: cfg, changed: false };
+  const next: SwitchboardConfig = JSON.parse(JSON.stringify(cfg));
+  next.settings ??= {};
+  next.settings.network ??= {};
+  const list = (next.settings.network.allow_private ??= []);
+  if (!list.includes(parsed.host)) list.push(parsed.host);
+  return { config: next, changed: true, host: parsed.host };
 }

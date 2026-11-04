@@ -18,8 +18,7 @@ process.env.SWITCHBOARD_AUTO_APPROVE = "1"; // write_thing's approval gate resol
 const { Gateway } = await import("../dist/gateway.js");
 const { recentAudit } = await import("../dist/audit.js");
 const { verifyWebhook } = await import("../dist/webhook.js");
-const { Server } = await import("@modelcontextprotocol/sdk/server/index.js");
-const { CallToolRequestSchema, ListToolsRequestSchema } = await import("@modelcontextprotocol/sdk/types.js");
+const { Server } = await import("@modelcontextprotocol/server");
 
 const SECRET = "s3cr3t-webhook-signing-key";
 const checks = [];
@@ -64,8 +63,8 @@ const TOOLS = [
   { name: "write_thing", description: "write", inputSchema: { type: "object", additionalProperties: true } },
   { name: "delete_thing", description: "delete", inputSchema: { type: "object", additionalProperties: true } },
 ];
-echo.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
-echo.setRequestHandler(CallToolRequestSchema, async (req) => ({
+echo.setRequestHandler("tools/list", async () => ({ tools: TOOLS }));
+echo.setRequestHandler("tools/call", async (req) => ({
   content: [{ type: "text", text: JSON.stringify({ echoed: req.params.arguments ?? {} }) }],
 }));
 
@@ -75,7 +74,8 @@ const cfg = {
   gateway: { transport: ["http"], http: { host: "127.0.0.1", port: 0, require_auth: "auto" }, tool_exposure: "namespaced", default_policy: "read" },
   vault: { backend: "encrypted-file" },
   servers: [],
-  settings: { logs: { capture_io: false }, webhook: { enabled: false, url: RECV_URL, events: [], secret_ref: "" } },
+  // The receiver listens on loopback; since the SSRF guard (src/netguard.ts) a loopback webhook target must be allowlisted.
+  settings: { logs: { capture_io: false }, network: { allow_private: ["127.0.0.1"] }, webhook: { enabled: false, url: RECV_URL, events: [], secret_ref: "" } },
 };
 
 const gateway = new Gateway(cfg);

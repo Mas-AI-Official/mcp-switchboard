@@ -27,31 +27,33 @@
  * recorded and advertised, not enforced per-call.
  */
 
-import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import type { Response } from "express";
 import type {
   OAuthServerProvider,
   AuthorizationParams,
-} from "@modelcontextprotocol/sdk/server/auth/provider.js";
-import type { OAuthRegisteredClientsStore } from "@modelcontextprotocol/sdk/server/auth/clients.js";
-import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
+  OAuthRegisteredClientsStore,
+} from "@modelcontextprotocol/server-legacy/auth";
 import type {
+  AuthInfo,
   OAuthTokens,
   OAuthClientInformationFull,
   OAuthTokenRevocationRequest,
-} from "@modelcontextprotocol/sdk/shared/auth.js";
+} from "@modelcontextprotocol/server";
 import {
   InvalidClientError,
   InvalidGrantError,
   InvalidScopeError,
   InvalidTargetError,
   InvalidTokenError,
-} from "@modelcontextprotocol/sdk/server/auth/errors.js";
+} from "@modelcontextprotocol/server-legacy/auth";
+import { readJsonFileSync, writeJsonAtomic } from "./atomicfile.js";
 import { HOME_DIR, loadVaultKey, seal, unseal, type SealedSecret } from "./vault.js";
+import { stripTrailingSlashes } from "./httpsec.js";
 import type { SwitchboardConfig, SettingsConfig } from "./types.js";
 import { log } from "./logger.js";
+import { safeText } from "./safetext.js";
 
 /** Scopes this AS advertises (RFC 8414 `scopes_supported`). Recorded, not per-call enforced. */
 export const OAUTH_SCOPES_SUPPORTED = ["read", "write", "full"] as const;
@@ -65,7 +67,7 @@ const sha256 = (s: string): string => createHash("sha256").update(s, "utf8").dig
 const randomToken = (): string => randomBytes(32).toString("base64url");
 const randomId = (): string => randomBytes(16).toString("base64url");
 
-const stripSlash = (s: string): string => s.replace(/\/+$/, "");
+const stripSlash = stripTrailingSlashes; // linear: `resource` is attacker-chosen (see httpsec.ts)
 const nowSec = (): number => Math.floor(Date.now() / 1000);
 
 /** Append query params to a URL string, preserving any it already carries. */
@@ -123,6 +125,18 @@ interface PendingAuth {
 }
 
 const emptyState = (): AuthServerState => ({ clients: {}, accessTokens: {}, refreshTokens: {} });
+
+/**
+ * Where the owner decides (design vNext 3.2 and 3.15). Consent used to be satisfied by whoever was driving the
+ * browser, which includes the client that is asking for access. It is now decided in the dashboard, through the
+ * admin API, with the owner session (a header held in the dashboard's sessionStorage: a browser cannot attach one
+ * to this page's own navigation, and an owner cookie would reach every other local port, see httpsec.ts). So
+ * `/authorize` never renders a decision form: it points the owner at the dashboard, where the pending request waits.
+ */
+export interface OwnerConsentGate {
+  /** The dashboard address (loopback) where the owner decides a pending request. */
+  resumeUrl(pendingId: string): string;
+}
 
 /** Resolved, validated OAuth-server runtime options (or null when the feature is off). */
 export interface ResolvedOAuthOptions {
@@ -186,6 +200,7 @@ export class SwitchboardAuthProvider implements OAuthServerProvider {
   constructor(
     private readonly opts: ResolvedOAuthOptions,
     brand?: SettingsConfig["auth_screen"],
+    private readonly ownerGate?: OwnerConsentGate,
   ) {
     this.key = loadVaultKey();
     this.state = this.load();
@@ -194,26 +209,29 @@ export class SwitchboardAuthProvider implements OAuthServerProvider {
 
   // ── persistence (sealed JSON, mirrors vault.ts file conventions) ────────────────────
   private load(): AuthServerState {
-    if (!existsSync(STATE_PATH)) return emptyState();
+    // Absent file: first run. Present but unusable: an error, never an empty state (an empty state
+    // would silently revoke every registered client and issued token).
+    const sealed = readJsonFileSync<SealedSecret>(STATE_PATH, {
+      validate: (v) => {
+        const s = v as Partial<SealedSecret> | null;
+        return s && typeof s.iv === "string" && typeof s.tag === "string" && typeof s.data === "string" ? null : "not a sealed state";
+      },
+    });
+    if (!sealed) return emptyState();
     try {
-      const sealed = JSON.parse(readFileSync(STATE_PATH, "utf8")) as SealedSecret;
       const parsed = JSON.parse(unseal(this.key, sealed)) as AuthServerState;
       return { ...emptyState(), ...parsed };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      log.error(`could not read ${STATE_PATH} (${msg}); starting with an empty OAuth store`);
-      return emptyState();
+      throw new Error(
+        `could not open ${STATE_PATH} (${msg}). It was NOT replaced with an empty OAuth store. ` +
+          `The vault key may have changed or the file is damaged: restore ${STATE_PATH}.bak or delete both to start empty (this revokes every registered client and issued token).`,
+      );
     }
   }
 
   private save(): void {
-    const sealed = seal(this.key, JSON.stringify(this.state));
-    writeFileSync(STATE_PATH, JSON.stringify(sealed));
-    try {
-      chmodSync(STATE_PATH, 0o600);
-    } catch {
-      /* best-effort; no-op on Windows */
-    }
+    writeJsonAtomic(STATE_PATH, seal(this.key, JSON.stringify(this.state)), { mode: 0o600, space: 0 });
   }
 
   /** Drop expired in-memory codes + pending-consent entries. Called on every lookup path. */
@@ -221,6 +239,21 @@ export class SwitchboardAuthProvider implements OAuthServerProvider {
     const now = Date.now();
     for (const [code, rec] of this.codes) if (rec.expiresAt <= now) this.codes.delete(code);
     for (const [id, rec] of this.pending) if (rec.expiresAt <= now) this.pending.delete(id);
+  }
+
+  /** How many dynamically registered clients exist (the DCR cap is checked against this). */
+  clientCount(): number {
+    return Object.keys(this.state.clients).length;
+  }
+
+  /**
+   * The `client_name` an OAuth client registered with (RFC 7591), or undefined. The gateway maps it to a
+   * configured client only when it equals a client id exactly (design 3.1). The name is chosen by whoever
+   * registered, so the owner's consent is what makes the mapping trustworthy: nothing is issued without it.
+   */
+  clientNameOf(clientId: string): string | undefined {
+    const rec = Object.prototype.hasOwnProperty.call(this.state.clients, clientId) ? this.state.clients[clientId] : undefined;
+    return typeof rec?.client_name === "string" ? rec.client_name : undefined;
   }
 
   // ── OAuthRegisteredClientsStore (RFC 7591 Dynamic Client Registration) ──────────────
@@ -234,7 +267,7 @@ export class SwitchboardAuthProvider implements OAuthServerProvider {
         const full = client as OAuthClientInformationFull;
         this.state.clients[full.client_id] = full;
         this.save();
-        log.info(`registered OAuth client '${full.client_name ?? full.client_id}' (${full.client_id})`);
+        log.info(`registered OAuth client '${safeText(full.client_name ?? full.client_id, 80)}' (${safeText(full.client_id, 80)})`);
         return full;
       },
     };
@@ -271,7 +304,22 @@ export class SwitchboardAuthProvider implements OAuthServerProvider {
     });
     res.set("Content-Type", "text/html; charset=utf-8");
     res.set("Cache-Control", "no-store");
-    res.send(this.consentPage(id, client, scopes, resource));
+    // Consent is the owner's decision, not the requester's, and it is not made on this page: the page carries no
+    // form at all, only the way to the dashboard, where the pending request waits for the signed-in owner. A
+    // provider with no dashboard behind it has nowhere to decide, so it refuses (fail closed).
+    if (!this.ownerGate) {
+      res.status(503).send("owner consent is not available on this listener");
+      return;
+    }
+    res.status(401).send(this.ownerRequiredPage(this.ownerGate.resumeUrl(id), client.client_name ?? client.client_id));
+  }
+
+  /** What the owner needs to decide a pending request (client name, scopes, audience), or null when unknown or expired. */
+  describePending(pendingId: string): { client_name: string; scopes: string[]; resource: string } | null {
+    this.gc();
+    const p = this.pending.get(pendingId);
+    if (!p) return null;
+    return { client_name: safeText(p.clientName, 80), scopes: [...p.scopes], resource: p.resource };
   }
 
   /**
@@ -469,63 +517,26 @@ export class SwitchboardAuthProvider implements OAuthServerProvider {
     return granted.length ? granted : [...supported];
   }
 
-  /** Self-contained themed consent page (no framework, no external assets). */
-  private consentPage(
-    pendingId: string,
-    client: OAuthClientInformationFull,
-    scopes: string[],
-    resource: string,
-  ): string {
+  /** Page shown for a consent request: instructions only, never a form. The decision is made in the dashboard. */
+  private ownerRequiredPage(resumeUrl: string, clientName: string): string {
     const accent = /^#[0-9a-fA-F]{3,8}$/.test(this.brand.accent_color ?? "") ? this.brand.accent_color! : "#2dd4bf";
-    const title = esc(this.brand.title || "Authorize access");
-    const clientName = esc(client.client_name ?? client.client_id);
-    const logo =
-      this.brand.logo_url && /^https?:\/\//.test(this.brand.logo_url)
-        ? `<img src="${esc(this.brand.logo_url)}" alt="" style="height:40px;margin-bottom:18px"/>`
-        : `<div class="mark">⎔</div>`;
-    const support =
-      this.brand.support_url && /^https?:\/\//.test(this.brand.support_url)
-        ? `<a class="support" href="${esc(this.brand.support_url)}">Need help?</a>`
-        : "";
-    const scopeList = scopes
-      .map((s) => `<li><span class="dot"></span>${esc(s)}</li>`)
-      .join("");
+    const title = esc(this.brand.title || "Owner sign-in required");
     return `<!doctype html><html lang="en"><head><meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>${title}</title><style>
-:root{--accent:${accent}}
-*{box-sizing:border-box}
 body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0d1117;color:#e6edf3;
 font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
-.card{width:min(440px,92vw);background:#161b22;border:1px solid #30363d;border-radius:14px;
-padding:32px;text-align:center;box-shadow:0 12px 40px rgba(0,0,0,.4)}
-.mark{font-size:40px;color:var(--accent);margin-bottom:18px}
-h1{font-size:19px;margin:0 0 6px}
-.sub{color:#8b949e;font-size:14px;margin:0 0 22px}
-.client{font-weight:600;color:var(--accent)}
-ul{list-style:none;padding:0;margin:0 0 24px;text-align:left;border:1px solid #30363d;border-radius:10px;overflow:hidden}
-li{padding:11px 16px;border-bottom:1px solid #21262d;display:flex;align-items:center;gap:10px;font-size:14px}
-li:last-child{border-bottom:0}
-.dot{width:7px;height:7px;border-radius:50%;background:var(--accent);flex:0 0 auto}
-.res{color:#6e7681;font-size:12px;word-break:break-all;margin:-12px 0 22px}
-.row{display:flex;gap:12px}
-button{flex:1;padding:12px;border-radius:9px;font-size:14px;font-weight:600;cursor:pointer;border:1px solid #30363d}
-.approve{background:var(--accent);color:#0d1117;border-color:var(--accent)}
-.deny{background:transparent;color:#e6edf3}
-.support{display:inline-block;margin-top:18px;color:#8b949e;font-size:12px}
-</style></head><body>
-<form class="card" method="post" action="/oauth/consent">
-${logo}
+.card{width:min(480px,92vw);background:#161b22;border:1px solid #30363d;border-top:3px solid ${accent};border-radius:14px;padding:30px}
+h1{font-size:19px;margin:0 0 10px}
+p{color:#8b949e;font-size:14px;margin:0 0 14px}
+code{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:2px 6px;color:#e6edf3}
+a{color:${accent};word-break:break-all}
+</style></head><body><div class="card">
 <h1>${title}</h1>
-<p class="sub"><span class="client">${clientName}</span> wants to connect to your local MCP Switchboard.</p>
-<ul>${scopeList}</ul>
-<p class="res">Audience: ${esc(resource)}</p>
-<input type="hidden" name="pending_id" value="${esc(pendingId)}"/>
-<div class="row">
-<button class="deny" type="submit" name="decision" value="deny">Deny</button>
-<button class="approve" type="submit" name="decision" value="approve">Approve</button>
-</div>
-${support}
-</form></body></html>`;
+<p><strong>${esc(safeText(clientName, 80))}</strong> asked to connect to this MCP Switchboard. Only the owner of this machine can approve that, and the decision is made in the dashboard, not on this page.</p>
+<p>On the machine that runs Switchboard, run <code>switchboard dashboard login</code> (it checks you are present and opens the dashboard signed in). Then, in that same browser tab, open this address to see the request and decide:</p>
+<p><a href="${esc(resumeUrl)}">${esc(resumeUrl)}</a></p>
+<p>The request stays pending for ten minutes.</p>
+</div></body></html>`;
   }
 }

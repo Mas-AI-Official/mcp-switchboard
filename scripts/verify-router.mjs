@@ -38,20 +38,14 @@ import { join } from "node:path";
 process.env.SWITCHBOARD_HOME = mkdtempSync(join(tmpdir(), "sb-router-"));
 const HOME = process.env.SWITCHBOARD_HOME;
 
-// Approval must FAIL CLOSED here, deterministically, without blocking on a human. approve() returns
-// true only when SWITCHBOARD_AUTO_APPROVE==="1"; otherwise it returns false synchronously whenever
-// stdio is non-interactive. Force both: no auto-approve, no TTY → a guaranteed APPROVAL_DENIED, no hang.
+// Approval must FAIL CLOSED here, deterministically, without blocking on a human. Since design 3.3 a gated call
+// never waits for a keystroke: it leaves a pending approval and returns SB_APPROVAL_PENDING at once, whatever the
+// terminal looks like. Force no auto-approve (and keep the non-TTY streams, which the old in-band gate needed).
 delete process.env.SWITCHBOARD_AUTO_APPROVE;
 process.stdin.isTTY = false;
 process.stdout.isTTY = false;
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import {
-  ListToolsRequestSchema,
-  CallToolRequestSchema,
-  McpError,
-  ErrorCode,
-} from "@modelcontextprotocol/sdk/types.js";
+import { Server, ProtocolError, ProtocolErrorCode } from "@modelcontextprotocol/server";
 
 const { Registry } = await import("../dist/registry.js");
 const { Router } = await import("../dist/router.js");
@@ -74,10 +68,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // store -> "<server>:store:ok"             (write scope)  — drives injected-secret redaction
 function makeToolServer(serverName, toolNames) {
   const server = new Server({ name: serverName, version: "0.0.0" }, { capabilities: { tools: {} } });
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  server.setRequestHandler("tools/list", async () => ({
     tools: toolNames.map((t) => ({ name: t, inputSchema: { type: "object", properties: {} } })),
   }));
-  server.setRequestHandler(CallToolRequestSchema, async (req) => {
+  server.setRequestHandler("tools/call", async (req) => {
     const name = req.params.name;
     const a = req.params.arguments || {};
     switch (name) {
@@ -92,7 +86,7 @@ function makeToolServer(serverName, toolNames) {
       case "store":
         return { content: [{ type: "text", text: `${serverName}:store:ok` }] };
       default:
-        throw new McpError(ErrorCode.MethodNotFound, `no such tool ${name}`);
+        throw new ProtocolError(ProtocolErrorCode.MethodNotFound, `no such tool ${name}`);
     }
   });
   return server;
@@ -205,9 +199,12 @@ try {
   const open = parseEnv(await breakerRouter.callTool("alpha__echo", {}));
   assert("circuit open after threshold → SB_UPSTREAM_UNAVAILABLE + hint", open?.code === SB_ERR.UPSTREAM_UNAVAILABLE && open.hint === SB_HINTS[SB_ERR.UPSTREAM_UNAVAILABLE] && open.error.includes("circuit open"));
 
-  // --- I. APPROVAL_DENIED (gated read, fail-closed under forced non-TTY) ---------------------------
+  // --- I. APPROVAL_PENDING (gated read: no in-band prompt, nothing executes until the owner approves) ----
+  // Adapted for design 3.3: this check used to assert SB_APPROVAL_DENIED from the TTY gate failing closed when no
+  // terminal was attached. The TTY gate is gone from the call path; a gated call now leaves a pending approval and
+  // returns SB_APPROVAL_PENDING with a hint, an id and the owner instruction. Still fail closed: it did not run.
   const ap = parseEnv(await router.callTool("gated__get_secret", {}));
-  assert("approval-gated read with no TTY → SB_APPROVAL_DENIED (fail-closed) + hint", ap?.code === SB_ERR.APPROVAL_DENIED && ap.hint === SB_HINTS[SB_ERR.APPROVAL_DENIED] && ap.error.includes("approval required and not granted"));
+  assert("approval-gated read → SB_APPROVAL_PENDING (fail-closed, nothing executed) + hint + id + instruction", ap?.code === SB_ERR.APPROVAL_PENDING && ap.hint === SB_HINTS[SB_ERR.APPROVAL_PENDING] && ap.error.includes("approval required") && /^ap_[A-Z2-9]{8}$/.test(ap.approval_id ?? "") && /switchboard approvals approve ap_/.test(ap.instruction ?? ""));
 
   // --- J. UPSTREAM_ERROR (upstream throw, resilience OFF so the breaker never engages) -------------
   const ue = parseEnv(await router.callTool("alpha__boom", {}));

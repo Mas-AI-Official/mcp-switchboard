@@ -12,18 +12,8 @@
  * enabled server, and exposes `buildServer()` for the transports to wire up.
  */
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-  ListResourcesRequestSchema,
-  ListResourceTemplatesRequestSchema,
-  ReadResourceRequestSchema,
-  ListPromptsRequestSchema,
-  GetPromptRequestSchema,
-  type CallToolResult,
-} from "@modelcontextprotocol/sdk/types.js";
+import { Server, type CallToolResult } from "@modelcontextprotocol/server";
+import { serveStdio as serveMcpStdio } from "@modelcontextprotocol/server/stdio";
 import type { ServerConfig, SwitchboardConfig } from "./types.js";
 import { Vault } from "./vault.js";
 import { OAuthStore } from "./oauth.js";
@@ -31,8 +21,13 @@ import { Registry } from "./registry.js";
 import { Router } from "./router.js";
 import { TriggerManager } from "./triggers.js";
 import { setStdioActive } from "./approval.js";
+import { Approvals } from "./approvals.js";
+import { isKilled } from "./killswitch.js";
 import { buildCouncilServer, COUNCIL_SERVER_ID } from "./council.js";
 import { retryDelay, resolveMountRetry } from "./retry.js";
+import { unpinnedPackageWarnings } from "./packagespec.js";
+import { safeText } from "./safetext.js";
+import type { Principal } from "./principal.js";
 import { log } from "./logger.js";
 
 const NAME = "switchboard";
@@ -45,31 +40,71 @@ export class Gateway {
   readonly registry: Registry;
   readonly router: Router;
   readonly triggers: TriggerManager;
+  /** Out-of-band approvals (design 3.3): the router asks them, the dashboard and the control API decide on them. */
+  readonly approvals: Approvals;
 
   /** Pending background remount timers, tracked so `shutdown()` can cancel every one — a
    *  scheduled retry must never resurrect a server after the gateway has been torn down. */
   private readonly pendingRetries = new Set<NodeJS.Timeout>();
   private shuttingDown = false;
+  private readonly sweepTimer: NodeJS.Timeout;
+  private readonly killTimer: NodeJS.Timeout;
 
-  constructor(private readonly cfg: SwitchboardConfig) {
+  /** `opts.approvals` replaces the approvals manager (tests inject their own presence provider; production passes none). */
+  constructor(private readonly cfg: SwitchboardConfig, opts: { approvals?: Approvals } = {}) {
     this.vault = new Vault(cfg.vault.backend);
-    this.oauth = new OAuthStore(this.vault);
-    this.registry = new Registry(this.vault, this.oauth);
-    this.router = new Router(this.registry, cfg, (ref) => this.vault.resolve(ref));
+    // The network guard reads the live config object, so a settings change is picked up without a restart.
+    this.oauth = new OAuthStore(this.vault, () => cfg.settings?.network);
+    this.registry = new Registry(this.vault, this.oauth, () => cfg.settings?.network);
+    // The connector kit (toolkits, files, media, execution): live settings, kill switch and clients from this
+    // config. The router writes the audit row from the connector server's result, so the kit does not write a second
+    // one. There is no approval seam here on purpose: the router decides every approval (out of band, design 3.3),
+    // bound to the resolved account and the final request, and attests it to the connector call (connectors/exec.ts).
+    this.oauth.connectors.kit.configure({
+      settings: () => cfg.settings?.connectors,
+      killed: () => isKilled(cfg),
+      clients: () => cfg.clients,
+      ownAudit: false,
+    });
+    this.approvals = opts.approvals ?? new Approvals();
+    this.router = new Router(this.registry, cfg, (ref) => this.vault.resolve(ref), this.approvals);
     // Polls run through this.router, so every trigger poll is governed + audited like any call.
     this.triggers = new TriggerManager(this.router, cfg, (ref) => this.vault.resolve(ref));
+    // Undecided requests and unused approvals expire on their own clock; sweeping writes the `expired` audit row
+    // even when nobody is calling. unref'd, so it never keeps the process alive.
+    this.sweepTimer = setInterval(() => {
+      try {
+        this.approvals.sweep();
+      } catch (err) {
+        log.warn(`approval sweep failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }, 30_000);
+    this.sweepTimer.unref();
+    // The kill switch latches the first time this process sees it (killswitch.ts). Looking every quarter second, not
+    // only when a call arrives, means a KILL file made by the CLI is latched, and a later delete of it is noticed and
+    // audited, even while nobody is calling. One stat per tick; unref'd like the sweep.
+    this.killTimer = setInterval(() => {
+      try {
+        isKilled(cfg);
+      } catch (err) {
+        log.warn(`kill switch check failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }, 250);
+    this.killTimer.unref();
   }
 
   /** Mount every enabled server. Failures are isolated so one bad server can't sink the rest. */
   async mountAll(): Promise<void> {
     const enabled = this.cfg.servers.filter((s) => s.enabled !== false);
     log.info(`mounting ${enabled.length} server${enabled.length === 1 ? "" : "s"}…`);
+    // A floating npx package still mounts (existing configs keep working), but never quietly.
+    for (const warning of unpinnedPackageWarnings(enabled)) log.warn(`WARNING: ${warning}`);
     for (const server of enabled) {
       try {
         await this.registry.mount(server);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        log.error(`failed to mount '${server.id}': ${msg}`);
+        log.error(`failed to mount '${server.id}': ${safeText(msg, 500)}`);
         // Self-heal: a transient failure (slow upstream, DNS blip, child still warming up)
         // is retried in the background on a capped backoff instead of staying dead-until-restart.
         this.scheduleRemount(server, 1);
@@ -114,7 +149,7 @@ export class Gateway {
       log.ok(`recovered '${server.id}' on retry ${attempt}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      log.error(`retry ${attempt} to mount '${server.id}' failed: ${msg}`);
+      log.error(`retry ${attempt} to mount '${server.id}' failed: ${safeText(msg, 500)}`);
       this.scheduleRemount(server, attempt + 1);
     }
   }
@@ -130,7 +165,7 @@ export class Gateway {
     if (!council?.enabled) return;
 
     try {
-      const { server, scopeHints, toolCount } = buildCouncilServer(council, this.vault);
+      const { server, scopeHints, toolCount } = buildCouncilServer(council, this.vault, () => this.cfg.settings?.network);
       if (toolCount === 0) return;
       const synthetic: ServerConfig = {
         id: COUNCIL_SERVER_ID,
@@ -150,57 +185,67 @@ export class Gateway {
    *  Declares all three content capabilities — tools, resources, prompts — so a full MCP client
    *  (Claude Desktop, Cursor) discovers every governed upstream surface through the one endpoint,
    *  not just tools. (The SDK refuses to register a resources/* or prompts/* handler unless the
-   *  matching capability is declared here.) */
-  buildServer(): Server {
+   *  matching capability is declared here.)
+   *
+   *  `principal` is who this server speaks to (design 3.1): every handler passes it to the router, which
+   *  filters listings and refuses hidden calls by the principal's client. Omitted = an internal, unfiltered
+   *  caller (the owner's own tooling), never an HTTP or stdio client. */
+  buildServer(principal?: Principal): Server {
     const server = new Server(
       { name: NAME, version: VERSION },
       { capabilities: { tools: {}, resources: {}, prompts: {} } },
     );
 
-    server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: this.router.listTools(),
+    server.setRequestHandler("tools/list", async () => ({
+      tools: this.router.listTools(principal),
     }));
 
-    server.setRequestHandler(CallToolRequestSchema, async (req): Promise<CallToolResult> => {
+    server.setRequestHandler("tools/call", async (req): Promise<CallToolResult> => {
       const { name, arguments: args } = req.params;
-      return this.router.callTool(name, args ?? {});
+      return this.router.callTool(name, args ?? {}, principal);
     });
 
     // Resources — opaque URIs, aggregated across upstreams and read back by URI (not namespaced).
-    server.setRequestHandler(ListResourcesRequestSchema, async () => ({
-      resources: await this.router.listResources(),
+    server.setRequestHandler("resources/list", async () => ({
+      resources: await this.router.listResources(principal),
     }));
 
-    server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({
-      resourceTemplates: await this.router.listResourceTemplates(),
+    server.setRequestHandler("resources/templates/list", async () => ({
+      resourceTemplates: await this.router.listResourceTemplates(principal),
     }));
 
-    server.setRequestHandler(ReadResourceRequestSchema, async (req) =>
-      this.router.readResource(req.params.uri),
+    server.setRequestHandler("resources/read", async (req) =>
+      this.router.readResource(req.params.uri, principal),
     );
 
     // Prompts — namespaced `serverId__name`, aggregated across upstreams.
-    server.setRequestHandler(ListPromptsRequestSchema, async () => ({
-      prompts: await this.router.listPrompts(),
+    server.setRequestHandler("prompts/list", async () => ({
+      prompts: await this.router.listPrompts(principal),
     }));
 
-    server.setRequestHandler(GetPromptRequestSchema, async (req) =>
-      this.router.getPrompt(req.params.name, req.params.arguments),
+    server.setRequestHandler("prompts/get", async (req) =>
+      this.router.getPrompt(req.params.name, req.params.arguments, principal),
     );
 
     return server;
   }
 
-  /** Serve the stdio transport. Blocks for the life of the process. */
-  async serveStdio(): Promise<void> {
+  /** Serve the stdio transport. Blocks for the life of the process. `principal` comes from `serve --client <id>`
+   *  (via "stdio": an assertion by the launching process, not an authentication). */
+  async serveStdio(principal?: Principal): Promise<void> {
+    // stdin and stdout now carry JSON-RPC: no terminal prompt may use them, for the legacy gate or for a presence challenge.
     setStdioActive(true);
-    const server = this.buildServer();
-    await server.connect(new StdioServerTransport());
-    log.ok(`stdio transport ready — ${this.router.listTools().length} tools exposed`);
+    this.approvals.setStdioActive(true);
+    serveMcpStdio(() => this.buildServer(principal), {
+      onerror: (err) => log.error(`stdio request failed: ${err.message}`),
+    });
+    log.ok(`stdio transport ready: ${this.router.listTools(principal).length} tools exposed${principal?.client ? ` to client '${principal.client}'` : ""}`);
   }
 
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
+    clearInterval(this.sweepTimer);
+    clearInterval(this.killTimer);
     // Cancel every pending background remount so a dead server can't resurrect after shutdown.
     for (const timer of this.pendingRetries) clearTimeout(timer);
     this.pendingRetries.clear();

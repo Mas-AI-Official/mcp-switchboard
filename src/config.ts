@@ -7,12 +7,51 @@
  * readable error rather than silently mounting a half-configured server.
  */
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { parse, stringify } from "yaml";
 import { z } from "zod";
-import type { SwitchboardConfig, TriggersConfig } from "./types.js";
+import { atomicWriteFileSync } from "./atomicfile.js";
+import type { ClientConfig, SwitchboardConfig, TriggersConfig } from "./types.js";
+import { passthroughProblem } from "./childenv.js";
+import { parseAllowEntry } from "./netguard.js";
+import { checkNpmSpec } from "./packagespec.js";
+import { BAD_CLIENT_ID, MAX_GLOB_PATTERNS, MAX_GLOB_LENGTH, isValidClientId, isValidGlob } from "./principal.js";
+import { safeText } from "./safetext.js";
+
+/**
+ * A server id names the tool namespace (`<id>__<tool>`), appears in audit rows, client globs and file paths, and
+ * is split back out of a tool name at the FIRST `__`. So it is a short lowercase token and never contains `__`
+ * (a second separator would make `a__b__tool` ambiguous and route the call to the wrong server).
+ */
+export const SERVER_ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+export const BAD_SERVER_ID =
+  "a server id is 1 to 64 characters of a-z, 0-9, '-' and '_', starting with a letter or digit (^[a-z0-9][a-z0-9_-]{0,63}$), and must not contain '__', which separates the server id from the tool name";
+
+export function isValidServerId(id: unknown): id is string {
+  return typeof id === "string" && SERVER_ID_RE.test(id) && !id.includes("__");
+}
+
+/**
+ * A valid, unused server id derived from a catalog slug (`mcp:io.github.Owner/Name` becomes `io-github-owner-name`).
+ * Long slugs are cut so that a `-NN` suffix still fits in 64 characters; nothing usable falls back to `toolkit`.
+ */
+export function uniqueServerId(slug: string, taken: Iterable<string>): string {
+  const used = new Set(taken);
+  const stem = slug
+    .replace(/^[^:]+:/, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 56)
+    .replace(/-+$/, "");
+  const base = stem || "toolkit";
+  let id = base;
+  for (let n = 2; used.has(id); n++) id = `${base}-${n}`;
+  return id;
+}
 
 const scope = z.enum(["read", "write", "full"]);
+const risk = z.enum(["low", "medium", "high"]);
 
 // Schema-shaping rules applied to a tool's exposed input schema before agents see it.
 const schemaModifier = z
@@ -108,6 +147,7 @@ const toolOverride = z
   .object({
     enabled: z.boolean().optional(),
     policy: scope.optional(),
+    risk: risk.optional(),
     description_override: z.string().optional(),
     drop_params: z.array(z.string()).optional(),
     schema_modifiers: schemaModifier.optional(),
@@ -126,10 +166,33 @@ const approval = z
   })
   .strict();
 
+// Risk of a call by scope (design 3.4); a field left out keeps its default (read low, write medium, full high).
+const riskDefaults = z
+  .object({
+    read: risk.optional(),
+    write: risk.optional(),
+    full: risk.optional(),
+  })
+  .strict();
+
+// gateway.approval (design 3.3, 3.4). Bounds are part of the contract: a TTL under a minute cannot be acted on,
+// over a day would let an unattended approval outlive the decision; a call may wait 50 s at most so it stays
+// inside the usual 60 s client timeout.
+const gatewayApproval = z
+  .object({
+    require_for_risk: z.array(risk).optional(),
+    ttl_seconds: z.number().int().min(60).max(86400).optional(),
+    wait_seconds: z.number().int().min(0).max(50).optional(),
+  })
+  .strict();
+
+// An environment variable name: no spaces, no `=`, no NUL (parentheses allowed, e.g. PROGRAMFILES(X86)).
+const envName = z.string().min(1).regex(/^[^=\s\x00]+$/, { message: "must be a plain environment variable name" });
+
 const serverConfig = z
   .object({
-    id: z.string().min(1),
-    source: z.enum(["npx", "binary", "remote", "app2mcp", "http-tool"]),
+    id: z.string().refine(isValidServerId, { message: BAD_SERVER_ID }),
+    source: z.enum(["npx", "binary", "remote", "app2mcp", "http-tool", "connector"]),
     enabled: z.boolean().default(true),
     policy: scope.optional(),
     package: z.string().optional(),
@@ -140,6 +203,8 @@ const serverConfig = z
     openapi: z.string().optional(),
     base_url: z.string().optional(),
     http_tools: z.array(httpToolDef).optional(),
+    toolkit: z.string().regex(/^[a-z][a-z0-9-]{0,31}$/, { message: "a toolkit slug: lowercase letters, digits and dashes" }).optional(),
+    account: z.string().min(1).optional(),
     auth_scheme: authScheme.optional(),
     schema_mode: z.enum(["full", "required_only"]).optional(),
     schema_modifiers: schemaModifier.optional(),
@@ -147,12 +212,28 @@ const serverConfig = z
     redact_response: responseRedaction.optional(),
     credentials: z.record(z.string(), z.string()).optional(),
     env: z.record(z.string(), z.string()).optional(),
+    env_passthrough: z.array(envName).optional(),
+    env_passthrough_secrets: z.array(envName).optional(),
     tools: z.record(z.string(), toolOverride).optional(),
     approval: approval.optional(),
+    risk_defaults: riskDefaults.optional(),
+    outward: z.boolean().optional(),
     limits: limitSpec.optional(),
     resilience: resilience.optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((s, ctx) => {
+    const problem = passthroughProblem(s.env_passthrough, s.env_passthrough_secrets);
+    if (problem) ctx.addIssue({ code: "custom", message: problem, path: ["env_passthrough"] });
+    // The package string goes onto the runner's command line: a name, optionally with @version, nothing else.
+    // A floating name is valid here (existing configs keep mounting); pinning is warned about, and required for new mounts.
+    if (s.source === "npx" && s.package !== undefined) {
+      const bad = checkNpmSpec(s.package);
+      if (bad) ctx.addIssue({ code: "custom", message: bad, path: ["package"] });
+    }
+    if (s.source === "connector" && !s.toolkit) ctx.addIssue({ code: "custom", message: "a connector server needs a `toolkit` (for example youtube)", path: ["toolkit"] });
+    if (s.source !== "connector" && (s.toolkit || s.account)) ctx.addIssue({ code: "custom", message: "`toolkit` and `account` belong to `source: connector` only", path: ["toolkit"] });
+  });
 
 const gateway = z
   .object({
@@ -170,6 +251,11 @@ const gateway = z
       .default({ host: "127.0.0.1", port: 8088, require_auth: "auto" }),
     tool_exposure: z.enum(["namespaced", "flat", "search"]).default("namespaced"),
     default_policy: scope.default("read"),
+    // Kill switch: refuse every tool call, resource read and prompt get. Optional so an untouched
+    // config does not grow a `kill_switch: false` line when the dashboard writes it back.
+    kill_switch: z.boolean().optional(),
+    // Out-of-band approvals: which risks need one, how long a request lives, how long a call may wait.
+    approval: gatewayApproval.optional(),
   })
   .strict()
   .default({
@@ -231,6 +317,21 @@ const council = z
   })
   .strict();
 
+// Outbound network guard (src/netguard.ts). Entries are exact hosts: a bad entry fails the config at
+// load rather than silently widening or narrowing the allowlist.
+const networkAllowEntry = z.string().superRefine((entry, ctx) => {
+  const parsed = parseAllowEntry(entry);
+  if ("error" in parsed) ctx.addIssue({ code: "custom", message: `allow_private entry ${JSON.stringify(entry)} ${parsed.error}` });
+});
+
+const network = z
+  .object({
+    allow_private: z.array(networkAllowEntry).optional(),
+    timeout_ms: z.number().int().positive().max(600000).optional(),
+    max_response_bytes: z.number().int().positive().max(512 * 1024 * 1024).optional(),
+  })
+  .strict();
+
 const triggerDefinition = z
   .object({
     id: z.string().min(1),
@@ -259,6 +360,26 @@ const profile = z
     tools: z.array(z.string()).optional(),
     exclude_tools: z.array(z.string()).optional(),
     policy: scope.optional(),
+  })
+  .strict();
+
+// Connector kit: upload rules and media staging (ADR local-composio 6.5 and 6.6). Everything defaults closed.
+const connectorSettings = z
+  .object({
+    upload_allowlist: z.array(z.string().min(1)).optional(),
+    upload_deny_segments: z.array(z.string().min(1)).optional(),
+    max_upload_bytes: z.number().int().positive().max(8 * 1024 * 1024 * 1024).optional(),
+    max_download_bytes: z.number().int().positive().max(8 * 1024 * 1024 * 1024).optional(),
+    media: z
+      .object({
+        backend: z.enum(["expose", "s3"]).optional(),
+        public_base_url: z.url().optional(),
+        ttl_seconds: z.number().int().positive().max(900).optional(),
+        max_fetches: z.number().int().positive().max(10).optional(),
+        allow_local: z.boolean().optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -299,6 +420,8 @@ const settings = z
       .strict()
       .optional(),
     council: council.optional(),
+    connectors: connectorSettings.optional(),
+    network: network.optional(),
     oauth_server: z
       .object({
         enabled: z.boolean().default(false),
@@ -332,34 +455,130 @@ const settings = z
   })
   .optional();
 
+// A registered client (design 3.1). Patterns are bounded and printable; ids are the documented shape.
+const globPattern = z.string().refine(isValidGlob, {
+  message: `must be 1 to ${MAX_GLOB_LENGTH} printable characters ("*" matches any run, "?" one character)`,
+});
+const globList = z.array(globPattern).max(MAX_GLOB_PATTERNS);
+
+const clientConfig = z
+  .object({
+    description: z.string().max(200).optional(),
+    // No default list of servers: a client sees only what it is explicitly given.
+    servers: globList.default([]),
+    tools: globList.optional(),
+    exclude_tools: globList.optional(),
+    max_scope: scope.optional(),
+    max_risk: z.enum(["low", "medium", "high"]).optional(),
+    limits: limitSpec.optional(),
+    // Connector accounts: provider slug -> the connected account this client uses, or "*" to choose any (CONNECTORS.md).
+    accounts: z
+      .record(
+        z.string().regex(/^[a-z][a-z0-9-]{0,63}$/, { message: "a provider slug: lowercase letters, digits and dashes" }),
+        z.string().min(1).max(128).regex(/^[^\u0000-\u001f\u007f]+$/, { message: "an account reference: ca_..., provider/label or a label (no control characters)" }),
+      )
+      .optional(),
+  })
+  .strict();
+
+const clientId = z.string().refine(isValidClientId, { message: BAD_CLIENT_ID });
+
 const configSchema = z
   .object({
     gateway,
     vault,
     servers: z.array(serverConfig).default([]),
     settings,
+    // Keys are checked in a refinement, not as the record's key schema: zod reports a bad record key as
+    // "Invalid key in record", which would hide the rule from the person who typed the id.
+    // A bare `clients:` key (every entry removed or commented out) is the same as no clients.
+    clients: z
+      .preprocess(
+        (v) => (v === null ? undefined : v),
+        z
+          .record(z.string(), clientConfig)
+          .superRefine((clients, ctx) => {
+            for (const id of Object.keys(clients)) {
+              if (!isValidClientId(id)) ctx.addIssue({ code: "custom", message: BAD_CLIENT_ID, path: [id] });
+            }
+          })
+          .optional(),
+      )
+      .optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((cfg, ctx) => {
+    // Ids name the tool namespace, so two servers with one id would shadow each other: refuse the file.
+    const firstAt = new Map<string, number>();
+    cfg.servers.forEach((s, i) => {
+      const at = firstAt.get(s.id);
+      if (at === undefined) firstAt.set(s.id, i);
+      else {
+        ctx.addIssue({
+          code: "custom",
+          message: `duplicate server id '${safeText(s.id, 80)}' (also at servers.${at}): ids must be unique because they name the tool namespace`,
+          path: ["servers", i, "id"],
+        });
+      }
+    });
+  });
 
-/** Parse + validate a YAML config file into a typed config. Throws on any error. */
-export function loadConfig(path: string): SwitchboardConfig {
-  if (!existsSync(path)) {
-    throw new Error(`config not found: ${path} — run \`switchboard init\` to create one`);
+/** Validate one client entry (its id and its body) exactly as the config schema would. Throws a readable error. */
+export function parseClientEntry(id: string, raw: unknown): ClientConfig {
+  const idResult = clientId.safeParse(id);
+  if (!idResult.success) throw new Error(BAD_CLIENT_ID);
+  const result = clientConfig.safeParse(raw ?? {});
+  if (!result.success) {
+    throw new Error(result.error.issues.map((i) => `${i.path.join(".") || "(client)"}: ${i.message}`).join("; "));
   }
-  const raw = parse(readFileSync(path, "utf8")) ?? {};
-  const result = configSchema.safeParse(raw);
+  return result.data as ClientConfig;
+}
+
+/** Validate an already parsed config document against the strict schema. `label` names the source in errors. */
+export function validateConfig(raw: unknown, label: string): SwitchboardConfig {
+  const result = configSchema.safeParse(raw ?? {});
   if (!result.success) {
     const issues = result.error.issues
       .map((i) => `  - ${i.path.join(".") || "(root)"}: ${i.message}`)
       .join("\n");
-    throw new Error(`invalid config (${path}):\n${issues}`);
+    throw new Error(`invalid config (${label}):\n${issues}`);
   }
   return result.data as SwitchboardConfig;
 }
 
-/** Serialize a config back to YAML on disk. */
+/**
+ * Every problem the strict schema finds in a config document, as `path: message` lines, or null when it is valid.
+ * For a caller that must refuse a change before anything is written (the dashboard's settings PUT).
+ */
+export function configIssues(raw: unknown): string[] | null {
+  const result = configSchema.safeParse(raw ?? {});
+  if (result.success) return null;
+  return result.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`);
+}
+
+/** Parse + validate a YAML config file into a typed config. Throws on any error. */
+export function loadConfig(path: string): SwitchboardConfig {
+  if (!existsSync(path)) {
+    throw new Error(`config not found: ${path}: run \`switchboard init\` to create one`);
+  }
+  return validateConfig(parse(readFileSync(path, "utf8")) ?? {}, path);
+}
+
+/**
+ * Serialize a config back to YAML on disk: atomic (temp file, fsync, rename), keeping the previous
+ * version as `<path>.bak` when it parses, so a crash mid-write can never leave a half-written config.
+ */
 export function writeConfig(path: string, cfg: SwitchboardConfig): void {
-  writeFileSync(path, stringify(cfg));
+  atomicWriteFileSync(path, stringify(cfg), {
+    backup: (current) => {
+      try {
+        parse(current.toString("utf8"));
+        return true;
+      } catch {
+        return false;
+      }
+    },
+  });
 }
 
 /**
@@ -392,7 +611,7 @@ export function starterConfig(): SwitchboardConfig {
       {
         id: "everything",
         source: "npx",
-        package: "@modelcontextprotocol/server-everything",
+        package: "@modelcontextprotocol/server-everything@1.0.0",
         enabled: true,
         policy: "read",
       },

@@ -62,7 +62,7 @@ Every file under `src/` and what it owns. Sixteen modules, no dead code.
 | `registry.ts` | Mounts upstream MCP servers (one `Client` each), holds the live connections, mounts/unmounts on demand. | `Registry`, `MountedServer` |
 | `openapi.ts` | app2mcp: OpenAPI 3.x / Swagger 2.0 spec → an in-process MCP `Server`, verb→scope per operation, auth from the vault at call time. | `buildOpenApiServer`, `OpenApiServer` |
 | `policy.ts` | Scope inference from tool names + the read/write/full governance decision. | `evaluate`, `inferScope`, `PolicyDecision` |
-| `approval.ts` | The fail-closed human approval gate for scope-gated calls. | `approve`, `setStdioActive` |
+| `approvals.ts` | Out-of-band, argument-bound, single-use approvals with gateway-side owner presence (replaces the TTY gate `approval.ts`, now off the call path). | `Approvals`, `argsSha256`, `presenceMessage` |
 | `audit.ts` | Append-only JSON-lines audit log of every governance verdict. | `audit`, `recentAudit`, `AuditEntry` |
 | `router.ts` | The single governed tool surface. Exposure modes + the governed `forward()` path + search meta-tools. | `Router` |
 | `gateway.ts` | Wires the MCP `Server` to the router; serves stdio + builds per-request servers for HTTP. | `Gateway`, `createGateway` |
@@ -110,7 +110,9 @@ that `switchboard init` writes to disk.
 Local-first, zero-custody. This is the structural differentiator, so it gets the most care.
 
 - **Home:** `~/.switchboard` (override with `SWITCHBOARD_HOME`). Holds `vault.json` (the
-  encrypted blob), `vault.key` (the key), and `audit.log`.
+  encrypted blob), the key (`vault.key.dpapi` on Windows, DPAPI-wrapped; `vault.key` mode 0600 elsewhere), and
+  `audit.log`. Files are replaced atomically with a `.bak`; a store file that does not parse is an error, and
+  the vault re-reads when `vault.json` changes (`atomicfile.ts`).
 - **Cipher:** **AES-256-GCM** via Node's built-in `crypto`. Each secret is sealed with its own IV
   and auth tag — no native module, no external service, no network call ever.
 - **Backends:** `encrypted-file` (the portable default) or `env` (read secrets straight from the
@@ -153,14 +155,24 @@ single server live when you flip its toggle, without restarting the gateway.
 The governance core. Two responsibilities: **infer** a scope for a tool, then **decide** whether a
 call may proceed.
 
-**Scope inference** (`inferScope`) classifies a tool by its name against ordered ranks
-`read(0) < write(1) < full(2)`:
+**Scope inference** (`inferScope`) tokenizes the tool name (split on `_ - . /` and camelCase, lowercased)
+and classifies it against ordered ranks `read(0) < write(1) < full(2)` (design vNext 3.5):
 
-- **read** — names starting with `get / list / read / search / fetch / find / query / describe /
-  show / view / count / head / lookup / browse / inspect`.
-- **full** — names containing `delete / destroy / drop / remove / purge / wipe / revoke /
-  terminate / deactivate / admin / grant / sudo`.
+- **full**: any token is a destructive verb: `delete / destroy / drop / remove / purge / wipe / revoke /
+  terminate / deactivate / admin / grant / sudo` (whole tokens with their inflections; a name glued
+  together with no separator, such as `deletefile`, is still caught for the stems that have no benign
+  collision).
+- **read**: the FIRST token is one of `get / list / read / search / fetch / find / query / describe /
+  show / view / count / head / lookup / browse / inspect` AND no token is a write or exec verb (`run exec
+  execute eval evaluate click type press upload send post publish create update set write put patch mutate
+  apply deploy push replace generate clone design remix convert transfer pay buy order submit schedule invite
+  share import install start stop restart kill and then`).
 - **write** — everything else (the safe-but-not-trivial default for an unrecognized verb).
+
+`inferScope(name, annotations)` and `evaluate(..., annotations)` take the upstream tool's annotations, which
+may only tighten the result: `destructiveHint: true` raises to `full`, `readOnlyHint` never lowers, and
+anything but an explicit boolean `true` is ignored. A per-tool `policy` override wins over everything.
+`resolveToolScope` is the one function the router, the dashboard and `switchboard list` share.
 
 **The decision** (`evaluate`) is deliberately small and total:
 
@@ -175,26 +187,34 @@ starter sets to `read`), so an unconfigured server can only read.
 
 ---
 
-## 7. The approval gate (`approval.ts`)
+## 7. Approvals (`approvals.ts`)
 
-When `evaluate()` returns `approval_required`, the call is held at `approve()`. It is **fail-closed**:
+When `evaluate()` returns `approval_required` (the server's `approval.require_for` scopes, OR the call's risk being in
+`gateway.approval.require_for_risk`, default `high`), nothing waits at a prompt. The Router asks `Approvals.request()`:
 
-- `SWITCHBOARD_AUTO_APPROVE=1` → allow, and the auto-approval is logged (for non-interactive/CI runs
-  the operator has explicitly opted into).
-- The stdio MCP channel is active **or** there's no TTY → **deny** (you can't safely prompt a human
-  on the same pipe the protocol is using).
-- Otherwise → an interactive `y/N` prompt on the terminal, defaulting to **no**.
+- an approved record for exactly (principal, server, tool, SHA-256 of the canonical arguments), unexpired and unused, is
+  **consumed** (once) and the call runs;
+- otherwise a **pending** record is created (or the same call's existing one reused) and the call returns `SB_APPROVAL_PENDING`
+  with the approval id, its expiry and the owner instruction. With `gateway.approval.wait_seconds` it first waits that long.
 
-`setStdioActive()` is called by the gateway when it binds the stdio transport, so the gate knows it
-must not try to read from that pipe.
+The owner approves in the dashboard (Approvals) or with `switchboard approvals approve <id>`. Both end in the gateway, which asks
+for owner presence (Windows Hello, or a challenge at its own terminal) with the exact action and only then signs the record with an
+in-memory HMAC key, so a record written into `approvals.json` by anything else is ignored. The client then repeats the identical call.
+
+Fail-closed everywhere: an unusable store refuses the call, an expired or forged record counts for nothing, and
+`SWITCHBOARD_AUTO_APPROVE=1` (harnesses only, recorded as `decided_via env-auto`) is the one switch that skips the human.
+`approval.ts` (the old TTY prompt) is no longer on the call path. See design vNext 3.3 for the full contract.
 
 ---
 
 ## 8. The audit log (`audit.ts`)
 
 Every governance verdict — allow, deny, approval outcome — is appended as one JSON line to
-`~/.switchboard/audit.log`. An `AuditEntry` is `{ ts, server, tool, scope, decision, reason? }`.
-The log is **append-only**; `recentAudit(limit)` reads it back newest-first for the dashboard.
+`~/.switchboard/audit.log`. An `AuditEntry` is `{ ts, seq, prev_hash, hash, server, tool, scope, decision,
+reason?, principal?, client?, risk?, approval_id? }`; `hash` is SHA-256 over the canonical JSON of the row
+without `hash`, so the log is a hash chain (`switchboard audit verify [--all]` walks it). It rotates at 20 MB
+to `audit.log.<timestamp>` and the chain carries over. The log is **append-only**; `recentAudit(limit)` reads
+it back newest-first for the dashboard.
 This is the accountability surface: what did agents try, what was allowed, what was blocked, and why.
 
 ---

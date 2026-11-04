@@ -1,8 +1,8 @@
 /**
- * verify-install.mjs — deterministic oracle for `switchboard install <client>` (src/clients.ts).
+ * verify-install.mjs: deterministic oracle for `switchboard install <client>` (src/clients.ts).
  *
  * No client, no network: it imports the pure config-writer from dist/ and asserts the properties
- * that make `install` safe and correct — per-client transport/format/path resolution (OS-pinned so
+ * that make `install` safe and correct: per-client transport/format/path resolution (OS-pinned so
  * the oracle is platform-independent), the loopback/auth URL logic, the JSON entry shape each client
  * actually accepts, a non-destructive MERGE that preserves every pre-existing server, the idempotent
  * fixpoint (running twice is a no-op), and a real temp-dir round-trip for both JSON and TOML clients.
@@ -25,7 +25,7 @@ import {
 const checks = [];
 const assert = (name, cond, detail = "") => {
   checks.push({ name, ok: !!cond, detail });
-  console.log(`${cond ? "ok  " : "FAIL"} ${name}${detail ? `  — ${detail}` : ""}`);
+  console.log(`${cond ? "ok  " : "FAIL"} ${name}${detail ? `  : ${detail}` : ""}`);
 };
 const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
@@ -34,7 +34,9 @@ const ENV = { platform: "win32", home: "C:\\Users\\dev", appData: "C:\\Users\\de
 const HOST_LOOPBACK = { host: "127.0.0.1", port: 8088, requireAuth: "auto" };
 
 // ── supported set ──────────────────────────────────────────────────────────────
-assert("five clients supported", eq([...SUPPORTED_CLIENTS], ["claude-desktop", "claude-code", "cursor", "vscode", "codex"]));
+// ADAPTED (design 3.13): `install` now supports eight clients; the five of 0.1.0 are all still there.
+assert("eight clients supported (design 3.13)", eq([...SUPPORTED_CLIENTS], ["claude-code", "claude-desktop", "codex", "gemini", "antigravity", "dsh", "cursor", "vscode"]));
+assert("the five 0.1.0 clients are still supported", ["claude-desktop", "claude-code", "cursor", "vscode", "codex"].every((c) => SUPPORTED_CLIENTS.includes(c)));
 
 // ── resolveTarget: transport/format/key per client ──────────────────────────────
 {
@@ -91,8 +93,10 @@ assert("auth auto + LAN → true", authRequired({ host: "192.168.1.5", port: 1, 
     launcher: { command: "node", cliPath: "C:\\sb\\dist\\cli.js", configPath: "C:\\sb\\switchboard.config.yaml" },
   });
   assert("stdio entry: command=node", e.command === "node");
-  assert("stdio entry: args = [cli, --config, cfg, serve]",
-    eq(e.args, ["C:\\sb\\dist\\cli.js", "--config", "C:\\sb\\switchboard.config.yaml", "serve"]), JSON.stringify(e.args));
+  // ADAPTED (design 3.13): the stdio entry is the bridge, which relays to the shared gateway as this client,
+  // not a `serve` launcher that would start a second gateway per client.
+  assert("stdio entry: args = [cli, bridge, --client, claude-desktop] (no --url at the default gateway address)",
+    eq(e.args, ["C:\\sb\\dist\\cli.js", "bridge", "--client", "claude-desktop"]), JSON.stringify(e.args));
   assert("stdio entry: no url/type", e.url === undefined && e.type === undefined);
 }
 {
@@ -132,7 +136,7 @@ assert("auth auto + LAN → true", authRequired({ host: "192.168.1.5", port: 1, 
   assert("merge: refuses to overwrite invalid JSON", threw);
 }
 {
-  // VS Code uses the `servers` key — merge must honor whatever key the target declares.
+  // VS Code uses the `servers` key, so merge must honor whatever key the target declares.
   const merged = mergeJsonConfig(null, "servers", "switchboard", { type: "http", url: "u" });
   assert("merge: respects non-default key (servers)", eq(JSON.parse(merged), { servers: { switchboard: { type: "http", url: "u" } } }));
 }
@@ -202,7 +206,8 @@ try {
   {
     const lanEp = { host: "0.0.0.0", port: 8088, requireAuth: "auto" };
     const jsonPlan = buildPlan("claude-code", { endpoint: lanEp, launcher: {}, baseDir: join(root, "lan") });
-    assert("plan(LAN, json): writes Authorization bearer env placeholder", jsonPlan.content.includes("Bearer ${env:SWITCHBOARD_TOKEN}"));
+    // ADAPTED: Claude Code documents ${VAR} (not Cursor/VS Code's ${env:VAR}) for environment references in .mcp.json headers.
+    assert("plan(LAN, json): writes Authorization bearer env placeholder in Claude Code's own syntax", jsonPlan.content.includes("Bearer ${SWITCHBOARD_TOKEN}") && !jsonPlan.content.includes("${env:"));
     assert("plan(LAN, json): notes flag auth required", jsonPlan.notes.some((n) => n.toLowerCase().includes("bearer token")));
     const tomlPlan = buildPlan("codex", { endpoint: { host: "192.168.0.9", port: 8088, requireAuth: "auto" }, launcher: {}, baseDir: join(root, "lan2") });
     assert("plan(LAN, toml): writes bearer_token_env_var", tomlPlan.content.includes('bearer_token_env_var = "SWITCHBOARD_TOKEN"'));

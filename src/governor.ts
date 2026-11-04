@@ -4,9 +4,9 @@
  * Hosted aggregators meter your calls to bill you. MCP Switchboard runs on YOUR machine, so the same
  * accounting becomes a governance control instead: cap how fast (and how expensively) an autonomous
  * agent may hit a tool, so a runaway loop or a pricey cross-provider council can't quietly burn your
- * API budget. Limits stack across three levels — global (`settings.limits`), per-server
- * (`server.limits`), and per-tool (`server.tools[name].limits`) — and a call must satisfy EVERY
- * level it touches. Denials fail CLOSED and are conservative: a call that is denied or fails upstream
+ * API budget. Limits stack across four levels: global (`settings.limits`), per-server
+ * (`server.limits`), per-tool (`server.tools[name].limits`) and per-client (`clients.<id>.limits`, read live
+ * because the clients map can be reloaded), and a call must satisfy EVERY level it touches. Denials fail CLOSED and are conservative: a call that is denied or fails upstream
  * still counts against its limit (we never under-count), because the goal is to bound blast radius,
  * not to bill precisely.
  *
@@ -72,7 +72,7 @@ export class TokenBucket {
 }
 
 /** The level a limit was attached to — surfaced in the denial so the operator knows what to raise. */
-export type LimitLevel = "global" | "server" | "tool";
+export type LimitLevel = "global" | "server" | "tool" | "client";
 /** Which rolling window a limit governs. */
 export type LimitWindow = "minute" | "hour" | "day";
 /** Whether the binding limit counted calls (`rate`) or summed `cost` (`cost`). */
@@ -117,6 +117,14 @@ interface Draw {
   level: LimitLevel;
   window: LimitWindow;
   kind: LimitKind;
+  /** The subject to name in a denial when it is not derivable from the server and tool (a client). */
+  who?: string;
+}
+
+/** The caller's client, for the per-client level: its id and the limits its profile sets right now. */
+export interface ClientLimits {
+  id: string;
+  limits?: LimitSpec;
 }
 
 /**
@@ -164,8 +172,9 @@ export class Governor {
    * against any cost budget). The caller must NOT refund on a later upstream failure — limits count
    * attempts, conservatively, to bound runaway loops.
    */
-  consume(serverId: string, toolName: string, now: number): GovernorDecision {
-    if (!this.active) return { ok: true };
+  consume(serverId: string, toolName: string, now: number, client?: ClientLimits): GovernorDecision {
+    const clientLimits = hasAny(client?.limits) ? client!.limits : undefined;
+    if (!this.active && !clientLimits) return { ok: true };
 
     const tk = tupleKey([serverId, toolName]);
     const cost = this.toolCost.get(tk) ?? 0;
@@ -174,22 +183,28 @@ export class Governor {
     const levels: ReadonlyArray<[LimitLevel, readonly string[], LimitSpec | undefined]> = [
       ["tool", ["tool", serverId, toolName], this.toolLimits.get(tk)],
       ["server", ["server", serverId], this.serverLimits.get(serverId)],
+      ["client", ["client", client?.id ?? ""], clientLimits],
       ["global", ["global"], this.globalLimits],
     ];
 
     const draws: Draw[] = [];
     for (const [level, keyParts, spec] of levels) {
       if (!spec) continue;
+      const who = level === "client" ? `client '${client?.id ?? ""}'` : undefined;
       for (const w of WINDOWS) {
         const countLimit = spec[w.countField];
         if (typeof countLimit === "number") {
-          const bucket = this.bucketFor(tupleKey([...keyParts, "rate", w.key]), countLimit, w.ms, now);
-          draws.push({ bucket, need: 1, level, window: w.key, kind: "rate" });
+          // A client's limits can change on a config reload, so the limit is part of its bucket key: a new
+          // value is a new bucket (buckets of the other levels are fixed at first touch, config being immutable).
+          const key = level === "client" ? [...keyParts, "rate", w.key, String(countLimit)] : [...keyParts, "rate", w.key];
+          const bucket = this.bucketFor(tupleKey(key), countLimit, w.ms, now);
+          draws.push({ bucket, need: 1, level, window: w.key, kind: "rate", who });
         }
         const costLimit = spec[w.costField];
         if (typeof costLimit === "number" && cost > 0) {
-          const bucket = this.bucketFor(tupleKey([...keyParts, "cost", w.key]), costLimit, w.ms, now);
-          draws.push({ bucket, need: cost, level, window: w.key, kind: "cost" });
+          const key = level === "client" ? [...keyParts, "cost", w.key, String(costLimit)] : [...keyParts, "cost", w.key];
+          const bucket = this.bucketFor(tupleKey(key), costLimit, w.ms, now);
+          draws.push({ bucket, need: cost, level, window: w.key, kind: "cost", who });
         }
       }
     }
@@ -248,12 +263,12 @@ function subject(level: LimitLevel, serverId: string, toolName: string): string 
 }
 
 function denyReason(d: Draw, serverId: string, toolName: string): string {
-  const who = subject(d.level, serverId, toolName);
+  const who = d.who ?? subject(d.level, serverId, toolName);
   const unit = d.kind === "cost" ? `${d.bucket.capacity} cost` : `${d.bucket.capacity} calls`;
   return `${who} exceeded its ${unit}/${d.window} ${d.kind === "cost" ? "budget" : "rate limit"}`;
 }
 
 function misconfigReason(d: Draw, serverId: string, toolName: string): string {
-  const who = subject(d.level, serverId, toolName);
+  const who = d.who ?? subject(d.level, serverId, toolName);
   return `${who} call cost ${d.need} exceeds its ${d.bucket.capacity} cost/${d.window} budget — the call can never pass`;
 }

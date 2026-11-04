@@ -27,6 +27,13 @@ gateway:
   #                 context window stays flat no matter how many servers you mount
   tool_exposure: namespaced
   default_policy: read     # read | write | full  (least privilege by default)
+  # kill_switch: true      # refuse every tool call, resource read and prompt get (SB_KILL_SWITCH).
+  #                        # `switchboard kill on|off` does the same with no restart ($SWITCHBOARD_HOME/KILL).
+  # approval:              # out-of-band approvals (design 3.3, 3.4). Every field is optional.
+  #   require_for_risk: [high]   # calls of these risks need the owner's approval (OR-ed with each server's approval.require_for)
+  #   ttl_seconds: 900           # how long a request, then an approval, lives: 60 to 86400
+  #   wait_seconds: 0            # how long a gated call waits for the owner before returning SB_APPROVAL_PENDING: 0 to 50
+  #                              # Decide with the dashboard's Approvals page or `switchboard approvals approve <id>`.
 
 vault:
   # encrypted-file -> AES-256-GCM blob in ~/.switchboard (portable, zero native deps)
@@ -64,6 +71,31 @@ settings:
     # arguments and upstream responses. Secret-looking keys are masked before write.
     # Off by default — turn it on only when you need to inspect tool I/O.
     capture_io: false
+
+  # Outbound network guard (SSRF). Every request the gateway makes on behalf of config or tools
+  # (http-tool and app2mcp calls, OpenAPI spec fetches, webhooks, OAuth token calls, the council,
+  # catalog syncs) resolves DNS first and REFUSES loopback, private (RFC1918), CGNAT, link-local,
+  # unique-local, unspecified, multicast and cloud-metadata targets. Redirects are followed at most
+  # 3 times, every hop is re-checked, and credential headers are dropped when the origin changes.
+  # Each request has a deadline and a response-size cap. The defaults below are safe; this block
+  # only relaxes or tunes them.
+  network:
+    # Exact host names or IPs that may be non-public: local model servers, a LAN API. Exact means
+    # the host in the URL: 127.0.0.1 does not allow localhost and the reverse. No wildcards, CIDR
+    # ranges, ports or schemes. The council local provider below needs its host listed here
+    # (`switchboard local-llm wire` adds it for you).
+    allow_private: [127.0.0.1]
+    # timeout_ms: 15000            # per request, DNS through last body byte
+    # max_response_bytes: 5242880  # decoded body cap enforced while streaming (5 MiB)
+
+  # Toolkit file handling and media staging (connectors; see docs/architecture/CONNECTORS.md).
+  # connectors:
+  #   upload_allowlist: ["D:/Media/uploads"]     # local drive-letter folders an action may upload from (empty = no local path; network folders are ignored)
+  #   max_upload_bytes: 268435456
+  #   media:                                     # for platforms that fetch media themselves (Instagram, TikTok)
+  #     public_base_url: https://your-tunnel.example   # from `switchboard expose --tunnel cloudflared`
+  #     ttl_seconds: 900                         # at most 900
+  #     max_fetches: 3                           # at most 10
 
   # Cross-provider "council" relay tools. Lets an agent connected to MCP Switchboard broker a
   # PEER model: council_consult (one prompt -> the other provider) and council_debate (a
@@ -176,10 +208,11 @@ settings:
   # or a tighter `{ failure_threshold: 2 }` for a flaky upstream).
 
 servers:
-  # --- mount an existing MCP server from npm ---
+  # --- mount an existing MCP server from npm. Pin an exact version (name@x.y.z): an unpinned name still
+  # mounts, but the startup log and `switchboard doctor` warn, and the dashboard adds only pinned packages. ---
   - id: github
     source: npx
-    package: "@modelcontextprotocol/server-github"
+    package: "@modelcontextprotocol/server-github@2025.4.8"
     enabled: true
     policy: write                       # this app may read + write, but not "full"
     credentials:
@@ -211,7 +244,7 @@ servers:
   # --- a read-only server ---
   - id: notion
     source: npx
-    package: "@notionhq/notion-mcp-server"
+    package: "@notionhq/notion-mcp-server@2.5.2"
     enabled: true
     policy: read
     credentials:
@@ -233,7 +266,7 @@ servers:
   # --- the bundled test server: real, no credentials, great for a first run ---
   - id: everything
     source: npx
-    package: "@modelcontextprotocol/server-everything"
+    package: "@modelcontextprotocol/server-everything@1.0.0"
     enabled: true
     policy: read
     approval:
@@ -285,3 +318,43 @@ servers:
             lat: { type: number }
             lon: { type: number }
           required: [lat, lon]
+
+  # A connector toolkit (needs an ACTIVE connected account first: `switchboard connect google`, then
+  # `switchboard toolkits sync google`). `switchboard toolkits enable gmail` writes this entry for you.
+  # - id: gmail
+  #   source: connector
+  #   toolkit: gmail
+  #   # account: google/work                # optional: PIN this server to one connected account. A pin is final:
+  #   #                                     # neither a client's `accounts` binding nor a call's `account` argument changes it
+
+# --- clients: who may call /mcp (design 3.1). Optional. Prefer `switchboard client add <id>`, which edits this section
+# for you and issues the key. With NO client configured the gateway is in loopback single-user mode. With ONE or more,
+# /mcp needs a key bound to a configured client on every request, whatever the bind host. A running gateway re-reads
+# ONLY this section when the file changes (a file that fails validation is ignored); the rest needs a restart.
+# clients:
+#   claude-code:
+#     description: Claude Code CLI
+#     servers: ["*"]                 # server id globs this client may see and call (omitted or empty: none)
+#     tools: []                      # optional allowlist of exposed tool names (globs); empty = all on those servers
+#     exclude_tools: ["*__delete_*"]
+#     max_scope: write               # ceiling, can only lower the server and profile ceilings
+#     max_risk: high                 # highest risk this client may request; a call above it is refused (high still needs approval)
+#     limits: { per_minute: 60 }     # optional, same shape as server limits
+#   local-model:
+#     servers: [voice, youtube]
+#     max_scope: read
+#     max_risk: low
+#   # Connector accounts (docs/architecture/CONNECTORS.md): `accounts` maps a provider to the connected account this client
+#   # uses (an id `ca_...`, `provider/label` or a unique label). Without an entry the client uses the provider's default
+#   # account. A call's `account` argument may only name the client's own account; `"*"` lets the client pick any account
+#   # of that provider. `switchboard link <client> <toolkit> --account <ref>` edits servers and accounts for you.
+#   assistant-a:
+#     servers: [gmail, youtube]
+#     max_scope: write
+#     max_risk: medium
+#     accounts: { google: google/work }
+#   assistant-b:
+#     servers: [gmail]
+#     max_scope: read
+#     max_risk: low
+#     accounts: { google: "*" }

@@ -24,8 +24,8 @@
 // Zero deps (node stdlib + the package's own compiled output + its bundled MCP SDK). Build first.
 import { buildCouncilServer, COUNCIL_SERVER_ID } from "../dist/council.js";
 import { Vault } from "../dist/vault.js";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
+import { useFetchStubForTests } from "../dist/netguard.js";
 
 const checks = [];
 const assert = (name, cond, detail = "") => {
@@ -58,11 +58,16 @@ globalThis.fetch = async (url, init) => {
   };
   return new Response(JSON.stringify(payload), { status: 200, statusText: "OK" });
 };
+// Outbound HTTP now goes through the SSRF guard (src/netguard.ts) instead of calling fetch directly:
+// route it to the capturing stub above and answer DNS with a public address, so no check here touches the network.
+const restoreNet = useFetchStubForTests(() => globalThis.fetch);
 
 const vault = new Vault("env"); // resolves ${env:NAME} from process.env, no filesystem
 const clients = [];
 async function mount(council) {
-  const built = buildCouncilServer(council, vault);
+  // The local provider points at a loopback address by design; since the SSRF guard (src/netguard.ts) the
+  // council local provider is "allowlisted by config": its exact host must be in settings.network.allow_private.
+  const built = buildCouncilServer(council, vault, { allow_private: ["127.0.0.1"] });
   const [clientT, serverT] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "verify-council", version: "0.0.0" });
   await built.server.connect(serverT);
@@ -221,6 +226,7 @@ const LOCAL_BASE = "http://127.0.0.1:11434/v1"; // Ollama-style base — already
 }
 
 globalThis.fetch = realFetch;
+restoreNet();
 for (const c of clients) {
   try {
     await c.close();

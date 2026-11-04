@@ -22,6 +22,7 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import type { SwitchboardConfig } from "./types.js";
 import { log } from "./logger.js";
+import { guardedFetch } from "./netguard.js";
 
 /** Resolves a `${vault:...}` / `${env:...}` reference to its secret (Vault.resolve). */
 export type SecretResolver = (ref: string) => string;
@@ -167,16 +168,13 @@ export function deliverWebhook(cfg: SwitchboardConfig, event: WebhookEvent, reso
 
   const url = wh.url;
   // Detached delivery. The governance decision is already settled + audited; this is best effort.
+  // The SSRF guard refuses private/loopback/metadata targets unless allowlisted in settings.network.
   void (async () => {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
     try {
-      await fetch(url, { method: "POST", headers, body: payload, signal: ctrl.signal });
+      await guardedFetch(url, { method: "POST", headers, body: payload, timeoutMs: TIMEOUT_MS }, () => cfg.settings?.network);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log.warn(`webhook: delivery to ${url} failed: ${msg}`);
-    } finally {
-      clearTimeout(timer);
     }
   })();
 }
@@ -220,15 +218,11 @@ export function deliverTriggerWebhook(
 
   const url = wh.url;
   void (async () => {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
     try {
-      await fetch(url, { method: "POST", headers, body: payload, signal: ctrl.signal });
+      await guardedFetch(url, { method: "POST", headers, body: payload, timeoutMs: TIMEOUT_MS }, () => cfg.settings?.network);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log.warn(`webhook: trigger delivery to ${url} failed: ${msg}`);
-    } finally {
-      clearTimeout(timer);
     }
   })();
 }

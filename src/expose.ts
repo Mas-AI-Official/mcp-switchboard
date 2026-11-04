@@ -22,7 +22,9 @@ import express from "express";
 import type { Gateway } from "./gateway.js";
 import type { SwitchboardConfig } from "./types.js";
 import { ApiKeyStore } from "./apikeys.js";
-import { mountMcpEndpoint } from "./dashboard.js";
+import { mountMcpEndpoint, type McpEndpointOptions } from "./dashboard.js";
+import { mountMediaRoutes } from "./connectors/mediastage.js";
+import { HostGuard, assertPortFree, jsonErrorHandler, securityHeaders, urlLengthGuard } from "./httpsec.js";
 import { log, out } from "./logger.js";
 
 export type TunnelKind = "cloudflared" | "ngrok" | "tailscale";
@@ -71,28 +73,46 @@ export const TUNNELS: Record<TunnelKind, TunnelSpec> = {
 
 /**
  * Stand up the dedicated `/mcp`-only listener: bearer auth forced on, JSON responses for
- * tunnel compatibility, and a catch-all 404 so nothing but `/mcp` is ever served.
+ * tunnel compatibility, and a catch-all 404 so nothing but `/mcp` is ever served. Every request also
+ * passes the Host allowlist (this listener's own loopback names, plus the tunnel's public host once it
+ * is known) and the Origin check, and every response carries the security headers.
  */
-async function startMcpListener(
+export async function startMcpListener(
   gateway: Gateway,
   host: string,
   port: number,
   apiKeys: ApiKeyStore,
-): Promise<{ url: string; close: () => Promise<void> }> {
+  /** The clients source (design 3.1): with clients configured this public listener only admits keys bound to one. */
+  endpoint: Pick<McpEndpointOptions, "clients" | "oauthClientName"> = {},
+): Promise<{ url: string; close: () => Promise<void>; allowPublicUrl: (url: string) => void }> {
+  // Refuse a busy port up front, including a wildcard or ::1 listener that would shadow ours.
+  await assertPortFree(host, port);
   const app = express();
+  app.disable("x-powered-by");
+  app.use(securityHeaders());
+  // Over-long URLs are refused before the Host check parses the path (DoS review).
+  app.use(urlLengthGuard());
+  const guard = new HostGuard({ port });
+  app.use(guard.handler());
   app.use(express.json());
   // Auth is unconditionally required here — this listener is, by definition, public.
-  mountMcpEndpoint(app, gateway, { requireAuth: () => true, apiKeys, enableJsonResponse: true });
+  mountMcpEndpoint(app, gateway, { requireAuth: () => true, apiKeys, enableJsonResponse: true, ...endpoint });
+  // The one other thing a tunnel may reach: ephemeral single-file media URLs (an unknown id is a 404).
+  mountMediaRoutes(app, gateway.oauth.connectors.kit.media, `http://${host}:${port}`);
   app.use((_req, res) => res.status(404).json({ error: "not found — only /mcp is exposed" }));
+  app.use(jsonErrorHandler());
 
+  // No callback on listen: Express 5 invokes it with the error too, which would resolve a failed bind.
   return new Promise((resolveListener, reject) => {
-    const server = app.listen(port, host, () => {
+    const server = app.listen(port, host);
+    server.once("listening", () => {
       resolveListener({
         url: `http://${host}:${port}/mcp`,
         close: () => new Promise<void>((done) => server.close(() => done())),
+        allowPublicUrl: (url: string) => guard.addPublicUrl(url),
       });
     });
-    server.on("error", (err) => {
+    server.once("error", (err) => {
       const e = err as NodeJS.ErrnoException;
       reject(
         new Error(
@@ -188,6 +208,8 @@ export interface ExposeOptions {
   port: number;
   /** If a fresh key was just minted, the plaintext token to print once; else null. */
   issuedToken: string | null;
+  /** Live source of the configured clients (the CLI passes one that follows the config file). Default: `cfg.clients` as loaded. */
+  clients?: McpEndpointOptions["clients"];
 }
 
 /**
@@ -197,14 +219,14 @@ export interface ExposeOptions {
  */
 export async function runExpose(
   gateway: Gateway,
-  _cfg: SwitchboardConfig,
+  cfg: SwitchboardConfig,
   apiKeys: ApiKeyStore,
   opts: ExposeOptions,
 ): Promise<void> {
   const host = "127.0.0.1";
   const spec = TUNNELS[opts.tunnel];
 
-  const listener = await startMcpListener(gateway, host, opts.port, apiKeys);
+  const listener = await startMcpListener(gateway, host, opts.port, apiKeys, { clients: opts.clients ?? (() => cfg.clients) });
   log.ok(`/mcp listener up on ${listener.url} (auth required; dashboard/console stay local and un-tunnelled)`);
 
   if (spec.note) log.warn(spec.note);
@@ -218,6 +240,7 @@ export async function runExpose(
     throw err;
   }
 
+  listener.allowPublicUrl(tunnel.publicUrl); // /mcp now also accepts the tunnel's own Host and Origin
   const publicMcp = `${tunnel.publicUrl.replace(/\/$/, "")}/mcp`;
   log.ok(`${opts.tunnel} tunnel live: ${tunnel.publicUrl}`);
   printConnectionInfo(publicMcp, apiKeys, opts.issuedToken);
