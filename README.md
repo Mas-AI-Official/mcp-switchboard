@@ -133,6 +133,48 @@ node dist/cli.js link <client> <toolkit>          # let a client use that toolki
 
 Token or key providers skip the app: `switchboard connect <provider> --token-stdin`.
 
+## Local connectors (no subscription)
+
+A hosted tool router signs you in to Gmail, YouTube, Slack and the rest once, keeps the tokens in its cloud and
+charges a subscription. Switchboard does the same job locally: you connect each provider **once** with an OAuth app
+or key that you own, the tokens are sealed in your local vault, and every agent you link reaches them through the one
+governed endpoint. No subscription, no third party in the path, and nothing leaves your machine except the calls to
+the provider itself.
+
+1. **Register your app** at the provider (a shared app is impossible for an open-source program):
+   [docs/connectors/OWNER_SETUP.md](docs/connectors/OWNER_SETUP.md) has the steps and the limits, per platform.
+2. **Connect**: `switchboard connect <provider>`, or press **Connect** on the dashboard's **Connectors** page. An
+   account is stored only after the provider's identity probe passes.
+3. **Toolkits**: `switchboard toolkits sync <provider>` then `switchboard toolkits enable <toolkit>` (or the toggle on
+   the Connectors page) mounts the provider's API as agent tools. Generated definitions live on your machine and are
+   never committed.
+4. **Link clients**: `switchboard link <client> <toolkit> --max-scope write --account <account>` decides which agent may
+   use what, and as which account. It edits the `clients:` section (the one access table; `unlink` and `links` are its
+   counterparts), so the gateway asks you to be present first, exactly as for `client add`. Calls that publish, send or
+   delete need your approval, and the approval is bound to the account and to the exact request (method, host, path,
+   body), so an approval for one account cannot run as another.
+
+**Curated and seeded providers.** The 13 curated definitions (Google, Meta, LinkedIn, TikTok, X, Slack, Notion, GitHub,
+ElevenLabs, Linear, Higgsfield, Buffer) are written and checked by hand. Beside them ship 594 **seeds**: candidate
+definitions of long-tail providers, derived from the authentication settings of the MIT-licensed
+[Activepieces](https://github.com/activepieces/activepieces) community pieces (facts only, never piece code; see
+`NOTICE`). A seed enables Connect and nothing more: it is marked `unverified_seed`, has no toolkits and no identity
+probe, and it is **never counted as working**. A curated definition always wins over a seed of the same name, and
+writing your own `<SWITCHBOARD_HOME>/providers/<slug>.json` replaces one.
+
+**Honest counts.** Only a row proven live by an owner-run probe is called working (`switchboard coverage`). A registered
+provider, a mapped action or a seed is not a working one.
+
+```bash
+switchboard providers list --seeds        # curated and seeded providers, with their authentication modes
+switchboard providers show <provider>     # what to create at the provider, redirect URIs, assumptions for a seed
+switchboard dashboard login               # then open #/connectors: search, filter, Connect, accounts, toolkit on/off
+node scripts/verify-connectors-seed.mjs   # the oracle: seeds validate, curated wins, a seed never reports working
+```
+
+Architecture and security rules: [docs/architecture/LOCAL_TOOLKITS.md](docs/architecture/LOCAL_TOOLKITS.md).
+File-by-file notes: [docs/architecture/CONNECTORS.md](docs/architecture/CONNECTORS.md).
+
 ## Security model
 
 - **Per-client keys.** Each client has its own key. `client add` and `client rotate` on a running gateway require an owner presence check; `client rm` does not, since revoking is always safe. Key files are user-scope protected (DPAPI on Windows, mode 0600 elsewhere).
