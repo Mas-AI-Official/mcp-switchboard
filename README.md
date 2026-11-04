@@ -1,1133 +1,213 @@
 <div align="center">
 
-<img src="docs/assets/switchboard-banner.svg" alt="MCP Switchboard — one governed MCP endpoint for every tool, shared by Claude and ChatGPT, running local-first on your machine" width="880" />
+<img src="docs/assets/switchboard-banner.svg" alt="MCP Switchboard: one governed MCP endpoint for every tool, shared by Claude, ChatGPT and every agent, running local-first on your machine" width="880" />
 
-<h1>🔌&nbsp;MCP Switchboard</h1>
-
-<p>
-  <b>One connector. Every tool. Both Claude <i>and</i> ChatGPT</b> — driving the same apps through one governed control plane on your machine.<br/>
-  Local-first · bring your own keys · run fully offline with a local LLM · <b>nothing leaves your machine</b>.
-</p>
-
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-2dd4bf.svg)](LICENSE)
-[![MCP](https://img.shields.io/badge/Model_Context_Protocol-1.29-2dd4bf.svg)](https://modelcontextprotocol.io)
-[![Node](https://img.shields.io/badge/node-%E2%89%A522.12-2dd4bf.svg)](https://nodejs.org)
-[![Verified](https://img.shields.io/badge/deterministic_oracles-1171_checks-2dd4bf.svg)](#everything-is-verified-by-a-deterministic-oracle)
-[![Status](https://img.shields.io/badge/status-working_alpha-D4A843.svg)](#project-status)
-[![Zero native deps](https://img.shields.io/badge/native_deps-0-D4A843.svg)](#security)
+<h1>MCP Switchboard</h1>
 
 <p>
-  <a href="#quickstart"><b>Quickstart</b></a> ·
-  <a href="#why-its-different">Why it's different</a> ·
-  <a href="#the-big-idea">The big idea</a> ·
-  <a href="#cli">CLI</a> ·
-  <a href="#everything-is-verified-by-a-deterministic-oracle">Verified</a> ·
-  <a href="#docs">Docs</a>
+  <b>One local endpoint. Every MCP tool. Per-client keys, per-tool policy, a tamper-evident audit log.</b><br/>
+  A governed, local-first MCP hub that runs on your machine and keeps your credentials there.
 </p>
+
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-2dd4bf.svg?labelColor=0d1117)](LICENSE)
+[![MCP protocol](https://img.shields.io/badge/MCP-2026--07--28-2dd4bf.svg?labelColor=0d1117)](docs/MCP_SWITCHBOARD_BASELINE.md)
+[![Node](https://img.shields.io/badge/node-%3E%3D22.12-D4A843.svg?labelColor=0d1117)](package.json)
+[![Oracles](https://img.shields.io/badge/oracles-4373_checks_passing-D4A843.svg?labelColor=0d1117)](docs/VALIDATION.md)
+[![Local-first](https://img.shields.io/badge/local--first-127.0.0.1:8088-2dd4bf.svg?labelColor=0d1117)](docs/ARCHITECTURE.md)
+
+[Quickstart](#quickstart) · [Architecture](#architecture) · [Connectors](#connectors) · [Security](#security-model) · [CLI](#cli-reference) · [Docs](#documentation)
 
 </div>
 
 ---
 
-## The big idea
+## What it is
 
-You have **two of the best agents in the world** — Claude and ChatGPT — and you'd like them to
-actually *do things*: read your GitHub, triage your Gmail, update Notion, ping Slack, hit your
-internal API. Today that means wiring every client to every app by hand (**N×M** pain), and the
-"easy" hosted shortcut parks **your OAuth tokens on someone else's server**.
+Switchboard is a gateway that sits between your agent clients (Claude Code, Claude Desktop, Codex, Antigravity and others) and the MCP servers and app connectors they use.
+Clients talk to **one** endpoint on `127.0.0.1:8088` (streamable HTTP) or through a stdio bridge. Every call is checked against a per-client policy, gated by owner presence where it matters, and written to a hash-chained audit log.
+Credentials live in a local encrypted vault. Nothing is hosted for you.
 
-MCP Switchboard collapses **N×M into N×1**. You run **one** local process that re-exposes all your MCP
-servers behind **one governed endpoint**. You add that endpoint **once** as a connector in Claude,
-and **once** in ChatGPT — and now *both* assistants reach the same tools, through the **same
-encrypted vault, the same on/off + read/write/full policy, the same approval gates, and the same
-audit log**. One control plane. Your machine. No "us" in the middle.
+## Why
 
-Think of it as **your own private "Connectors" page** — the kind ChatGPT and Claude each ship as a
-walled garden — except it lives on *your* box, mounts the *whole* MCP ecosystem instead of a curated
-shortlist, and serves **every** assistant at once. Browse a catalog of thousands of toolkits in the
-dashboard, flip one on, and `switchboard install claude-code` wires it into your client in a single
-command. No tokens handed to a vendor, no per-call meter, no treadmill.
-
-```
-     Claude Desktop ─┐                            ┌─ Gmail        (read)
-     Claude Code  ───┤       ┌────────────┐       ├─ GitHub       (write · delete blocked)
-     claude.ai web ──┼─ MCP ▶│ SWITCHBOARD │▶──────┼─ Notion       (read)
-     ChatGPT      ───┤       │ vault·policy│       ├─ Slack        (OFF)
-     Cursor/agents ──┘       │ ·audit·gates│       ├─ your REST API (app2mcp)
-                             └────────────┘       └─ a local LLM   (offline council)
-```
-
-### "So Claude and ChatGPT share my email?" — almost; here's the precise mental model
-
-You're **right** that MCP Switchboard is the single connector both assistants point at to reach every
-app. Two corrections worth making:
-
-- **It's a shared *control plane*, not a shared *session*.** Claude and ChatGPT don't see each
-  other's chats or share conversation state. What they share is the layer *underneath*: one set of
-  BYO credentials, one policy, one audit trail. Both can act on your Gmail — each governed
-  identically, every call logged in one place — but neither inherits the other's context.
-- **Local clients connect directly; cloud clients need a door.** Anything running **on your machine**
-  (Claude Desktop, Claude Code, Cursor, your own agents) reaches `127.0.0.1:8088` directly with an
-  API key — zero setup. Anything running **in a vendor's cloud** — **claude.ai web** and **ChatGPT's
-  custom connectors** (Developer Mode, on Pro/Team/Enterprise/Edu) — *cannot* reach your laptop's
-  localhost. For those, run `switchboard expose` to get a public HTTPS URL and turn on the built-in
-  **OAuth 2.1 + PKCE** server, then paste that URL as the connector and authorize once. Same governed
-  endpoint, reachable from the cloud, still zero token custody. See
-  **[Connecting cloud clients](#connecting-cloud-clients--claudeai-web--chatgpt-oauth-21--pkce-phase-5b)**.
-
-### No cloud account? Run it fully offline.
-
-Adoption shouldn't require an API bill. Point MCP Switchboard's **council** at a **local LLM** — Ollama,
-LM Studio, llama.cpp, or vLLM — and you get a second-opinion / debate model with **zero cloud, zero
-keys, zero data leaving the box**. You don't even have to find the URL: `switchboard local-llm`
-**auto-detects** a running OpenAI-compatible server on the usual ports, and `switchboard local-llm wire`
-writes the provider block for you. Download a model, run two commands, and the whole stack (vault,
-policy, audit, council) runs on your hardware. See **[Run it fully offline with a local LLM](#run-it-fully-offline-with-a-local-llm-auto-detected)**.
-
-## Why it's different
-
-|  | MCP Switchboard | Hosted tool routers |
+| | Hosted tool routers | MCP Switchboard |
 |---|---|---|
-| **One connector, every assistant** | Add it once; **Claude *and* ChatGPT** share the same governed tools | Per-vendor, per-app setup |
-| **Where your tokens live** | A local AES-256 vault on **your** machine | Their cloud |
-| **Integrations** | **Mounts existing MCP servers** — no treadmill | Hand-built, must be maintained |
-| **One-command setup** | `switchboard install claude-code` wires it into 8 clients, with a preview, a backup, a probe and a rollback | Copy-paste JSON per client |
-| **Browse & connect** | A local catalog of thousands of toolkits (MCP Registry + APIs.guru) | A curated vendor shortlist |
-| **Governance** | Per-tool `read/write/full` + approval gates + audit log | Usually all-or-nothing |
-| **Profiles** | Named views — a locked-down "demo" vs a full "dev" surface, one switch | None |
-| **Rate limits + spend budgets** | Per-minute/hour/day call **and cost** ceilings, fail-closed | Pay the overage |
-| **Resilience** | Per-server **circuit breaker** trips a flapping upstream, fast-fails | Hangs propagate |
-| **Works offline** | Council runs against an **auto-detected local LLM** — no account required | Cloud-only |
-| **Context blow-up** | `search` mode → 2 meta-tools no matter how many servers | Dump every tool into context |
-| **Cost** | Free, Apache-2.0, self-hosted, **no per-call meter** | Metered SaaS |
+| Where tokens live | Their cloud | Your machine (local vault) |
+| Who can call what | Account-level | Per client, per server, per tool, with a scope ceiling |
+| Approving risky calls | Dashboard click | Owner presence (Windows Hello where available) |
+| Audit | Vendor logs | Local hash-chained log you can verify |
+| Cost | Subscription | Free, Apache-2.0 |
+| Trade-off | Zero setup, many prebuilt apps | You bring your own OAuth apps and keys; connector coverage is smaller |
 
-The catalog is **not** the moat — hosted players already have bigger ones. The defensible
-combination is **local credentials + a governance layer + a usable dashboard**, built as an
-**aggregator** that rides the existing MCP ecosystem instead of re-implementing it — then pushed
-*past* parity with the three things a metered cloud can't sell you: **profiles, spend budgets, and a
-circuit breaker, all running on your own hardware.**
+The honest cost is setup: each provider needs an OAuth app or key that you own. See [docs/connectors/OWNER_SETUP.md](docs/connectors/OWNER_SETUP.md) and the cost comparison in [docs/PROVIDER_COST_COMPARISON.md](docs/PROVIDER_COST_COMPARISON.md).
+Feature-by-feature positioning against a hosted hub is in [docs/COMPOSIO-PARITY.md](docs/COMPOSIO-PARITY.md).
+
+## Architecture
+
+```mermaid
+flowchart LR
+  subgraph Clients
+    A1[Claude Code]
+    A2[Claude Desktop]
+    A3[Codex]
+    A4[Antigravity / dsh]
+  end
+
+  A1 & A2 & A3 & A4 -->|stdio| B[switchboard bridge<br/>--client id]
+  B -->|HTTP + client key| G
+  A3 -.->|HTTP mode| G
+
+  subgraph G["Gateway 127.0.0.1:8088"]
+    direction TB
+    P1[Client key check] --> P2[Policy<br/>allow / deny, scope ceiling]
+    P2 --> P3[Owner presence<br/>approval gate]
+    P3 --> P4[Audit chain<br/>+ secret scrubbing]
+  end
+
+  G --> C1[Connector toolkits<br/>local, per provider]
+  G --> C2[Mounted MCP servers<br/>npx / binary / remote]
+  C1 --> V[(Encrypted vault)]
+  C1 --> X[Provider APIs]
+```
+
+Details, module by module: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/architecture/](docs/architecture/).
 
 ## Quickstart
 
-### Install from GitHub release tarball
-
-> One-time prerequisite: install **[Node 22.12+](https://nodejs.org)**.
+Requires **Node >= 22.12**. Windows gets the full owner-presence flow (Windows Hello); other platforms fall back to a typed challenge at the gateway console, which [the threat model](docs/THREAT_MODEL.md) rates as weaker.
 
 ```bash
-npm install -g https://github.com/Mas-AI-Official/mcp-switchboard/releases/download/v0.1.0/mcp-switchboard-0.1.0.tgz   # installs the `switchboard` command globally
-switchboard init                 # scaffold a config + the ~/.switchboard home directory
-switchboard serve                # stdio for local clients + HTTP endpoint & dashboard
-```
-
-The npm package name is pending publication. Until npm auth is completed, use the release tarball above.
-
-Uninstall is plain npm:
-
-```bash
-npm uninstall -g mcp-switchboard
-
-# Optional: delete local Switchboard state too.
-# This removes your local vault, API keys, auth-server state, and audit/config files.
-rm -rf ~/.switchboard
-```
-
-Windows PowerShell equivalent:
-
-```powershell
-npm uninstall -g mcp-switchboard
-Remove-Item -Recurse -Force "$env:USERPROFILE\.switchboard"
-```
-
-Open the dashboard at **http://127.0.0.1:8088** and sign in (see [Dashboard sign-in](#dashboard-sign-in)), then point an agent at the MCP endpoint. Wire a
-client in one command with `switchboard install <client>` (see [below](#wire-it-into-your-client-one-command)).
-
-### Fastest start — one click (no terminal)
-
-> One-time prerequisite: install **[Node 22.12+](https://nodejs.org)**.
-
-1. Get the code — `git clone https://github.com/Mas-AI-Official/mcp-switchboard.git`, or **Code ▸ Download ZIP** on GitHub and unzip it.
-2. **Windows:** double-click **`start-switchboard.bat`**.
-   **macOS / Linux:** run **`./start-switchboard.sh`** (`chmod +x start-switchboard.sh` once).
-3. That's it. The first run installs dependencies, builds, and writes a starter config for you; then the gateway starts and **the dashboard opens in your browser** automatically.
-
-To stop it: press **Ctrl+C** in the launcher window — or, if you closed the window and the port is still busy, double-click **`stop-switchboard.bat`** (`./stop-switchboard.sh` isn't needed on Unix; Ctrl+C is enough).
-
-The launcher runs MCP Switchboard in **HTTP + dashboard** mode on `http://127.0.0.1:8088`. To wire a stdio client (`claude mcp add`, Cursor) or change the transport, edit `switchboard.config.yaml` or use the from-source commands below.
-
-### From source (manual)
-
-> Requires Node ≥ 22.12. Prefer this if you want to hack on MCP Switchboard or pin a specific commit.
-
-```bash
+# 1. install and build
 git clone https://github.com/Mas-AI-Official/mcp-switchboard.git
-cd switchboard
+cd mcp-switchboard
 npm install
 npm run build
 
-# scaffold a config + the ~/.switchboard home directory
+# 2. create a starter config and the home directory
 node dist/cli.js init
 
-# mount everything and print the governed tool list (no credentials needed —
-# the bundled @modelcontextprotocol/server-everything is a real test server)
-node dist/cli.js list
-
-# run it: stdio for local clients + an HTTP endpoint & dashboard
+# 3. start the gateway (127.0.0.1:8088)
 node dist/cli.js serve
+
+# 4. in another terminal: register a client and wire it up
+node dist/cli.js client add claude-code
+node dist/cli.js install claude-code --dry-run   # preview, changes nothing
+node dist/cli.js install claude-code             # back up, write, probe
+
+# 5. verify
+node dist/cli.js doctor
+node dist/cli.js list                            # governed tool list
 ```
 
-Open the dashboard at **http://127.0.0.1:8088** and sign in (see [Dashboard sign-in](#dashboard-sign-in)), then point an agent at the MCP endpoint.
+`switchboard` and `mcp-switchboard` are the installed binary names (`npm link` or a global install exposes them); the examples above call `node dist/cli.js` directly.
 
-### Dashboard sign-in
+Supported `install` targets: `claude-code`, `claude-desktop`, `codex`, `antigravity`, `dsh`, plus `gemini`, `cursor` and `vscode`.
+Default mode is the stdio bridge (`switchboard bridge --client <id>`), which authenticates as that client. `--mode http` points the client at the gateway URL instead. `--scope project` writes the project-local config.
 
-The admin API behind the dashboard (settings, audit, API keys, running tools, adding servers) needs an
-**owner session**. Being on localhost is not enough: a tunnel, a DNS-rebinding page or another local
-process also looks like localhost. Sign in from a terminal on the machine that runs Switchboard:
+Rollback: `switchboard uninstall <client>` removes only the Switchboard entry, after taking a backup.
 
-```bash
-switchboard dashboard login          # the RUNNING gateway checks you are present (Windows Hello, else a typed code at its console), then opens the dashboard signed in
-switchboard dashboard login --no-open   # print the one-time URL instead of opening a browser
-```
+## Connectors
 
-The command asks the running gateway; the gateway performs the presence check itself and mints the login code in its
-own memory (nothing the caller sets, such as an environment variable or a flag, reaches that check, and no file in
-`~/.switchboard` can create a code or a session). The URL carries a code that works once and expires after 120
-seconds; it is exchanged for a session that lasts 12 hours and is forgotten when the gateway restarts. The session is
-**not a cookie**: a cookie is sent to every port of the same host, so another local web UI you visit in the same
-browser would receive it. The dashboard keeps the session in this tab's `sessionStorage` (scoped to the origin, port
-included) and sends it as the `X-Switchboard-Session` header, with a random per-session CSRF value in
-`X-Switchboard-CSRF` on every mutating call. Sign in again in each tab. Client API keys authenticate `/mcp` only and are
-never accepted by the admin API. Every request must also carry a Host header that names this listener
-(`127.0.0.1`, `localhost` or `[::1]` with the right port, plus the public issuer host on `/mcp` and the
-OAuth routes), and a browser Origin on writes must match it; anything else gets a 403. If the port is
-already taken, `switchboard serve`, `dashboard` and `expose` print the reason and exit non-zero.
+A connector is a local toolkit: provider auth definition, connected accounts held in the vault, and a generated MCP server per toolkit. Provider definitions are data, not code.
 
-### Wire it into your client: one command
-
-`switchboard install <client> [--mode bridge|http] [--scope user|project] [--yes] [--dry-run]` registers
-Switchboard in the client you name: `claude-code`, `claude-desktop`, `codex`, `gemini`, `antigravity`
-(the `agy` CLI), `dsh` (the DeepSeek harness), `cursor` or `vscode`. The default entry is the
-[bridge](#bridge-one-stdio-command-for-every-client): the client starts `switchboard bridge --client <id>`,
-which relays to the shared gateway as that client, so no token is ever written into a client file.
-
-```bash
-node dist/cli.js install claude-code --dry-run     # show the plan, change nothing
-node dist/cli.js install claude-code               # preview, ask, back up, write, probe
-node dist/cli.js install cursor --scope project --yes   # <project>/.cursor/mcp.json, no question
-node dist/cli.js install dsh --dsh-profile web     # a row in ~/.dsh/profiles/web/cordis.patch.yml
-node dist/cli.js uninstall claude-code             # removes only the switchboard entry
-```
-
-Every install runs the same steps: it **builds the plan and prints it** (the exact entry and the target file
-or the client's own CLI command), **refuses a file that does not parse** (nothing is touched), **asks you to
-confirm** (`--yes` skips the question), registers the client with the gateway when it is not yet configured
-(the equivalent of `switchboard client add <id>`: all servers, `max_scope write`, `max_risk high`; a running gateway shows you that grant in its own presence prompt first),
-**backs the target up** to `<file>.bak-switchboard-<timestamp>` (for `claude mcp` the previous entry is
-recorded instead), **writes** (through the client's own CLI when it is on PATH: `claude mcp add-json`,
-`codex mcp add`, `agy mcp add`; otherwise an atomic temp-file-and-rename edit that keeps every other entry),
-**probes** (`claude mcp get`, `codex mcp get`, `agy mcp list`, or a re-read of the file, then the bridge
-entry is started once with an `initialize` request when a gateway answers), and **rolls back from the backup
-when the probe fails**. `--dry-run` writes nothing at all. A second install of an identical entry changes
-nothing. `uninstall` removes only the switchboard entry, after a backup, and keeps the registered client.
-
-| Client | User file (default scope) | `--scope project` | Writes through |
-|---|---|---|---|
-| `claude-code` | `~/.claude.json` | `<dir>/.mcp.json` | `claude mcp add-json` |
-| `claude-desktop` | `%APPDATA%\Claude\claude_desktop_config.json` | none | file |
-| `codex` | `$CODEX_HOME` or `~/.codex/config.toml` | `<dir>/.codex/config.toml` | `codex mcp add` (user scope) |
-| `gemini` | `~/.gemini/settings.json` | `<dir>/.gemini/settings.json` | file |
-| `antigravity` | `~/.gemini/config/mcp_config.json` | none | `agy mcp add` |
-| `dsh` | `$DSH_HOME` or `~/.dsh/profiles/<profile>/cordis.patch.yml` | none | file |
-| `cursor` | `~/.cursor/mcp.json` | `<dir>/.cursor/mcp.json` | file |
-| `vscode` | `%APPDATA%\Code\User\mcp.json` | `<dir>/.vscode/mcp.json` | file |
-
-`--mode http` writes the gateway's `/mcp` URL instead, with the token named by environment reference
-(`SWITCHBOARD_TOKEN`), for `claude-code`, `codex`, `cursor`, `vscode` and `dsh`; the other clients cannot
-carry a token by reference and are refused. The default scope is `user`: a bridge entry holds absolute paths
-of this machine, which do not belong in a file you commit. Older flags still work (`--global` is `--scope
-user`, `--print` is `--dry-run`).
-
-Prefer to wire it by hand? The endpoints are:
-
-```bash
-# Claude Code / Claude Desktop, stdio transport (the bridge):
-claude mcp add switchboard -- node /absolute/path/to/switchboard/dist/cli.js bridge --client claude-code
-
-# or the Streamable HTTP endpoint, for any HTTP MCP client:
-#   http://127.0.0.1:8088/mcp
-```
-
-### Bridge: one stdio command for every client
-
-Every MCP client can launch a stdio command. `switchboard bridge --client <id>` is that command. It relays
-the client's JSON-RPC over stdio to the one shared HTTP gateway, authenticated as that client. One warm
-gateway (one set of upstream processes) then serves Claude Code, Claude Desktop, Codex, Gemini and your own
-agents, each with its own identity, and **the bridge keeps tokens out of client config files**: the config
-only names the client id, never a key.
-
-```bash
-# Claude Code
-claude mcp add switchboard -- node /absolute/path/to/switchboard/dist/cli.js bridge --client claude-code
-```
-
-```toml
-# Codex: ~/.codex/config.toml
-[mcp_servers.switchboard]
-command = "node"
-args = ["/absolute/path/to/switchboard/dist/cli.js", "bridge", "--client", "codex"]
-```
-
-Claude Desktop, in `claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "switchboard": {
-      "command": "node",
-      "args": ["C:\\path\\to\\switchboard\\dist\\cli.js", "bridge", "--client", "claude-desktop"]
-    }
-  }
-}
-```
-
-The gateway must be running (`switchboard serve`); the bridge talks to `http://127.0.0.1:8088/mcp` unless you
-pass `--url`. The bridge finds the client's key in this order:
-
-1. the `SWITCHBOARD_KEY` environment variable,
-2. `--key-file <path>`, a plain text file holding the token,
-3. the client's stored key, `~/.switchboard/clients/<id>.key`, wrapped for your OS user (DPAPI on Windows,
-   mode 0600 elsewhere) and written by `switchboard client add <id>`. If your build has no `client add` yet,
-   issue a key with `switchboard apikey new <name>` and hand it over with `--key-file`.
-
-Nothing but JSON-RPC goes to stdout; diagnostics go to stderr. A wrong key or a gateway that is not running
-comes back to the client as a JSON-RPC error that says what to fix, never as a crash, and the bridge exits
-cleanly when the client closes stdin. Behaviour is pinned by `npm run verify:bridge`.
-
-### Storing a secret (BYO keys)
-
-Secrets never appear in your config — the config holds only `${vault:name}` **references**.
-
-```bash
-# pipe the value in so it stays out of your shell history
-printf '%s' 'ghp_xxx' | node dist/cli.js vault set github_pat
-node dist/cli.js vault list      # names only, never values
-```
-
-```yaml
-# switchboard.config.yaml
-servers:
-  - id: github
-    source: npx
-    package: "@modelcontextprotocol/server-github@2025.4.8"
-    enabled: true
-    policy: write
-    credentials:
-      GITHUB_TOKEN: ${vault:github_pat}   # resolved locally at mount time
-    tools:
-      delete_repo: { enabled: false }     # hard-block the destructive one
-```
-
-### How a tool gets its scope, the kill switch, and what an upstream can see
-
-**Scope from the name.** The tool name is split into words (`_ - . /` and camelCase). A tool is **read**
-only when its first word is a read verb (`get list read search fetch find query describe show view count
-head lookup browse inspect`) and no word is a write or exec verb (`run execute eval click upload send post
-publish create update set write apply deploy replace ...`, and the joiners `and` / `then`). Any destructive
-word (`delete remove drop purge wipe revoke terminate deactivate admin grant sudo`) makes it **full**;
-everything else is **write**. So `browser_run_code`, `fetch_and_execute` and `count_and_send_email` are
-writes, not reads. Upstream annotations can only tighten this: `destructiveHint: true` raises a tool to
-**full**, `readOnlyHint` never lowers one. A per-tool `policy:` in your config always wins.
-
-**Kill switch.** One command stops all governed traffic, with no restart:
-
-```bash
-node dist/cli.js kill on        # every tool call, resource read and prompt get is refused (SB_KILL_SWITCH)
-node dist/cli.js kill status
-node dist/cli.js kill off       # asks the RUNNING gateway, which checks you are present (Windows Hello)
-```
-
-It works by creating `~/.switchboard/KILL` (or `$SWITCHBOARD_HOME/KILL`), which the gateway checks on every
-call. `gateway.kill_switch: true` in the config does the same from startup. `/healthz` and `/api/health`
-report it as `kill_switch`. Listing tools, resources and prompts still works; calling them does not.
-The gateway **latches** the switch in memory the first time it sees it, so deleting the file does not turn it off: the
-gateway keeps refusing, writes a `kill.tamper` audit row and logs an error. Turning it **off** re-opens every tool, so it
-needs you at the machine: `kill off` and the dashboard toggle both make the gateway run its own owner-presence check, then
-it removes the file and drops the latch, so a process that can only run the CLI or delete files cannot undo your emergency
-stop. With no gateway reachable `kill off` exits 1 and leaves the switch on (starting a gateway is safe: it refuses every
-call while the file exists). `kill on` and `kill status` need no gateway; against a running one, `kill on` has the gateway
-latch it at once. A gateway restart starts without a latch (a file still on disk latches again at the first look).
-
-**Server ids and packages.** A server id is 1 to 64 characters of `a-z 0-9 - _`, starting with a letter or digit, with no
-`__` (it separates the id from the tool name), and unique in the file; the config will not load otherwise. An `npx`
-package is a name with an optional `@version` and nothing else: no leading `-`, no spaces, no URL, path or git spec. Pin
-an exact version (`"@scope/name@1.2.3"`). An unpinned name still mounts, but the startup log and `switchboard doctor`
-warn loudly, and the dashboard adds a catalog npm toolkit only with an exact version (`POST /api/toolkits/:slug/add`
-with `{"version":"1.2.3"}`; the dashboard asks for it).
-
-**Child environment.** A stdio server you launch (`npx` or `binary`) no longer inherits your shell's
-environment. It gets the MCP SDK's safe defaults, the variables a process needs to start on your OS
-(`PATH`, `SYSTEMROOT`, `TEMP`, ...), its own `env` and `credentials`, and any names you list in
-`env_passthrough`. A passthrough name that looks like a secret (`KEY`, `TOKEN`, `SECRET`, `PASSWORD`)
-must also be listed in `env_passthrough_secrets`, or the config is rejected. Prefer `credentials` with a
-`${vault:...}` reference for secrets.
-
-**Resources and prompts** go through the same gates as tool calls, at read scope: the kill switch, the
-active profile, the server's enabled flag, per-tool `enabled: false` (use the names `resources/read` and
-`prompts/get`), rate limits and the approval gate. A resource URI that no server listed (or declared in a resource template) is
-"not found"; it is no longer tried against every server.
-
-### Storage, and the tamper-evident audit log
-
-**Storage.** Every durable file (`vault.json`, `apikeys.json`, `oauth.json`, `authserver.json`,
-`triggers-state.json`, owner sessions, and your config when MCP Switchboard rewrites it) is written to a
-temp file, fsynced and renamed over the original, and the previous version is kept as `<file>.bak`. A file
-that exists but does not parse is an **error that names the file and its backup**, never an empty store:
-a torn `apikeys.json` can no longer silently drop a revocation or switch loopback authentication off. The
-API key store and the vault re-read their file when it changes, so `switchboard apikey rm <id>` revokes on
-a running gateway and `apikey new` works without a restart; `last_used` updates merge into the current file
-under a lock and are never written back from stale memory. `SWITCHBOARD_HOME` is created owner-only (0700)
-where the OS supports modes.
-
-**Vault key.** On Windows the key is stored as `vault.key.dpapi`, wrapped with DPAPI for your Windows user:
-another local account that can read the file cannot unwrap it. An existing raw `vault.key` is wrapped,
-verified by a round trip and only then deleted. Elsewhere the key is `vault.key` (mode 0600) in the 0700
-home. The unwrapped key is held in memory for the process lifetime.
-
-**Audit chain.** Every row in `audit.log` has `seq`, `prev_hash` and `hash` (SHA-256 over the row's
-canonical JSON, keys sorted, without `hash`), so an edited, removed, inserted or reordered row is detectable:
-
-```bash
-node dist/cli.js audit verify          # the current audit.log
-node dist/cli.js audit verify --all    # every rotated segment too; exit 1 and the first broken seq on a break
-```
-
-At 20 MB `audit.log` is renamed `audit.log.<timestamp>` and the chain continues in the new file. The chain
-has no secret, so it does not stop someone who can rewrite the whole file and recompute every later hash,
-and cutting rows off the end is not detectable: keep the latest `hash` somewhere the log writer cannot reach
-if that matters. A failed audit write is logged loudly and never fails the tool call that was already made.
-
-**`logs.capture_io`** is off by default (no request or response is stored). When on, every string value in
-the request and response is scanned for secret shapes (`sk-` / `sk-proj-` keys, `AIza` keys, `ghp_` `gho_`
-`github_pat_`, `xox[abpr]-`, `hf_`, Bearer tokens, JWTs, PEM blocks, AWS `AKIA` keys, and 32+ character hex
-or base64url tokens next to the words key / token / secret) at any depth and replaced with
-`[redacted:<kind>]`; values under secret-looking key names are masked as before. Upstream error text is
-scrubbed the same way even when capture is off.
-
-### Connecting a provider account
-
-How each provider is connected (authorize and token URLs, PKCE, client auth, scope separator, refresh rules,
-which hosts its credentials may reach, and what you must create in its console) is **data**:
-`src/connectors/providers/*.json`, validated against `src/connectors/schemas/provider.schema.json`. Register
-your own OAuth app once (secrets stay in the vault and are referenced, never copied), then connect:
-
-```bash
-# one-time: put the OAuth app's client id/secret in the vault, then register them by reference
-printf '%s' '<client-id>'     | node dist/cli.js vault set gh_client_id
-printf '%s' '<client-secret>' | node dist/cli.js vault set gh_client_secret
-node dist/cli.js authconfig add github --client-id-ref gh_client_id --client-secret-ref gh_client_secret
-
-node dist/cli.js providers show github        # what to create at the provider, redirect URIs, notes
-node dist/cli.js connect github               # prints an authorize URL, waits on the loopback callback
-node dist/cli.js connect github --auth pat --account ci --token-stdin   # or store a token you already hold
-node dist/cli.js accounts list                # several accounts per provider: status, identity, expiry
-node dist/cli.js accounts probe github/ci     # prove the credential is live
-```
-
-The old convention (vault names `oauth_<provider>_client_id` / `_client_secret`) still works with no
-registration step, and an existing `oauth.json` is imported once as `default` accounts. A connect that is
-cancelled, expires after 10 minutes, is refused, or fails its identity probe stores nothing. Tokens are
-sealed with the vault key; an `invalid_grant` marks the account `EXPIRED` and the error names the exact
-reconnect command.
-
-### Toolkits: call a connected account's API
-
-A **toolkit** is one provider API as agent tools (YouTube, Gmail, Drive, X, Slack, Notion ship as overlays). The
-vendor's public spec is fetched into your own `SWITCHBOARD_HOME` at sync time and never committed. Each toolkit lists
-at most 28 curated actions plus `manage_connections` and `proxy_request`; the rest of the API is reachable through
-`find_tools` and `call_tool`. Scope and risk come from the HTTP verb and the action's name, and an overlay can only
-tighten them.
-
-```bash
-node dist/cli.js toolkits sync google            # YouTube, Gmail and Drive specs (add --check to detect drift)
-node dist/cli.js toolkits enable gmail           # mounts it as a `source: connector` server
-node dist/cli.js link claude-code gmail --max-scope write --account google/me   # edits the clients config
-node dist/cli.js coverage                        # honest count: only account-verified rows are "working"
-```
-
-Uploads need `settings.connectors.upload_allowlist`; downloads are saved under `SWITCHBOARD_HOME/files/<run_id>/`.
-Details: `docs/architecture/CONNECTORS.md`.
-
-Or click **Connect** in the dashboard's catalog card. The browser bounces through the provider and
-back to `127.0.0.1`, the token is sealed, and the row flips to **connected** — no token ever leaves
-your machine.
-
-### Wrapping a REST API as MCP (app2mcp, Phase 4)
-
-Point a server at an OpenAPI/Swagger spec and MCP Switchboard generates the MCP tools in-process at mount:
-
-```yaml
-servers:
-  - id: petstore
-    source: app2mcp
-    openapi: https://petstore3.swagger.io/api/v3/openapi.json
-    base_url: https://petstore3.swagger.io/api/v3   # override for relative/host-less specs
-    policy: read                                     # ceiling: GET tools allowed, DELETE denied
-    credentials:
-      Authorization: ${vault:petstore_token}         # resolved per call from the vault
-```
-
-Each operation becomes a governed tool. Scope is inferred from the HTTP verb
-(`GET`→read, `POST/PUT/PATCH`→write, `DELETE`→full), so a generated `deletepet` is **denied** under the
-`read` ceiling above — same policy engine as every other server.
-
-### Outbound network guard (SSRF)
-
-Every request the gateway makes on behalf of your config or your tools (http-tool and app2mcp calls,
-OpenAPI spec fetches, decision webhooks, OAuth token and refresh calls, the council, catalog syncs) goes
-through one guard, `src/netguard.ts`. A URL in a config, inside an OpenAPI document, or in a redirect
-`Location` header is untrusted input; without a guard it can point the gateway at your loopback
-services, your LAN or a cloud metadata endpoint, with your credentials attached.
-
-- **DNS first, then connect to what was checked.** Loopback, private (RFC1918), CGNAT (100.64/10),
-  link-local (169.254/16, fe80::/10), unique-local (fc00::/7), unspecified, multicast, reserved and cloud
-  metadata addresses are refused, including their IPv4-mapped, NAT64 and 6to4 spellings and decimal, hex
-  or octal IPv4 spellings. One bad DNS answer refuses the host. The connection is pinned to the validated
-  address, so a second DNS answer cannot redirect it afterwards.
-- **Redirects are followed manually, at most 3, and every hop is re-checked.** `Authorization`, `Cookie`,
-  API-key style headers and any injected credential header are dropped when the origin changes. A 307/308
-  that would re-send a request body to another origin, and an https to http downgrade, are refused.
-- **Bounded.** One deadline per request (default 15 s) and a response cap enforced while streaming on the
-  decoded bytes (default 5 MiB). OpenAPI specs and catalog documents are bulk public files and get a 64 MiB
-  cap and 60 s instead.
-- **A spec cannot choose where your credentials go.** When a server has `credentials`, `auth_scheme`,
-  `auth` or `inject_args`, an app2mcp server must set `base_url` explicitly and the spec's own `servers`
-  host must match it. Spec paths that do not start with `/` are skipped.
-
-To reach a local or LAN service on purpose, list its **exact** host. Exact means the host as written in the
-URL: `127.0.0.1` does not allow `localhost`, and the reverse. There are no wildcards, CIDR ranges or ports.
-
-```yaml
-settings:
-  network:
-    allow_private: [127.0.0.1]      # Ollama, LM Studio, a LAN API: exact hosts only
-    timeout_ms: 15000               # optional; per request, DNS through the last body byte
-    max_response_bytes: 5242880     # optional; 5 MiB
-```
-
-The council `local` provider needs its host listed (`switchboard local-llm wire` adds it for you). The
-`local-llm` probes and the CLI's own `/healthz` check are explicit local probes: loopback passes without an
-entry, nothing else does. Remote MCP upstreams (`source: remote`) go through the same guard: the SDK's HTTP
-client is given a streaming guarded fetch (the deadline covers connect and response headers, then an event
-stream flows without a cap), so a remote upstream on a loopback, LAN or metadata address is refused unless its
-exact host is in `allow_private`, and every redirect hop is re-checked. Pinned by `npm run verify:netguard` and
-`npm run verify:hardening-2`.
-
-### Cross-provider council (Phase 5)
-
-MCP Switchboard already brokers tool calls; the **council** lets one agent broker a *peer model*. Turn it
-on and MCP Switchboard exposes two governed tools — `council_consult` (relay a prompt to the other provider
-and return its reply) and `council_debate` (a bounded multi-round exchange between providers plus a
-synthesized conclusion). The headline use case: a **Claude client asking OpenAI for a second opinion**,
-or vice-versa — the chat-window model orchestrates, MCP Switchboard relays + governs + logs.
-
-```bash
-# keys live in the vault, never in config (BYO keys, zero custody)
-printf '%s' 'sk-ant-...' | node dist/cli.js vault set anthropic_api_key
-printf '%s' 'sk-...'     | node dist/cli.js vault set openai_api_key
-```
-
-```yaml
-# switchboard.config.yaml  (off by default — outbound + metered)
-settings:
-  council:
-    enabled: true
-    max_rounds: 3          # loop guard for council_debate
-    token_budget: 2048     # max_tokens cap per provider call (cost guard)
-    require_approval: false # true → every council call needs a human confirm
-    providers:
-      anthropic: { api_key_ref: ${vault:anthropic_api_key}, default_model: claude-opus-4-8 }
-      openai:    { api_key_ref: ${vault:openai_api_key},    default_model: gpt-4o }
-```
-
-The council mounts as a synthetic in-process MCP server, so its tools flow through the **same**
-policy → approval → audit path as any upstream tool (both are `write`-scoped). Model ids are
-config/param-driven, so nothing breaks when a provider renames a model. A local Claude Desktop or
-Claude Code client can use the council with zero tunnel; reaching **claude.ai *web*** additionally
-needs the OAuth layer below.
-
-### Run it fully offline with a local LLM (auto-detected)
-
-The council's third provider is **`local`** — any OpenAI-compatible server: Ollama, LM Studio,
-llama.cpp's `llama-server`, or vLLM. No cloud, no key, nothing leaves the box. You don't have to know
-the URL or the model id — MCP Switchboard probes for you:
-
-```bash
-node dist/cli.js local-llm          # scan the usual ports; print what's running + a ready-to-paste block
-node dist/cli.js local-llm wire     # write the detected server into settings.council.providers.local
-node dist/cli.js local-llm wire --base-url http://127.0.0.1:11434/v1 --model llama3.1   # or pin it
-```
-
-`local-llm` **only reads** — it auto-detects a server you started yourself and never downloads or runs
-a model for you (that's your call, by design). `wire --print` previews the block without touching your
-config. The resulting provider needs no `api_key_ref` at all (the zero-key path), so an offline
-council is genuinely keyless:
-
-```yaml
-settings:
-  network:
-    allow_private: [127.0.0.1]   # the outbound guard refuses local hosts unless listed; `wire` adds this
-  council:
-    enabled: true
-    providers:
-      local: { base_url: "http://127.0.0.1:11434/v1", default_model: "llama3.1" }   # no api_key_ref
-```
-
-The detection, the keyless wiring, and the "never auto-download" contract are pinned by a deterministic
-oracle: `npm run verify:local-llm` — 107/107.
-
-### Streaming decisions to a webhook (real-time governance feed)
-
-Every policy verdict can be POSTed to a URL of your choosing the instant it happens — wire your agents'
-governance feed into Slack, a SIEM, a dashboard, or your own automation. The same append-only verdicts
-that hit the audit log are delivered as slim JSON events.
-
-```yaml
-# switchboard.config.yaml  (off by default)
-settings:
-  webhook:
-    enabled: true
-    url: "https://example.com/hooks/switchboard"
-    events: [deny, approval_required]   # any of: allow | deny | approval_required (empty = all)
-    secret_ref: ${vault:webhook_secret}  # set via `switchboard vault set webhook_secret`
-```
-
-The payload is **decision metadata only** — `{ type, ts, decision, server, tool, scope, reason?,
-duration_ms? }` — *never* the call's arguments or the upstream response, so a webhook can't quietly
-become an exfiltration channel even with `logs.capture_io` on. When `secret_ref` resolves, each
-delivery carries an `x-switchboard-signature: sha256=<hmac>` header (HMAC-SHA256 over the raw body)
-so the receiver can authenticate it; verify with `crypto.createHmac("sha256", secret).update(body)`.
-Delivery is **fire-and-forget and fail-open**: a slow, down, or misconfigured webhook never blocks,
-delays, or alters a governance decision (8s timeout, detached). It fails *closed* on only one thing —
-a promised-but-unresolvable signing secret drops the delivery rather than send an unsigned event a
-receiver would reject. The whole contract (off-by-default, per-decision `events` filtering, valid
-signature, metadata-only even under `capture_io`, drop-on-unresolvable-secret, non-blocking) is
-verified by a deterministic oracle: `npm run verify:webhook` — 33/33.
-
-### Poll-first triggers (turn any read tool into an event source)
-
-Hosted tool routers sell "triggers" as inbound webhooks you have to expose to the cloud. MCP Switchboard
-does it the local-first way: it **polls** a read-scoped tool you already mounted on a schedule, diffs
-each result against the last poll, and fires an event the moment something new shows up — no inbound
-listener, no public URL, no third-party relay.
-
-```yaml
-# switchboard.config.yaml  (off by default)
-settings:
-  webhook:                                   # fires are delivered through your webhook…
-    enabled: true
-    url: "https://example.com/hooks/switchboard"
-    secret_ref: ${vault:webhook_secret}      # …and signed with this same secret
-  triggers:
-    enabled: true
-    poll_interval_seconds: 60                # default cadence (1..86400)
-    definitions:
-      - id: new-github-issues
-        name: New GitHub issues
-        tool: github__list_issues            # namespaced, READ-scoped upstream tool to poll
-        args: { state: open }                # passed to the tool on each poll (optional)
-        interval_seconds: 300                # per-trigger override (optional)
-        item_path: ""                        # dot path to the array in the result; blank = whole result
-        item_key: id                         # field uniquely identifying a row; new keys fire
-        enabled: true
-```
-
-The design keeps the same governance/honesty contract as everything else:
-
-- **The poll is a real governed call.** It runs through policy → approval → audit exactly like an
-  agent call, so a trigger whose `tool` isn't read-scoped is **denied by the read ceiling**, and every
-  poll lands in the Logs page. You cannot use triggers to smuggle a write past the policy engine.
-- **The fire is an observation, not a decision.** A detected new item is delivered as a distinct
-  `type: switchboard.trigger` webhook event — it is *never* written as an audit verdict, so the audit
-  log stays a faithful record of governed calls only. Fires carry
-  `{ type, ts, trigger_id, trigger_name?, tool, detection, new_count, sample_keys? }`, signed with the
-  **same** `x-switchboard-signature: sha256=<hmac>` header as decision webhooks, and they ignore the
-  webhook `events` filter (they always deliver when the webhook is on).
-- **New-item detection** uses `item_path` (dot path to the array, e.g. `items` or `data.records`) +
-  `item_key` (the unique field). Keys unseen since the last poll are "new"; baselines persist in
-  `~/.switchboard/triggers-state.json` so a restart doesn't replay history. Omit both to fire whenever
-  the raw result text changes.
-- **Off by default, fail-open delivery.** Nothing polls until `triggers.enabled: true`, and fires
-  inherit the webhook's non-blocking, drop-on-unresolvable-secret delivery. Drive a single poll on
-  demand from the **Triggers** dashboard page or `POST /api/triggers/:id/poll`.
-
-The whole contract — poll is audited, fire is not, fire bypasses the `events` filter, read ceiling
-denies a non-read trigger, baseline survives restart — is verified by a deterministic oracle:
-`npm run verify:triggers` — 60/60. (`npm run verify` runs the build, low-severity npm audit, and **all 26 oracles, 1171 checks**.)
-
-### Profiles — one switch between a locked-down view and the full surface
-
-A single config can expose very different tool surfaces depending on *who's* driving. A **profile** is a
-named view that can **hide** servers/tools and **lower** scope — never reveal a disabled tool or raise a
-ceiling (it can only ever be *more* restrictive than your base config, which is the safe direction).
-
-```yaml
-settings:
-  active_profile: demo            # must name a profile defined below
-  profiles:
-    demo:
-      description: "Safe surface for a screen-share — read-only, no Slack"
-      servers: [github, notion]   # only these mount; everything else is hidden
-      exclude_tools: [github__delete_repo]
-      policy: read                # cap the whole profile at read, whatever the servers allow
-    dev:
-      description: "Everything, full power"
-```
-
-```bash
-node dist/cli.js profile list          # show defined profiles + which is active
-node dist/cli.js profile show demo     # what it exposes vs hides, plus the raw definition
-node dist/cli.js profile use demo      # activate (writes settings.active_profile)
-node dist/cli.js profile clear         # expose every enabled tool again
-```
-
-The "a profile can only narrow, never widen" invariant — hidden stays hidden, scope only drops — is
-pinned by a deterministic oracle: `npm run verify:profiles` — 61/61. *(Beyond hosted routers — a metered
-cloud has no equivalent.)*
-
-### Rate limits + spend budgets — fail-closed ceilings on calls *and* cost
-
-Cap how often — and how *expensively* — your agents act. A `limits` block sets count ceilings
-(`per_minute`/`per_hour`/`per_day`) and/or **cost** budgets (`cost_per_minute`/`cost_per_hour`/
-`cost_per_day`), at the **global**, **server**, or **tool** level. They **fail closed**: hit the ceiling
-and the call is denied — logged, never silently dropped — and a typo'd field name is rejected at load
-rather than quietly disabling the limit it was meant to set.
-
-```yaml
-settings:
-  limits:                       # global: applies to every tool call
-    per_minute: 60
-    cost_per_day: 5.00          # stop the day at $5 of metered spend
-servers:
-  - id: openai-tools
-    source: npx
-    package: "@example/openai-mcp@1.0.0"
-    limits: { per_hour: 200 }   # server-level ceiling
-    tools:
-      expensive_call:
-        cost: 0.02              # declared per-call cost, counted toward cost_per_* budgets
-        limits: { per_minute: 5 }   # tool-level ceiling, the tightest wins
-```
-
-Every level stacks (global ∧ server ∧ tool), each requiring at least one ceiling. Enforcement is pinned
-by a deterministic oracle: `npm run verify:limits` — 61/61. *(Beyond hosted routers — they bill the
-overage; MCP Switchboard stops it.)*
-
-### Circuit breaker — a flapping upstream fails fast instead of hanging
-
-When an upstream MCP server starts throwing or timing out, you don't want every agent call to sit on a
-30-second wall-clock timeout. Turn on **resilience** and MCP Switchboard trips a per-server circuit after N
-consecutive **transport** failures (a thrown error or a timeout — *not* a well-formed tool error, which
-is a valid answer). While open, calls fast-fail with `SB_UPSTREAM_UNAVAILABLE`; after a cooldown it
-auto-probes and closes on the first success.
-
-```yaml
-settings:
-  call_timeout_ms: 30000        # hard wall-clock cap on every upstream call
-  resilience:
-    enabled: true
-    failure_threshold: 5        # consecutive transport failures before the circuit opens
-    cooldown_seconds: 30        # how long to fast-fail before probing again
-servers:
-  - id: flaky-remote
-    source: remote
-    url: https://example.com/mcp
-    resilience: { failure_threshold: 2 }   # per-server override — trip this one sooner
-```
-
-Off by default; opt in globally and override per server. The open/half-open/closed transitions, the
-"tool error doesn't trip the breaker" distinction, and the cooldown probe are pinned by a deterministic
-oracle: `npm run verify:breaker` — 47/47. *(Beyond hosted routers — your gateway, your failure policy.)*
-
-### Browse & connect from the catalog (your local "Connectors" page)
-
-The dashboard ships a **toolkit grid** — a browsable catalog of thousands of MCP servers and HTTP
-toolkits, built from the open **[MCP Registry](https://github.com/modelcontextprotocol/registry)** and
-**[APIs.guru](https://apis.guru)** (both CC0). It's the local-first answer to a vendor's curated
-"Connectors" page: search it, see what's available, and wire one in — no account, no allowlist.
-
-```bash
-node dist/cli.js toolkits sync     # rebuild data/catalog.json from the public indexes
-node dist/cli.js toolkits stats    # counts from the on-disk snapshot
-```
-
-The snapshot is plain JSON on disk, so the grid renders instantly and works offline once synced.
-
-### Connecting cloud clients — claude.ai web & ChatGPT (OAuth 2.1 + PKCE, Phase 5b)
-
-**Local** clients — Claude Desktop, Claude Code, Cursor, your own agents — reach the *local* `/mcp`
-endpoint with a plain API key (`switchboard apikey new <name>`), no OAuth. **Cloud** clients —
-**claude.ai web** and **ChatGPT's custom connectors** (Developer Mode, on Pro/Team/Enterprise/Edu) —
-run on a vendor's servers: they *can't* reach your laptop's localhost, they refuse a static bearer,
-and they speak OAuth 2.1 with mandatory PKCE + Dynamic Client Registration. Turn on the built-in
-Authorization Server for those — one switch covers both providers, because they connect to the **same**
-governed endpoint the same way.
-
-```bash
-# 1) expose the local gateway over an HTTPS tunnel and copy the public URL
-node dist/cli.js expose            # prints e.g. https://abc123.trycloudflare.com
-```
-
-```yaml
-# 2) switchboard.config.yaml — paste the tunnel URL as the issuer/audience
-settings:
-  oauth_server:
-    enabled: true
-    public_url: "https://abc123.trycloudflare.com"   # REQUIRED when enabled; the loopback URL can't be the issuer
-    access_token_ttl: 3600        # 1h
-    refresh_token_ttl: 1209600    # 14d (0 disables refresh)
-    consent: true                 # show the human approval screen on every authorization
-```
-
-Then add `https://abc123.trycloudflare.com/mcp` as a custom connector:
-
-- **claude.ai web** — Settings ▸ Connectors ▸ **Add custom connector**, paste the URL, authorize.
-- **ChatGPT** — enable **Developer Mode** (Settings ▸ Connectors ▸ Advanced, on Pro/Team/Enterprise/Edu),
-  then Connectors ▸ **Create**, paste the URL, set Authentication: **OAuth**, and complete the flow.
-
-Both land on the same `authorize → consent → token` exchange against the same governed endpoint. The SDK router
-publishes RFC 8414 AS metadata + RFC 9728 protected-resource metadata under `/.well-known/*`, accepts
-RFC 7591 dynamic client registration at `/register`, and runs the mandatory-PKCE `authorize → consent
-→ token` flow. Tokens are **opaque** (looked up server-side, never JWTs), persisted *sealed* with your
-vault key and additionally stored one-way hashed; the token audience is bound to `<public_url>/mcp`
-(RFC 8707). `/mcp` then accepts **either** a local API key **or** a valid OAuth bearer, and enabling
-the server **forces `/mcp` authentication on** (fail-closed — a public issuer means the endpoint is
-exposed). The full chain (metadata → DCR → PKCE → consent → token → authed `/mcp` → refresh → revoke)
-is verified end-to-end by a deterministic oracle: `npm run verify:oauth` (20/20).
-
-## Clients and principals
-
-Every caller of `/mcp` is a **principal**. Register the callers you trust as **clients**; each gets its own key,
-its own view of the tools and its own ceiling, so Claude Code, Codex, a local model and an agent platform are no
-longer one anonymous actor.
-
-```yaml
-# switchboard.config.yaml
-clients:
-  claude-code:
-    description: Claude Code CLI
-    servers: ["*"]              # server id globs this client may see and call (omitted or empty: none)
-    tools: []                   # optional allowlist of exposed tool names (globs); empty = all on those servers
-    exclude_tools: ["*__delete_*"]
-    max_scope: write            # ceiling: only LOWERS what the server and the active profile allow
-    max_risk: high              # stored now, enforced when risk lands
-    limits: { per_minute: 60 }  # same shape as a server's limits
-  local-model:
-    servers: [voice, youtube]
-    max_scope: read
-  assistant-a:
-    servers: [gmail]
-    accounts: { google: ca_work }   # local connectors: the account this client runs as ("*": it may choose one)
-```
-
-- **One command per client.** `switchboard client add codex --servers voice,youtube --max-scope read` writes the
-  entry (comments in your YAML survive) and issues a key bound to it, stored for the current OS user in
-  `~/.switchboard/clients/codex.key`. The token is printed only with `--print`. Then wire the client with
-  `switchboard bridge --client codex`. A client created without flags sees every server, read only, low risk.
-- **Fail closed.** The moment one client exists, `/mcp` needs a key bound to a configured client on every request, on
-  loopback too (even with `require_auth: never`). No credential is 401; a valid key that names no configured client is
-  403. With no client configured nothing changes: the loopback single-user mode of 0.1.0.
-- **One access table, also for connectors.** Which client may use a connector toolkit, how far, and as which account is
-  this same `clients:` section: `servers` names the toolkit's server, `max_scope` and `max_risk` cap it, and the optional
-  `accounts: { <provider>: <account> }` binds the account. There is no second table; `switchboard link` edits this one
-  (see Local connectors). A call's `account` argument may name only the account the client is bound to (or any when it is
-  bound to `"*"`), never beats a server's `account` pin, and a refusal is `SB_POLICY_DENY` naming the client.
-- **Hidden is uncallable.** Listings and calls are both filtered. A tool outside the client's servers or tools, or in
-  `exclude_tools`, is refused with `SB_POLICY_DENY` naming the client; `max_scope` caps calls the same way. Resources
-  and prompts follow the client's `servers`. `find_tools`, `call_tool` and `batch_call` apply the same filter.
-- **Audit.** Every row carries `principal` (`apikey:<key id>`, `oauth:<oauth client id>`, `stdio:<client>`,
-  `loopback-anonymous:loopback`) and `client`.
-- **OAuth.** A token maps to a client only when the OAuth client registered with a `client_name` equal to a configured
-  client id; the owner's consent is what makes that name trustworthy. Any other token is 403 while clients exist.
-- **stdio.** `switchboard serve --client <id>` runs the stdio transport as that client (`via: stdio`). The launching
-  process names the client, and the client's key must be valid (the stored key file must hold a token the key store
-  accepts), so `client rm` revokes stdio too. Use `bridge` against a running gateway for the shared-gateway path. With
-  clients configured, stdio without `--client` is not served.
-- **Changes while a gateway runs.** `client add`, `client rotate` and the client registration of `install` ask the running
-  gateway, which shows you the exact grant in its own presence prompt (Windows Hello) and then applies it in memory and
-  in the file, live at once. `client rm` (a revocation) needs no prompt. With no gateway running the command writes the
-  config and key store directly and the audit row says `local:cli`, not `owner:cli`: nothing proved you. A running
-  gateway **does not apply edits made to the config file behind its back** (a process running as you can edit the file
-  and the key store, so a file-applied client would be a client nobody approved): it reports the difference once (a
-  warning and a `client.drift_ignored` audit row), `client list` says so, and a restart loads the file as it is.
-  Servers, settings and the gateway block need a restart as before.
-- **Same-user agents are not isolated from each other.** Clients are distinct identities with ceilings, and a client
-  cannot raise its own ceiling or mint another client (that needs you present). But a client's key file is protected for
-  your OS user, which separates nothing between two processes running as you: an agent that is `lowmodel` can run
-  `switchboard bridge --client boss` and act as `boss`. For a real boundary between agents run each under its own OS account
-  or sandbox (or hand each a secret only its own process can read); until then treat all agents that share your account as
-  one trust domain with separate ceilings, not as isolated principals.
-- **Admin API** (owner session header + CSRF, never a client key, never returns a token): `GET /api/clients`,
-  `POST /api/clients`, `PUT /api/clients/:id`, `POST /api/clients/:id/rotate`, `DELETE /api/clients/:id`.
-
-`switchboard client list` shows clients and keys without secrets, `client rotate <id>` replaces the key (the old one
-stops working at once, on a running gateway too), `client rm <id>` revokes its keys and deletes the key file
-(`--purge` also removes the config entry). `npm run verify:principals` proves all of the above end to end.
-
-## Local connectors (no subscription)
-
-A hosted tool router signs you in to Gmail, YouTube, Slack and the rest once, keeps the tokens in its cloud and
-charges a subscription. Switchboard does the same job locally: you connect each provider **once** with an OAuth app
-or key that you own, the tokens are sealed in your local vault, and every agent you link reaches them through the one
-governed endpoint. No subscription, no third party in the path, and nothing leaves your machine except the calls to
-the provider itself.
-
-1. **Register your app** at the provider (a shared app is impossible for an open-source program):
-   [docs/connectors/OWNER_SETUP.md](docs/connectors/OWNER_SETUP.md) has the steps and the limits, per platform.
-2. **Connect**: `switchboard connect <provider>`, or press **Connect** on the dashboard's **Connectors** page. An
-   account is stored only after the provider's identity probe passes.
-3. **Toolkits**: `switchboard toolkits sync <provider>` then `switchboard toolkits enable <toolkit>` (or the toggle on
-   the Connectors page) mounts the provider's API as agent tools. Generated definitions live on your machine and are
-   never committed.
-4. **Link clients**: `switchboard link <client> <toolkit> --max-scope write --account <account>` decides which agent may
-   use what, and as which account. It edits the `clients:` section (the one access table; `unlink` and `links` are its
-   counterparts), so the gateway asks you to be present first, exactly as for `client add`. Calls that publish, send or
-   delete need your approval, and the approval is bound to the account and to the exact request (method, host, path,
-   body), so an approval for one account cannot run as another.
-
-**Curated and seeded providers.** The 13 curated definitions (Google, Meta, LinkedIn, TikTok, X, Slack, Notion, GitHub,
-ElevenLabs, Linear, Higgsfield, Buffer) are written and checked by hand. Beside them ship 594 **seeds**: candidate
-definitions of long-tail providers, derived from the authentication settings of the MIT-licensed
-[Activepieces](https://github.com/activepieces/activepieces) community pieces (facts only, never piece code; see
-`NOTICE`). A seed enables Connect and nothing more: it is marked `unverified_seed`, has no toolkits and no identity
-probe, and it is **never counted as working**. A curated definition always wins over a seed of the same name, and
-writing your own `<SWITCHBOARD_HOME>/providers/<slug>.json` replaces one.
-
-**Honest counts.** Only a row proven live by an owner-run probe is called working (`switchboard coverage`). A registered
-provider, a mapped action or a seed is not a working one.
-
-```bash
-switchboard providers list --seeds        # curated and seeded providers, with their authentication modes
-switchboard providers show <provider>     # what to create at the provider, redirect URIs, assumptions for a seed
-switchboard dashboard login               # then open #/connectors: search, filter, Connect, accounts, toolkit on/off
-node scripts/verify-connectors-seed.mjs   # the oracle: seeds validate, curated wins, a seed never reports working
-```
-
-Architecture and security rules: [docs/architecture/LOCAL_TOOLKITS.md](docs/architecture/LOCAL_TOOLKITS.md).
-File-by-file notes: [docs/architecture/CONNECTORS.md](docs/architecture/CONNECTORS.md).
-
-## CLI
-
-| Command | What it does |
-|---|---|
-| `switchboard init` | Scaffold `switchboard.config.yaml` + the `~/.switchboard` home |
-| `switchboard serve` | Run the gateway (stdio and/or HTTP, per config); `--client <id>` runs the stdio transport as a registered client |
-| `switchboard dashboard` | Run only the HTTP endpoint + web console |
-| `switchboard dashboard login` | Ask the running gateway to check you are present and mint a one-time login code, then open the dashboard signed in; `--no-open` only prints the URL |
-| `switchboard install <client>` | Register MCP Switchboard in a client (`claude-code`, `claude-desktop`, `codex`, `gemini`, `antigravity`, `dsh`, `cursor`, `vscode`): preview, back up, write, probe, roll back on failure. `--mode bridge\|http` / `--scope user\|project` / `--yes` / `--dry-run` / `--dsh-profile` / `--dir` / `--name` |
-| `switchboard uninstall <client>` | Remove only the Switchboard entry from a client (backup first); the registered client and its key stay |
-| `switchboard client add <id>\|list\|rotate <id>\|rm <id>` | Register clients (who may call `/mcp`, with which servers, tools and ceiling) and manage their keys: `add` takes `--servers`, `--max-scope`, `--max-risk`, `--print`; `rm` takes `--purge` |
-| `switchboard bridge --client <id>` | Relay a client's stdio to the shared HTTP gateway as that client (`--url`, `--key-file`) |
-| `switchboard expose` | Open an HTTPS tunnel to the local endpoint (for claude.ai web / ChatGPT / remote clients) |
-| `switchboard list` | Mount everything and print the governed tool list, then exit |
-| `switchboard doctor` | Check Node, config, transports, and that every secret resolves |
-| `switchboard catalog` | List the OAuth providers and their connection status |
-| `switchboard connect <provider>` | Connect an account: browser OAuth on the loopback callback, or a token / key you hold (`--account`, `--auth-config`, `--auth`, `--scopes`, `--token-ref`, `--token-stdin`, `--import`) |
-| `switchboard accounts list\|show\|default\|disable\|enable\|revoke\|probe` | Inspect and manage connected accounts (several per provider; revoke calls the provider when it supports that) |
-| `switchboard authconfig add\|list\|show\|rm` | Register the OAuth apps your connects use (client id and secret as vault references) |
-| `switchboard providers list\|show <slug>` | The provider definitions and what you must set up at each provider |
-| `switchboard toolkits sync\|stats` | Rebuild / inspect the browsable integration catalog (MCP Registry + APIs.guru) |
-| `switchboard toolkits list\|show\|enable\|disable\|sync <toolkit>` | Local connector toolkits: list what is defined, show a toolkit's actions, mount or unmount it, rebuild its definition from the provider's spec |
-| `switchboard link <client> <toolkit-or-server-id>` / `unlink <client> [toolkit]` / `links` | Give a client access to a connector toolkit (`--account`, `--max-scope`, `--max-risk`), take it away, or list who has what. They edit the `clients:` section through the same code as `client add` |
-| `switchboard coverage [toolkit]` | Honest counts: only account-verified rows are "working" |
-| `switchboard local-llm [wire]` | Auto-detect an offline OpenAI-compatible LLM; `wire` writes it into the council |
-| `switchboard profile list\|show <name>\|use <name>\|clear` | Manage named, switchable views over your servers/tools |
-| `switchboard apikey new <name>\|list\|rm <id>` | Manage `/mcp` bearer API keys for local & cloud clients; `new --client <id>` binds a key to a registered client |
-| `switchboard vault set\|list\|rm <name>` | Manage locally-stored secrets |
-
-Global flag: `-c, --config <path>` (default `switchboard.config.yaml`).
-Once built and linked (`npm link`), the `switchboard` command replaces `node dist/cli.js`.
-
-## How it works
-
-```
-   agent clients ──MCP──▶  GATEWAY  ──▶  ROUTER ──▶ POLICY ENGINE ──▶ REGISTRY ──▶ upstream
-   (stdio + HTTP)          one server     namespaced/    read<write<     mounted     MCP servers
-                                          flat/search    full + gates    clients     (npx / remote)
-                                              │              │              ▲
-                                          DASHBOARD       AUDIT LOG       VAULT
-                                          (toggle/scope)  (append-only)   (AES-256-GCM, local)
-```
-
-Every call is classified (`read`/`write`/`full`), checked against the server's scope ceiling and
-any per-tool override, optionally held for human approval, then forwarded — and **every verdict is
-written to an append-only audit log**. Full walkthrough in **[docs/BLUEPRINT.md](docs/BLUEPRINT.md)**.
-
-### Approvals and risk
-
-Scope (`read < write < full`) is the ceiling. A second axis, **risk** (`low`, `medium`, `high`), decides who has to say yes:
-read is low, write is medium, full is high, and `outward: true` on a server (it posts, sends, spends) makes its writes high.
-By default every **high** call needs the owner's approval, on top of any server `approval.require_for` scopes.
-
-A gated call does not wait at a prompt. It returns `SB_APPROVAL_PENDING` with an approval id and tells the caller to ask you:
-
-```bash
-switchboard approvals list                # what is waiting
-switchboard approvals approve ap_7KQ2M9XD # Windows Hello pops up on the machine that runs the gateway
-switchboard approvals deny ap_7KQ2M9XD
-```
-
-or use the dashboard's **Approvals** page. The approval is bound to the exact arguments, works once, and expires (15 minutes by
-default); the client then repeats the identical call. The gateway itself verifies you are present before it signs anything, so
-an agent that can run the CLI or edit `~/.switchboard/approvals.json` still cannot approve its own call. Tune it under
-`gateway.approval` (`require_for_risk`, `ttl_seconds`, `wait_seconds`), per tool with `risk`, per server with `risk_defaults`
-and `outward`, and per client with `max_risk`. See [the design](docs/architecture/MCP_SWITCHBOARD_VNEXT.md) (3.3 and 3.4).
-
-### Tool-exposure modes
-
-Mount 30 servers and naive aggregation dumps ~600 tool schemas into your agent's context — accuracy
-collapses, tokens explode. MCP Switchboard offers three modes via `gateway.tool_exposure`:
-
-- **`namespaced`** (default) — tools prefixed `github__create_issue`; only enabled servers exposed.
-- **`flat`** — bare tool names (small setups; first server to claim a name wins).
-- **`search`** — expose just two meta-tools, **`find_tools(query)`** and **`call_tool(name,args)`**.
-  The agent searches; MCP Switchboard returns only the relevant handful. The surface stays flat no
-  matter how many servers you mount.
-
-## Project status
-
-**Working alpha — every phase shipped, plus a tier of governance hosted routers don't offer.** Real
-and verified today: the aggregating gateway (stdio + Streamable HTTP), the policy engine, all three
-tool-exposure modes, the encrypted vault, the approval gate, the audit log, the dashboard, the CLI, and
-one-command `install` into five clients. The full `find_tools → call_tool` round-trip works end-to-end
-through the governed path.
-
-- **Managed OAuth (Phase 3), now the connector core**: provider auth definitions are validated data
-  (13 bundled: Google, GitHub, Slack, Notion, Linear, Meta Facebook and Instagram, LinkedIn, TikTok, X,
-  ElevenLabs, Higgsfield, Buffer); connected accounts (several per provider) are sealed with the vault key,
-  refreshed single-flight and shown by `switchboard accounts`; connect through the catalog UI or
-  `switchboard connect <provider>`. Hand-rolled on Node `crypto`, with no third-party auth service and zero native deps.
-- **app2mcp (Phase 4)** — point `source: app2mcp` at an OpenAPI/Swagger spec and MCP Switchboard generates
-  an in-process MCP server at mount, with verb→scope inference flowing into the **same** governance
-  engine (a generated `deletepet` is denied under a `read` ceiling). A reference without a resolvable
-  spec still fails closed.
-- **Council relay (Phase 5a)** — `settings.council` exposes `council_consult` + `council_debate` as a
-  synthetic in-process server, letting one model consult/debate the other provider through the same
-  policy → approval → audit path. Off by default; outbound + metered; keys resolved from the vault at
-  call time.
-- **claude.ai-web OAuth (Phase 5b)** — `settings.oauth_server` turns the `/mcp` endpoint into an OAuth
-  2.1 + PKCE Authorization Server (RFC 8414/9728/7591/8707 + RFC 7009 revocation) so claude.ai web can
-  connect over an HTTPS tunnel. Opaque tokens, sealed + one-way-hashed in the vault; consent-gated;
-  `/mcp` accepts an API key **or** an OAuth bearer; enabling it forces auth on (fail-closed). Off by
-  default. Verified end-to-end (metadata → DCR → PKCE → consent → token → refresh → revoke) by
-  `npm run verify:oauth` — 20/20.
-- **Decision webhooks** — `settings.webhook` streams each policy verdict (`allow`/`deny`/
-  `approval_required`) to a URL as it happens, signed with an `x-switchboard-signature` HMAC. Payload
-  is decision metadata only (never call I/O), fire-and-forget + fail-open, off by default. Verified by
-  `npm run verify:webhook` — 33/33.
-- **Poll-first triggers** — `settings.triggers` polls a read-scoped tool on a schedule, diffs the
-  result by `item_key`, and fires a `switchboard.trigger` webhook on new items. The poll is a real
-  governed/audited call (read ceiling denies a non-read trigger); the fire is an observation, never an
-  audit verdict. Baselines persist across restarts; off by default. Verified by
-  `npm run verify:triggers` — 60/60.
-
-**Beyond hosted parity — the net-new tier:**
-
-- **One-command install**: `switchboard install <client>` registers MCP Switchboard (as a bridge entry by
-  default) in Claude Code, Claude Desktop, Codex, Gemini CLI, Antigravity, dsh, Cursor or VS Code, with a
-  preview, a timestamped backup, a probe and a rollback; `uninstall` removes only its own entry.
-  Verified by `npm run verify:install` (58/58, the file merge helpers) and `npm run verify:installers` (411/411).
-- **Offline local-LLM auto-detect** — `switchboard local-llm` probes for a running Ollama/LM Studio/
-  llama.cpp/vLLM server and `local-llm wire` writes the keyless council provider; never auto-downloads.
-  It also **guards against wiring a non-chat model** (an embedding/rerank/speech model) as the council
-  voice. Verified by `npm run verify:local-llm` — 107/107.
-- **Profiles** — `settings.profiles` + `active_profile` expose a narrow-only named view (hide servers/
-  tools, lower scope, never widen). Verified by `npm run verify:profiles` — 61/61.
-- **Rate limits + spend budgets** — `limits` blocks set fail-closed call **and cost** ceilings at the
-  global/server/tool level. Verified by `npm run verify:limits` — 61/61.
-- **Per-server circuit breaker** — `settings.resilience` trips a flapping upstream after N transport
-  failures and auto-probes after a cooldown; off by default. Verified by `npm run verify:breaker` — 47/47.
-- **Browsable toolkit catalog** — `toolkits sync`/`stats` builds a local grid of thousands of MCP +
-  HTTP toolkits from the MCP Registry + APIs.guru (CC0), with shipped mount URLs checked for
-  parseable, concrete `http(s)` targets. Verified by `npm run verify:catalog` — 21/21.
-- **BM25F semantic search mode** — `find_tools(query)` ranks across thousands of mounted tools so the
-  agent's context never blows up. Verified by `npm run verify:search` — 21/21.
-
-See **[docs/ROADMAP.md](docs/ROADMAP.md)** for the phase-by-phase detail and
-**[docs/COMPOSIO-PARITY.md](docs/COMPOSIO-PARITY.md)** for the feature-by-feature comparison vs Composio.
-
-### Everything is verified by a deterministic oracle
-
-MCP Switchboard makes a lot of governance and honesty claims — "fails closed", "never auto-downloads",
-"metadata only", "a profile can only narrow". None of them are taken on faith. Every one is pinned by a
-**deterministic oracle**: a zero-dependency Node script that imports the *compiled* code, exercises the
-contract, and prints `N/N checks passed` — no model tokens, no flakiness, just code checking code. One
-command runs the build, a low-severity npm audit, and all twenty-six oracles:
-
-```bash
-npm run verify     # build + npm audit + 26 oracles = 1171 checks, all green
-```
-
-| Area | Oracle | Checks |
+| Provider definitions | Toolkit overlays | Notes |
 |---|---|---|
-| OAuth 2.1 + PKCE auth server | `verify:oauth` | 20 |
-| Decision webhooks | `verify:webhook` | 33 |
-| Poll-first triggers | `verify:triggers` | 60 |
-| Schema / response modifiers | `verify:modifiers` | 28 |
-| HTTP-tool servers | `verify:httptool` | 29 |
-| OpenAPI→MCP (`app2mcp`) | `verify:openapi` | 66 |
-| Auth schemes (bearer/api_key/basic/header) | `verify:auth` | 13 |
-| Cross-provider council | `verify:council` | 34 |
-| Toolkit catalog ingest | `verify:catalog` | 21 |
-| MCP Registry metadata | `verify:registry` | 17 |
-| BM25F `find_tools` search | `verify:search` | 21 |
-| Resources + prompts pass-through | `verify:resources-prompts` | 34 |
-| Classifier, child env, kill switch, resources and prompts through policy | `verify:policy-hardening` | 203 |
-| One-command `install`: merge helpers | `verify:install` | 58 |
-| Client registration for 8 clients: bridge entry, backup, probe, rollback, uninstall | `verify:installers` | 411 |
-| Offline local-LLM detect + wire | `verify:local-llm` | 107 |
-| Local AES-256-GCM vault | `verify:vault` | 43 |
-| Dashboard API | `verify:dashboard` | 73 |
-| Logs + I/O capture / redaction | `verify:audit` | 61 |
-| Atomic stores, live key/vault reload, DPAPI vault key | `verify:storage` | 102 |
-| Hash-chained audit log, rotation, secret-shape redaction | `verify:audit-chain` | 117 |
-| Outbound SSRF guard (address classes, pinned DNS, redirects, caps, openapi host rule) | `verify:netguard` | 158 |
-| Governed call path (router) | `verify:router` | 29 |
-| Profiles (narrow-only) | `verify:profiles` | 61 |
-| Rate limits + spend budgets | `verify:limits` | 61 |
-| Per-server circuit breaker | `verify:breaker` | 47 |
-| Retry / backoff | `verify:retry` | 54 |
-| Health endpoint (`/healthz`) | `verify:health` | 47 |
-| `switchboard doctor` preflight | `verify:doctor` | 51 |
-| `switchboard expose` tunnel | `verify:expose` | 83 |
-| Example config strict-loads | `verify:config` | 21 |
-| **Total** | **`npm run verify`** | **1171** |
+| `google` | `youtube`, `gmail`, `drive` | Google consent screen must be out of Testing or refresh tokens expire in 7 days |
+| `meta-instagram`, `meta-facebook` | none | Needs your own Meta app |
+| `higgsfield`, `elevenlabs` | none | Media generation; see owner setup |
+| `x`, `slack`, `notion` | `x`, `slack`, `notion` | OAuth app you create |
+| `github`, `linear`, `linkedin`, `tiktok`, `buffer` | none | See owner setup |
+| `everything` | n/a | Reference MCP server (`@modelcontextprotocol/server-everything`) mounted in the example config, useful for testing |
 
-## Docs
+The list above is read from `src/connectors/providers/` and `src/connectors/toolkits/`. **A definition existing is not the same as a proven live integration**: `switchboard coverage` counts a row as working only when an owner-run probe proved it. Per-platform steps, limits and checks: [docs/connectors/OWNER_SETUP.md](docs/connectors/OWNER_SETUP.md). Rules every connector must follow: [docs/CONNECTOR_CONTRACT.md](docs/CONNECTOR_CONTRACT.md).
 
-- **[Blueprint](docs/BLUEPRINT.md)** — the as-built architecture, module by module
-- [Vision & positioning](docs/VISION.md)
-- [Architecture overview](docs/ARCHITECTURE.md)
-- [Roadmap](docs/ROADMAP.md)
-- [Local toolkits (architecture)](docs/architecture/LOCAL_TOOLKITS.md) · [Owner setup per platform](docs/connectors/OWNER_SETUP.md)
-- [Competitive landscape](docs/COMPETITIVE.md) · [Composio parity, feature by feature](docs/COMPOSIO-PARITY.md)
-- [Example config](switchboard.config.example.yaml) · [search-mode example](examples/switchboard.config.yaml)
+Connect one provider:
 
-## Security
+```bash
+printf '%s' '<client-id>'     | node dist/cli.js vault set myapp_client_id
+printf '%s' '<client-secret>' | node dist/cli.js vault set myapp_client_secret
+node dist/cli.js authconfig add <provider> --client-id-ref myapp_client_id --client-secret-ref myapp_client_secret
+node dist/cli.js connect <provider> --account work
+node dist/cli.js accounts probe <provider>/work
+node dist/cli.js link <client> <toolkit>          # let a client use that toolkit
+```
 
-- Credentials live only in `~/.switchboard/vault.json`, **AES-256-GCM** encrypted with a key beside it:
-  DPAPI-wrapped (`vault.key.dpapi`) on Windows, a mode-0600 `vault.key` elsewhere. Nothing is transmitted
-  off the machine; the vault makes no network calls.
-- The HTTP endpoint binds to **127.0.0.1** by default — local-first, not exposed to the network.
-- Governance **fails closed**: a disabled server, an over-ceiling scope, or an unverifiable approval
-  context all result in *deny*, not a silent allow.
-- Found a vulnerability? Please report it privately (see [CONTRIBUTING.md](CONTRIBUTING.md)) rather
-  than opening a public issue.
+Token or key providers skip the app: `switchboard connect <provider> --token-stdin`.
 
-## Contributing
+## Security model
 
-Issues and PRs welcome — see **[CONTRIBUTING.md](CONTRIBUTING.md)**. The project is deliberately
-small and dependency-light (zero native deps); please keep it that way.
+- **Per-client keys.** Each client has its own key. `client add` and `client rotate` on a running gateway require an owner presence check; `client rm` does not, since revoking is always safe. Key files are user-scope protected (DPAPI on Windows, mode 0600 elsewhere).
+- **Policy per client per tool.** Every call is classified `read < write < full`, checked against the server ceiling and the client's `max_scope` and `max_risk`. Per-tool `enabled: false` is a hard deny. Upstream hints can only tighten a scope, never loosen it.
+- **Owner presence.** High-risk calls wait for an out-of-band approval (`switchboard approvals`) that only the running gateway signs, after a presence check (Windows Hello where available).
+- **Kill switch.** `switchboard kill on` refuses every tool call, resource read and prompt get; turning it off needs presence.
+- **Audit.** `audit.log` is a SHA-256 hash chain; `switchboard audit verify` reports the first break. Write and full calls log an attempt row first and fail closed.
+- **Secret hygiene.** Audit rows, errors and CLI output pass through a secret scrub (exact handled values, then token shapes). I/O capture in logs is off by default.
+- **Network guard.** Outbound connector calls go through a guarded fetch with a host lock (`src/netguard.ts`).
+
+What it does **not** do: it does not isolate two processes running as the same OS user, it has no multi-tenant mode, and it does not host anything publicly. See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for the full boundary and residual risks.
+
+## CLI reference
+
+Global option: `-c, --config <path>` (default `switchboard.config.yaml`). Run `switchboard <command> --help` for flags.
+
+| Command | Purpose |
+|---|---|
+| `init` | Create a starter config and home directory |
+| `serve` | Run the gateway (transports come from config) |
+| `dashboard` | Run only the HTTP endpoint and web console |
+| `doctor` | Check environment, config and credentials |
+| `list` | Mount every server and print the governed tool list |
+| `install <client>` / `uninstall <client>` | Register or remove Switchboard in an MCP client (preview, backup, probe, rollback) |
+| `bridge --client <id>` | Relay a client's stdio to the gateway, authenticating as that client |
+| `client add\|list\|rotate\|rm` | Register clients and manage their keys |
+| `apikey` | Keys for the HTTP `/mcp` endpoint (remote clients, tunnels) |
+| `link` / `unlink` / `links` | Grant or inspect which client may use which toolkit |
+| `connect`, `accounts`, `authconfig`, `providers` | Connect provider accounts and register OAuth apps |
+| `catalog`, `toolkits`, `coverage` | Browse providers and toolkits; honest working counts |
+| `vault` | Locally stored secrets |
+| `approvals` | List, show, approve or deny calls waiting for the owner |
+| `audit verify` | Walk the audit hash chain |
+| `kill on\|off\|status` | Global kill switch |
+| `profile` | Named, switchable views over servers and tools |
+| `expose` | Tunnel `/mcp` for remote clients such as ChatGPT (see threat model before use) |
+| `local-llm` | Detect a local OpenAI-compatible server for the offline council |
+
+## Protocol and compatibility
+
+Built on MCP SDK v2. The gateway serves protocol **2026-07-28** and also the handshake-era protocols `2025-11-25`, `2025-06-18` and `2025-03-26`, so older clients keep working. Details: [docs/MCP_SWITCHBOARD_BASELINE.md](docs/MCP_SWITCHBOARD_BASELINE.md).
+
+## Verification
+
+Correctness is checked by deterministic oracles: scripts that compute their own verdict and exit non-zero on failure, with no model in the loop. The current run is **46 oracles, 4373 checks, all passing**.
+
+```bash
+npm run build
+node scripts/run-oracles.mjs                      # all oracles, one table, sandboxed HOME
+node scripts/run-oracles.mjs --only bridge,vault  # a subset
+npm run verify                                    # build + npm audit + chain; stops at first failure
+```
+
+Each oracle runs with a throwaway `HOME` and `SWITCHBOARD_HOME`, and provider keys scrubbed from its environment. What the oracles do and do not prove: [docs/VALIDATION.md](docs/VALIDATION.md).
+
+## Documentation
+
+| Doc | Read it for |
+|---|---|
+| [ARCHITECTURE](docs/ARCHITECTURE.md) | Components and the single tool-call data flow |
+| [THREAT_MODEL](docs/THREAT_MODEL.md) | Trust boundaries, mitigations, residual risk |
+| [CONNECTOR_CONTRACT](docs/CONNECTOR_CONTRACT.md) | Rules every connector follows |
+| [RUNBOOK](docs/RUNBOOK.md) | Operating and recovering a deployment |
+| [VALIDATION](docs/VALIDATION.md) | Oracles, commands, what they prove |
+| [MCP_SWITCHBOARD_BASELINE](docs/MCP_SWITCHBOARD_BASELINE.md) | As-built baseline of this branch |
+| [PROVIDER_COST_COMPARISON](docs/PROVIDER_COST_COMPARISON.md) | Cost of providers vs hosted routers |
+| [COMPOSIO-PARITY](docs/COMPOSIO-PARITY.md) | Feature parity against a hosted hub |
+| [ROADMAP](docs/ROADMAP.md) | Phases shipped and planned |
+| [VISION](docs/VISION.md) | Problem and positioning |
+| [connectors/OWNER_SETUP](docs/connectors/OWNER_SETUP.md) | Per-platform OAuth app and key setup |
+
+## Status
+
+Version `0.1.0`, branch `vnext/governed-hub`. Alpha: the gateway, policy, presence, audit and bridge are covered by the oracles above; connector coverage grows as owners prove rows live. Planned work is in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## License
 
-[Apache-2.0](LICENSE) © MAS-AI Technologies.
-
+[Apache-2.0](LICENSE). See [NOTICE](NOTICE).
