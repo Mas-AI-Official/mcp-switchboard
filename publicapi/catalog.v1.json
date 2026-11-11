@@ -1,0 +1,661 @@
+{
+  "schema": "masai.publicapi.catalog/v1",
+  "catalog_version": "2026.11.05",
+  "generated_by": "hand-curated; every provider verified against its own docs and a live call",
+  "sources": [
+    {
+      "name": "public-apis/public-apis",
+      "url": "https://github.com/public-apis/public-apis",
+      "revision": "fbc3108977184f4e803b700c1c6f0903f563595b",
+      "role": "discovery only; entries are untrusted until verified"
+    },
+    {
+      "name": "APIs-guru/openapi-directory",
+      "url": "https://github.com/APIs-guru/openapi-directory",
+      "revision": "f04b8d0bcd39c52e1cf3ad7a5fe744709832ae49",
+      "role": "discovery only; none of the v1 providers needed its specs"
+    }
+  ],
+  "status_values": {
+    "VERIFIED_FREE": "no key, no cost, commercial use allowed by the provider's own terms, live call passed",
+    "FREE_TIER": "free up to a documented cap; paid above it",
+    "RESTRICTED": "works without a key but terms limit use (for example non-commercial only); never in a recommended set",
+    "PAID": "requires payment",
+    "UNAVAILABLE": "live call failed or service retired",
+    "UNVERIFIED": "listed in a directory, not yet checked; cannot be enabled"
+  },
+  "user_agent": "MAS-AI-PublicAPI/1.0 (+https://github.com/Mas-AI-Official/mcp-switchboard)",
+  "providers": [
+    {
+      "id": "frankfurter",
+      "name": "Frankfurter exchange rates",
+      "category": "currency",
+      "status": "VERIFIED_FREE",
+      "auth": "none",
+      "base_url": "https://api.frankfurter.dev",
+      "allowed_hosts": [
+        "api.frankfurter.dev"
+      ],
+      "docs_url": "https://frankfurter.dev",
+      "terms_url": "https://github.com/lineofflight/frankfurter",
+      "source_refs": [
+        "public-apis README line 646 at fbc3108",
+        "https://frankfurter.dev"
+      ],
+      "commercial_use": "yes",
+      "commercial_note": "frankfurter.dev: blended rates are free to use, no quotas, throttled only to prevent abuse (read 2026-11-05). Software licence not named on the page.",
+      "data_licence": "central bank reference rates",
+      "attribution": "Rates: Frankfurter (central bank reference data)",
+      "cost": "free",
+      "rate_limit": {
+        "min_interval_ms": 500,
+        "per_day": 500,
+        "note": "No published hard limit; local cap keeps us a polite client."
+      },
+      "privacy": "Sends only the currency codes the user typed.",
+      "timeout_ms": 10000,
+      "verified_at": "2026-11-05",
+      "recommended_for": [
+        "meetingops",
+        "daena"
+      ],
+      "apps": [
+        "meetingops",
+        "daena"
+      ],
+      "tools": [
+        {
+          "name": "latest_rates",
+          "title": "Latest exchange rates",
+          "description": "Latest ECB reference rates for one base currency.",
+          "path": "/v1/latest",
+          "params": [
+            {
+              "name": "base",
+              "in": "query",
+              "type": "string",
+              "required": true,
+              "pattern": "^[A-Z]{3}$",
+              "description": "ISO 4217 code, for example USD"
+            },
+            {
+              "name": "symbols",
+              "in": "query",
+              "type": "string",
+              "required": false,
+              "pattern": "^[A-Z]{3}(,[A-Z]{3}){0,9}$",
+              "description": "Up to 10 comma-separated codes"
+            }
+          ],
+          "result": {
+            "fields": {
+              "base": "base",
+              "date": "date",
+              "rates": "rates"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "wikipedia",
+      "name": "Wikipedia page summary",
+      "category": "reference",
+      "status": "VERIFIED_FREE",
+      "auth": "none",
+      "base_url": "https://en.wikipedia.org",
+      "allowed_hosts": [
+        "en.wikipedia.org"
+      ],
+      "docs_url": "https://en.wikipedia.org/api/rest_v1/",
+      "terms_url": "https://foundation.wikimedia.org/wiki/Policy:Terms_of_Use",
+      "source_refs": [
+        "public-apis README line 2020 at fbc3108",
+        "https://meta.wikimedia.org/wiki/User-Agent_policy"
+      ],
+      "commercial_use": "conditional",
+      "commercial_note": "Text is CC BY-SA 4.0: commercial reuse allowed with attribution and share-alike; show the attribution and page link with every result. High-volume commercial reuse belongs on Wikimedia Enterprise; our per-user lookups are low volume. rest_v1 answered live 2026-11-05; watch for deprecation.",
+      "data_licence": "CC BY-SA 4.0",
+      "attribution": "From Wikipedia, CC BY-SA 4.0",
+      "cost": "free",
+      "rate_limit": {
+        "min_interval_ms": 300,
+        "per_day": 1000,
+        "note": "Wikimedia: 200 req/min with a compliant User-Agent, 10/min without (mediawiki.org/wiki/Wikimedia_APIs/Rate_limits)."
+      },
+      "privacy": "Sends only the article title the user typed.",
+      "timeout_ms": 10000,
+      "verified_at": "2026-11-05",
+      "recommended_for": [
+        "meetingops",
+        "daena",
+        "clippilot"
+      ],
+      "apps": [
+        "meetingops",
+        "daena",
+        "clippilot"
+      ],
+      "tools": [
+        {
+          "name": "page_summary",
+          "title": "Look up a topic",
+          "description": "Short neutral summary of a Wikipedia article, with its link.",
+          "path": "/api/rest_v1/page/summary/{title}",
+          "params": [
+            {
+              "name": "title",
+              "in": "path",
+              "type": "string",
+              "required": true,
+              "max_length": 120,
+              "description": "Article title, for example Model Context Protocol"
+            }
+          ],
+          "result": {
+            "fields": {
+              "title": "title",
+              "description": "description",
+              "extract": "extract",
+              "url": "content_urls.desktop.page"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "wikidata",
+      "name": "Wikidata entity search",
+      "category": "reference",
+      "status": "VERIFIED_FREE",
+      "auth": "none",
+      "base_url": "https://www.wikidata.org",
+      "allowed_hosts": [
+        "www.wikidata.org"
+      ],
+      "docs_url": "https://www.wikidata.org/w/api.php?action=help&modules=wbsearchentities",
+      "terms_url": "https://foundation.wikimedia.org/wiki/Policy:Terms_of_Use",
+      "source_refs": [
+        "https://www.wikidata.org/wiki/Wikidata:Licensing",
+        "https://foundation.wikimedia.org/wiki/Policy:Wikimedia_Foundation_User-Agent_Policy"
+      ],
+      "commercial_use": "yes",
+      "commercial_note": "Wikidata structured data is CC0 (public domain dedication); commercial reuse allowed without attribution.",
+      "data_licence": "CC0 1.0",
+      "attribution": "Data: Wikidata (CC0)",
+      "cost": "free",
+      "rate_limit": {
+        "min_interval_ms": 300,
+        "per_day": 1000,
+        "note": "Wikimedia: 200 req/min with a compliant User-Agent."
+      },
+      "privacy": "Sends only the name the user typed (a public company, place or topic).",
+      "timeout_ms": 10000,
+      "verified_at": "2026-11-05",
+      "recommended_for": [
+        "meetingops",
+        "daena",
+        "clippilot"
+      ],
+      "apps": [
+        "meetingops",
+        "daena",
+        "clippilot"
+      ],
+      "tools": [
+        {
+          "name": "search_entities",
+          "title": "Identify a public entity",
+          "description": "Find a public company, organisation, place or topic and its one-line description.",
+          "path": "/w/api.php",
+          "query_fixed": {
+            "action": "wbsearchentities",
+            "format": "json",
+            "language": "en",
+            "limit": "5"
+          },
+          "params": [
+            {
+              "name": "search",
+              "in": "query",
+              "type": "string",
+              "required": true,
+              "max_length": 80
+            }
+          ],
+          "result": {
+            "root": "search",
+            "max_items": 5,
+            "fields": {
+              "id": "id",
+              "label": "display.label.value",
+              "description": "display.description.value",
+              "url": "concepturi"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "wikimedia-commons",
+      "name": "Wikimedia Commons media search",
+      "category": "media",
+      "status": "VERIFIED_FREE",
+      "auth": "none",
+      "base_url": "https://commons.wikimedia.org",
+      "allowed_hosts": [
+        "commons.wikimedia.org"
+      ],
+      "docs_url": "https://commons.wikimedia.org/w/api.php",
+      "terms_url": "https://foundation.wikimedia.org/wiki/Policy:Terms_of_Use",
+      "source_refs": [
+        "https://commons.wikimedia.org/wiki/Commons:Reusing_content_outside_Wikimedia",
+        "https://foundation.wikimedia.org/wiki/Policy:Wikimedia_Foundation_User-Agent_Policy"
+      ],
+      "commercial_use": "conditional",
+      "commercial_note": "Commons only hosts freely licensed or public-domain files; each file's licence and author are returned and must be credited. Some licences (share-alike) carry conditions; a few files have extra restrictions (trademarks, personality rights) the user must check.",
+      "data_licence": "per file (free licences or public domain)",
+      "attribution": "Media: Wikimedia Commons; credit each file's author and licence",
+      "cost": "free",
+      "rate_limit": {
+        "min_interval_ms": 300,
+        "per_day": 500,
+        "note": "Wikimedia: 200 req/min with a compliant User-Agent."
+      },
+      "privacy": "Sends only the search words the user typed.",
+      "timeout_ms": 12000,
+      "verified_at": "2026-11-05",
+      "recommended_for": [
+        "clippilot"
+      ],
+      "apps": [
+        "clippilot",
+        "daena"
+      ],
+      "tools": [
+        {
+          "name": "search_media",
+          "title": "Find freely licensed media",
+          "description": "Files on Wikimedia Commons with URL, author and licence.",
+          "path": "/w/api.php",
+          "query_fixed": {
+            "action": "query",
+            "format": "json",
+            "formatversion": "2",
+            "generator": "search",
+            "gsrnamespace": "6",
+            "gsrlimit": "10",
+            "prop": "imageinfo",
+            "iiprop": "url|extmetadata",
+            "iiextmetadatafilter": "LicenseShortName|Artist|LicenseUrl"
+          },
+          "params": [
+            {
+              "name": "gsrsearch",
+              "in": "query",
+              "type": "string",
+              "required": true,
+              "max_length": 80,
+              "description": "Search words"
+            }
+          ],
+          "result": {
+            "root": "query.pages",
+            "max_items": 10,
+            "fields": {
+              "title": "title",
+              "url": "imageinfo.0.url",
+              "source_page": "imageinfo.0.descriptionurl",
+              "license": "imageinfo.0.extmetadata.LicenseShortName.value",
+              "license_url": "imageinfo.0.extmetadata.LicenseUrl.value",
+              "author_html": "imageinfo.0.extmetadata.Artist.value"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "openverse",
+      "name": "Openverse openly licensed images",
+      "category": "media",
+      "status": "FREE_TIER",
+      "auth": "none",
+      "base_url": "https://api.openverse.org",
+      "allowed_hosts": [
+        "api.openverse.org"
+      ],
+      "docs_url": "https://api.openverse.org/v1/",
+      "terms_url": "https://docs.openverse.org/terms_of_service.html",
+      "source_refs": [
+        "not in public-apis at fbc3108; official docs https://api.openverse.org/v1/"
+      ],
+      "commercial_use": "conditional",
+      "commercial_note": "API is free; terms reserve the right to charge for commercial use and require 'made with Openverse, not endorsed' wording. Every result carries its own CC licence; tool forces license_type=commercial and the user must keep each attribution and verify the licence.",
+      "data_licence": "per item (Creative Commons or public domain)",
+      "attribution": "Made with Openverse (not endorsed by Openverse); each item keeps its own creator and licence",
+      "cost": "free",
+      "rate_limit": {
+        "min_interval_ms": 1000,
+        "per_day": 100,
+        "note": "Anonymous limits not published (UNKNOWN). Live 2026-11-05: one HTTP 504, cold calls 10.9 to 13.7 s, warm 0.08 s; treat as best effort."
+      },
+      "privacy": "Sends only the search words the user typed.",
+      "timeout_ms": 25000,
+      "verified_at": "2026-11-05",
+      "recommended_for": [
+        "clippilot"
+      ],
+      "apps": [
+        "clippilot"
+      ],
+      "tools": [
+        {
+          "name": "search_images",
+          "title": "Find commercially usable images",
+          "description": "Openly licensed images that allow commercial use, with licence and attribution.",
+          "path": "/v1/images/",
+          "query_fixed": {
+            "license_type": "commercial",
+            "page_size": "10"
+          },
+          "params": [
+            {
+              "name": "q",
+              "in": "query",
+              "type": "string",
+              "required": true,
+              "max_length": 80
+            }
+          ],
+          "result": {
+            "root": "results",
+            "max_items": 10,
+            "fields": {
+              "title": "title",
+              "creator": "creator",
+              "license": "license",
+              "license_version": "license_version",
+              "license_url": "license_url",
+              "attribution": "attribution",
+              "url": "url",
+              "source_page": "foreign_landing_url"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "nager-date",
+      "name": "Nager.Date public holidays",
+      "category": "calendar",
+      "status": "RESTRICTED",
+      "auth": "none",
+      "base_url": "https://date.nager.at",
+      "allowed_hosts": [
+        "date.nager.at"
+      ],
+      "docs_url": "https://nagerholidays.com/Api",
+      "terms_url": "https://nagerholidays.com/legal/termsofservice",
+      "source_refs": [
+        "public-apis README line 461 at fbc3108",
+        "https://date.nager.at/Api"
+      ],
+      "commercial_use": "no",
+      "commercial_note": "Provider terms (nagerholidays.com/legal/termsofservice, read 2026-11-05) limit the free Web API to private or non-profit use; commercial use requires sponsorship. The site moved to nagerholidays.com (v4); v3 still answered live on 2026-11-05.",
+      "data_licence": "unknown (not stated by provider)",
+      "attribution": "Holidays: Nager.Date",
+      "cost": "free",
+      "rate_limit": {
+        "min_interval_ms": 500,
+        "per_day": 300,
+        "note": "No published hard limit; local cap."
+      },
+      "privacy": "Sends only a year and a country code.",
+      "timeout_ms": 10000,
+      "verified_at": "2026-11-05",
+      "recommended_for": [],
+      "apps": [
+        "meetingops",
+        "daena",
+        "research"
+      ],
+      "tools": [
+        {
+          "name": "public_holidays",
+          "title": "Public holidays",
+          "description": "Public holidays for a country and year, to avoid scheduling on them.",
+          "path": "/api/v3/PublicHolidays/{year}/{country}",
+          "params": [
+            {
+              "name": "year",
+              "in": "path",
+              "type": "integer",
+              "required": true,
+              "min": 1975,
+              "max": 2100
+            },
+            {
+              "name": "country",
+              "in": "path",
+              "type": "string",
+              "required": true,
+              "pattern": "^[A-Z]{2}$",
+              "description": "ISO 3166-1 alpha-2, for example CA"
+            }
+          ],
+          "result": {
+            "root": "",
+            "max_items": 40,
+            "fields": {
+              "date": "date",
+              "name": "name",
+              "local_name": "localName",
+              "global": "global",
+              "regions": "counties"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "musicbrainz",
+      "name": "MusicBrainz music metadata",
+      "category": "media-metadata",
+      "status": "RESTRICTED",
+      "auth": "none",
+      "base_url": "https://musicbrainz.org",
+      "allowed_hosts": [
+        "musicbrainz.org"
+      ],
+      "docs_url": "https://musicbrainz.org/doc/MusicBrainz_API",
+      "terms_url": "https://musicbrainz.org/doc/MusicBrainz_API/Rate_Limiting",
+      "source_refs": [
+        "public-apis README line 1878 at fbc3108"
+      ],
+      "commercial_use": "no",
+      "commercial_note": "Provider: non-commercial use of the web service is free; commercial use needs a MetaBrainz commercial plan. Core data CC0, supplementary data CC BY-NC-SA 3.0. Metadata only: grants no rights to the music.",
+      "data_licence": "CC0 (core data)",
+      "attribution": "Metadata: MusicBrainz",
+      "cost": "free",
+      "rate_limit": {
+        "min_interval_ms": 1100,
+        "per_day": 300,
+        "note": "Provider limit is 1 request per second per client."
+      },
+      "privacy": "Sends only the search words the user typed.",
+      "timeout_ms": 15000,
+      "verified_at": "2026-11-05",
+      "recommended_for": [],
+      "apps": [
+        "clippilot"
+      ],
+      "tools": [
+        {
+          "name": "search_recordings",
+          "title": "Identify a recording",
+          "description": "Recording title, artist and release metadata. Does not grant usage rights.",
+          "path": "/ws/2/recording",
+          "query_fixed": {
+            "fmt": "json",
+            "limit": "5"
+          },
+          "params": [
+            {
+              "name": "query",
+              "in": "query",
+              "type": "string",
+              "required": true,
+              "max_length": 80
+            }
+          ],
+          "result": {
+            "root": "recordings",
+            "max_items": 5,
+            "fields": {
+              "id": "id",
+              "title": "title",
+              "artist": "artist-credit.0.name",
+              "first_release": "first-release-date",
+              "length_ms": "length"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "open-meteo",
+      "name": "Open-Meteo weather",
+      "category": "weather",
+      "status": "RESTRICTED",
+      "auth": "none",
+      "base_url": "https://api.open-meteo.com",
+      "allowed_hosts": [
+        "api.open-meteo.com"
+      ],
+      "docs_url": "https://open-meteo.com/en/docs",
+      "terms_url": "https://open-meteo.com/en/terms",
+      "source_refs": [
+        "public-apis README line 1108 at fbc3108 (listed as non-commercial)"
+      ],
+      "commercial_use": "no",
+      "commercial_note": "Free tier is non-commercial; subscriptions and advertising count as commercial (open-meteo.com/en/terms, read 2026-11-05). A commercial app needs a paid plan.",
+      "data_licence": "CC BY 4.0",
+      "attribution": "Weather data by Open-Meteo.com, CC BY 4.0",
+      "cost": "free for non-commercial use",
+      "rate_limit": {
+        "min_interval_ms": 1000,
+        "per_day": 200,
+        "note": "Free tier: 600/min, 5,000/h, 10,000/day per IP (open-meteo.com/en/terms)."
+      },
+      "privacy": "Sends coordinates the user typed; never the device location.",
+      "timeout_ms": 10000,
+      "verified_at": "2026-11-05",
+      "recommended_for": [],
+      "apps": [
+        "meetingops",
+        "daena",
+        "research"
+      ],
+      "tools": [
+        {
+          "name": "current_weather",
+          "title": "Current weather",
+          "description": "Current temperature and wind at a latitude and longitude.",
+          "path": "/v1/forecast",
+          "query_fixed": {
+            "current": "temperature_2m,wind_speed_10m"
+          },
+          "params": [
+            {
+              "name": "latitude",
+              "in": "query",
+              "type": "number",
+              "required": true,
+              "min": -90,
+              "max": 90
+            },
+            {
+              "name": "longitude",
+              "in": "query",
+              "type": "number",
+              "required": true,
+              "min": -180,
+              "max": 180
+            }
+          ],
+          "result": {
+            "fields": {
+              "time": "current.time",
+              "temperature_c": "current.temperature_2m",
+              "wind_kmh": "current.wind_speed_10m"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "free-dictionary",
+      "name": "Free Dictionary API",
+      "category": "reference",
+      "status": "UNVERIFIED",
+      "auth": "none",
+      "base_url": "https://api.dictionaryapi.dev",
+      "allowed_hosts": [
+        "api.dictionaryapi.dev"
+      ],
+      "docs_url": "https://dictionaryapi.dev/",
+      "terms_url": "https://github.com/meetDeveloper/freeDictionaryAPI",
+      "source_refs": [
+        "public-apis README line 933 at fbc3108"
+      ],
+      "commercial_use": "unknown",
+      "commercial_note": "No terms, data licence or rate limit published (dictionaryapi.dev, read 2026-11-05); repo code is GPL-3.0, which is not a data licence. Cannot be enabled until terms exist.",
+      "data_licence": "unknown",
+      "attribution": "Definitions: Free Dictionary API",
+      "cost": "free",
+      "rate_limit": {
+        "min_interval_ms": 500,
+        "per_day": 300,
+        "note": "No published limit."
+      },
+      "privacy": "Sends only the word the user typed.",
+      "timeout_ms": 10000,
+      "verified_at": "2026-11-05",
+      "recommended_for": [],
+      "apps": [
+        "meetingops",
+        "research"
+      ],
+      "tools": [
+        {
+          "name": "define",
+          "title": "Define a word",
+          "description": "Definitions and parts of speech for an English word.",
+          "path": "/api/v2/entries/en/{word}",
+          "params": [
+            {
+              "name": "word",
+              "in": "path",
+              "type": "string",
+              "required": true,
+              "pattern": "^[A-Za-z][A-Za-z' -]{0,39}$"
+            }
+          ],
+          "result": {
+            "root": "",
+            "max_items": 3,
+            "fields": {
+              "word": "word",
+              "phonetic": "phonetic",
+              "meanings": "meanings"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "field_notes": {
+    "apps": "apps that may offer this provider at all; others get PROVIDER_UNAVAILABLE",
+    "recommended_for": "subset of apps enabled by Enable recommended (only if eligible)"
+  }
+}
