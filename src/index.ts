@@ -55,3 +55,18 @@ export {
   type CatalogSnapshot,
 } from "./catalog.js";
 export type * from "./types.js";
+export {
+  PublicApiClient,
+  planCall,
+  shapeResult,
+  eligibility,
+  encodeComponent,
+  emptyState,
+  fileStateStore,
+  loadBundledCatalog,
+  type Catalog as PublicApiCatalog,
+  type AppProfile as PublicApiAppProfile,
+  type PublicApiState,
+  type CallResult as PublicApiCallResult,
+  type FirstRunChoice as PublicApiFirstRunChoice,
+} from "./publicapi.js";

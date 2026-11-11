@@ -1,0 +1,645 @@
+{
+  "schema": "masai.publicapi.conformance/v1",
+  "note": "Every executor (TypeScript in mcp-switchboard, Python in MeetingOPS, any future port) must pass every case with zero network. 'plan' cases check the request an executor would send, or the refusal it returns before any network. 'shape' cases check result shaping of a canned provider body.",
+  "default_state": {
+    "consent": "granted",
+    "enabled": [
+      "frankfurter",
+      "wikipedia",
+      "wikidata",
+      "wikimedia-commons",
+      "openverse"
+    ]
+  },
+  "plan": [
+    {
+      "name": "builds query url",
+      "app": {
+        "id": "meetingops",
+        "commercial": true
+      },
+      "provider": "frankfurter",
+      "tool": "latest_rates",
+      "args": {
+        "base": "USD",
+        "symbols": "CAD,EUR"
+      },
+      "expect": {
+        "url": "https://api.frankfurter.dev/v1/latest?base=USD&symbols=CAD%2CEUR"
+      }
+    },
+    {
+      "name": "optional arg omitted",
+      "app": {
+        "id": "meetingops",
+        "commercial": true
+      },
+      "provider": "frankfurter",
+      "tool": "latest_rates",
+      "args": {
+        "base": "USD"
+      },
+      "expect": {
+        "url": "https://api.frankfurter.dev/v1/latest?base=USD"
+      }
+    },
+    {
+      "name": "path params are encoded strictly",
+      "app": {
+        "id": "meetingops",
+        "commercial": true
+      },
+      "provider": "wikipedia",
+      "tool": "page_summary",
+      "args": {
+        "title": "C++ (it's) a/b"
+      },
+      "expect": {
+        "url": "https://en.wikipedia.org/api/rest_v1/page/summary/C%2B%2B%20%28it%27s%29%20a%2Fb"
+      }
+    },
+    {
+      "name": "fixed query first, then args",
+      "app": {
+        "id": "clippilot",
+        "commercial": true
+      },
+      "provider": "wikimedia-commons",
+      "tool": "search_media",
+      "args": {
+        "gsrsearch": "sunset city"
+      },
+      "expect": {
+        "url": "https://commons.wikimedia.org/w/api.php?action=query&format=json&formatversion=2&generator=search&gsrnamespace=6&gsrlimit=10&prop=imageinfo&iiprop=url%7Cextmetadata&iiextmetadatafilter=LicenseShortName%7CArtist%7CLicenseUrl&gsrsearch=sunset%20city"
+      }
+    },
+    {
+      "name": "integral number has no decimals",
+      "app": {
+        "id": "research",
+        "commercial": false
+      },
+      "state": {
+        "consent": "granted",
+        "enabled": [
+          "open-meteo"
+        ]
+      },
+      "provider": "open-meteo",
+      "tool": "current_weather",
+      "args": {
+        "latitude": 43.0,
+        "longitude": -79.38
+      },
+      "expect": {
+        "url": "https://api.open-meteo.com/v1/forecast?current=temperature_2m%2Cwind_speed_10m&latitude=43&longitude=-79.38"
+      }
+    },
+    {
+      "name": "no request before consent",
+      "app": {
+        "id": "meetingops",
+        "commercial": true
+      },
+      "state": {
+        "consent": "unset",
+        "enabled": []
+      },
+      "provider": "frankfurter",
+      "tool": "latest_rates",
+      "args": {
+        "base": "USD"
+      },
+      "expect": {
+        "error": "CONSENT_REQUIRED"
+      }
+    },
+    {
+      "name": "declined consent blocks",
+      "app": {
+        "id": "meetingops",
+        "commercial": true
+      },
+      "state": {
+        "consent": "declined",
+        "enabled": [
+          "frankfurter"
+        ]
+      },
+      "provider": "frankfurter",
+      "tool": "latest_rates",
+      "args": {
+        "base": "USD"
+      },
+      "expect": {
+        "error": "CONSENT_REQUIRED"
+      }
+    },
+    {
+      "name": "provider switched off",
+      "app": {
+        "id": "meetingops",
+        "commercial": true
+      },
+      "state": {
+        "consent": "granted",
+        "enabled": [
+          "wikipedia"
+        ]
+      },
+      "provider": "frankfurter",
+      "tool": "latest_rates",
+      "args": {
+        "base": "USD"
+      },
+      "expect": {
+        "error": "PROVIDER_DISABLED"
+      }
+    },
+    {
+      "name": "restricted provider refused in a commercial app even if enabled",
+      "app": {
+        "id": "meetingops",
+        "commercial": true
+      },
+      "state": {
+        "consent": "granted",
+        "enabled": [
+          "nager-date"
+        ]
+      },
+      "provider": "nager-date",
+      "tool": "public_holidays",
+      "args": {
+        "year": 2026,
+        "country": "CA"
+      },
+      "expect": {
+        "error": "PROVIDER_UNAVAILABLE"
+      }
+    },
+    {
+      "name": "unverified provider never runs",
+      "app": {
+        "id": "research",
+        "commercial": false
+      },
+      "state": {
+        "consent": "granted",
+        "enabled": [
+          "free-dictionary"
+        ]
+      },
+      "provider": "free-dictionary",
+      "tool": "define",
+      "args": {
+        "word": "agenda"
+      },
+      "expect": {
+        "error": "PROVIDER_UNAVAILABLE"
+      }
+    },
+    {
+      "name": "provider not offered in this app",
+      "app": {
+        "id": "meetingops",
+        "commercial": true
+      },
+      "state": {
+        "consent": "granted",
+        "enabled": [
+          "openverse"
+        ]
+      },
+      "provider": "openverse",
+      "tool": "search_images",
+      "args": {
+        "q": "city"
+      },
+      "expect": {
+        "error": "PROVIDER_UNAVAILABLE"
+      }
+    },
+    {
+      "name": "unknown provider",
+      "app": {
+        "id": "meetingops",
+        "commercial": true
+      },
+      "provider": "nope",
+      "tool": "x",
+      "args": {},
+      "expect": {
+        "error": "UNKNOWN_PROVIDER"
+      }
+    },
+    {
+      "name": "unknown tool",
+      "app": {
+        "id": "meetingops",
+        "commercial": true
+      },
+      "provider": "frankfurter",
+      "tool": "nope",
+      "args": {},
+      "expect": {
+        "error": "UNKNOWN_TOOL"
+      }
+    },
+    {
+      "name": "missing required arg",
+      "app": {
+        "id": "meetingops",
+        "commercial": true
+      },
+      "provider": "frankfurter",
+      "tool": "latest_rates",
+      "args": {},
+      "expect": {
+        "error": "INVALID_ARGS"
+      }
+    },
+    {
+      "name": "unknown arg refused",
+      "app": {
+        "id": "meetingops",
+        "commercial": true
+      },
+      "provider": "frankfurter",
+      "tool": "latest_rates",
+      "args": {
+        "base": "USD",
+        "transcript": "x"
+      },
+      "expect": {
+        "error": "INVALID_ARGS"
+      }
+    },
+    {
+      "name": "pattern enforced",
+      "app": {
+        "id": "meetingops",
+        "commercial": true
+      },
+      "provider": "frankfurter",
+      "tool": "latest_rates",
+      "args": {
+        "base": "usd"
+      },
+      "expect": {
+        "error": "INVALID_ARGS"
+      }
+    },
+    {
+      "name": "max_length stops pasting private text",
+      "app": {
+        "id": "meetingops",
+        "commercial": true
+      },
+      "provider": "wikipedia",
+      "tool": "page_summary",
+      "args": {
+        "title": "In the meeting today Sarah said the merger with Acme closes Friday and the price is forty million dollars which nobody outside the room may know yet okay"
+      },
+      "expect": {
+        "error": "INVALID_ARGS"
+      }
+    },
+    {
+      "name": "integer type enforced",
+      "app": {
+        "id": "research",
+        "commercial": false
+      },
+      "state": {
+        "consent": "granted",
+        "enabled": [
+          "nager-date"
+        ]
+      },
+      "provider": "nager-date",
+      "tool": "public_holidays",
+      "args": {
+        "year": "2026",
+        "country": "CA"
+      },
+      "expect": {
+        "error": "INVALID_ARGS"
+      }
+    },
+    {
+      "name": "boolean is not a number",
+      "app": {
+        "id": "research",
+        "commercial": false
+      },
+      "state": {
+        "consent": "granted",
+        "enabled": [
+          "open-meteo"
+        ]
+      },
+      "provider": "open-meteo",
+      "tool": "current_weather",
+      "args": {
+        "latitude": true,
+        "longitude": 1
+      },
+      "expect": {
+        "error": "INVALID_ARGS"
+      }
+    },
+    {
+      "name": "range enforced",
+      "app": {
+        "id": "research",
+        "commercial": false
+      },
+      "state": {
+        "consent": "granted",
+        "enabled": [
+          "open-meteo"
+        ]
+      },
+      "provider": "open-meteo",
+      "tool": "current_weather",
+      "args": {
+        "latitude": 91,
+        "longitude": 1
+      },
+      "expect": {
+        "error": "INVALID_ARGS"
+      }
+    },
+    {
+      "name": "min interval rate limit",
+      "app": {
+        "id": "meetingops",
+        "commercial": true
+      },
+      "state": {
+        "consent": "granted",
+        "enabled": [
+          "frankfurter"
+        ],
+        "usage": {
+          "frankfurter": {
+            "day": "2026-11-05",
+            "count": 1,
+            "last_ms": 1000000
+          }
+        }
+      },
+      "now_ms": 1000100,
+      "today": "2026-11-05",
+      "provider": "frankfurter",
+      "tool": "latest_rates",
+      "args": {
+        "base": "USD"
+      },
+      "expect": {
+        "error": "RATE_LIMITED"
+      }
+    },
+    {
+      "name": "daily quota",
+      "app": {
+        "id": "meetingops",
+        "commercial": true
+      },
+      "state": {
+        "consent": "granted",
+        "enabled": [
+          "frankfurter"
+        ],
+        "usage": {
+          "frankfurter": {
+            "day": "2026-11-05",
+            "count": 500,
+            "last_ms": 1
+          }
+        }
+      },
+      "now_ms": 1000000000,
+      "today": "2026-11-05",
+      "provider": "frankfurter",
+      "tool": "latest_rates",
+      "args": {
+        "base": "USD"
+      },
+      "expect": {
+        "error": "RATE_LIMITED"
+      }
+    },
+    {
+      "name": "quota resets next day",
+      "app": {
+        "id": "meetingops",
+        "commercial": true
+      },
+      "state": {
+        "consent": "granted",
+        "enabled": [
+          "frankfurter"
+        ],
+        "usage": {
+          "frankfurter": {
+            "day": "2026-11-04",
+            "count": 500,
+            "last_ms": 1
+          }
+        }
+      },
+      "now_ms": 1000000000,
+      "today": "2026-11-05",
+      "provider": "frankfurter",
+      "tool": "latest_rates",
+      "args": {
+        "base": "USD"
+      },
+      "expect": {
+        "url": "https://api.frankfurter.dev/v1/latest?base=USD"
+      }
+    }
+  ],
+  "shape": [
+    {
+      "name": "object fields",
+      "provider": "frankfurter",
+      "tool": "latest_rates",
+      "body": {
+        "amount": 1.0,
+        "base": "USD",
+        "date": "2026-11-05",
+        "rates": {
+          "CAD": 1.3966
+        }
+      },
+      "expect": {
+        "base": "USD",
+        "date": "2026-11-05",
+        "rates": {
+          "CAD": 1.3966
+        }
+      }
+    },
+    {
+      "name": "nested path and missing field is null",
+      "provider": "wikipedia",
+      "tool": "page_summary",
+      "body": {
+        "title": "Canada",
+        "extract": "Canada is a country.",
+        "content_urls": {
+          "desktop": {
+            "page": "https://en.wikipedia.org/wiki/Canada"
+          }
+        }
+      },
+      "expect": {
+        "title": "Canada",
+        "description": null,
+        "extract": "Canada is a country.",
+        "url": "https://en.wikipedia.org/wiki/Canada"
+      }
+    },
+    {
+      "name": "list root with index path and max_items",
+      "provider": "wikidata",
+      "tool": "search_entities",
+      "body": {
+        "search": [
+          {
+            "id": "Q1",
+            "concepturi": "http://www.wikidata.org/entity/Q1",
+            "display": {
+              "label": {
+                "value": "A"
+              },
+              "description": {
+                "value": "first"
+              }
+            }
+          },
+          {
+            "id": "Q2",
+            "concepturi": "http://www.wikidata.org/entity/Q2",
+            "display": {
+              "label": {
+                "value": "B"
+              }
+            }
+          },
+          {
+            "id": "Q3"
+          },
+          {
+            "id": "Q4"
+          },
+          {
+            "id": "Q5"
+          },
+          {
+            "id": "Q6"
+          }
+        ]
+      },
+      "expect": [
+        {
+          "id": "Q1",
+          "label": "A",
+          "description": "first",
+          "url": "http://www.wikidata.org/entity/Q1"
+        },
+        {
+          "id": "Q2",
+          "label": "B",
+          "description": null,
+          "url": "http://www.wikidata.org/entity/Q2"
+        },
+        {
+          "id": "Q3",
+          "label": null,
+          "description": null,
+          "url": null
+        },
+        {
+          "id": "Q4",
+          "label": null,
+          "description": null,
+          "url": null
+        },
+        {
+          "id": "Q5",
+          "label": null,
+          "description": null,
+          "url": null
+        }
+      ]
+    },
+    {
+      "name": "array index into list",
+      "provider": "wikimedia-commons",
+      "tool": "search_media",
+      "body": {
+        "query": {
+          "pages": [
+            {
+              "title": "File:A.jpg",
+              "imageinfo": [
+                {
+                  "url": "https://upload.wikimedia.org/a.jpg",
+                  "descriptionurl": "https://commons.wikimedia.org/wiki/File:A.jpg",
+                  "extmetadata": {
+                    "LicenseShortName": {
+                      "value": "CC BY-SA 4.0"
+                    },
+                    "Artist": {
+                      "value": "Jo"
+                    },
+                    "LicenseUrl": {
+                      "value": "https://creativecommons.org/licenses/by-sa/4.0"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "expect": [
+        {
+          "title": "File:A.jpg",
+          "url": "https://upload.wikimedia.org/a.jpg",
+          "source_page": "https://commons.wikimedia.org/wiki/File:A.jpg",
+          "license": "CC BY-SA 4.0",
+          "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+          "author_html": "Jo"
+        }
+      ]
+    },
+    {
+      "name": "top-level list root",
+      "provider": "nager-date",
+      "tool": "public_holidays",
+      "body": [
+        {
+          "date": "2026-07-01",
+          "name": "Canada Day",
+          "localName": "Canada Day",
+          "global": true,
+          "counties": null
+        }
+      ],
+      "expect": [
+        {
+          "date": "2026-07-01",
+          "name": "Canada Day",
+          "local_name": "Canada Day",
+          "global": true,
+          "regions": null
+        }
+      ]
+    }
+  ]
+}
